@@ -27,7 +27,7 @@ Tiles are processed in raster order, so each tile's top and left neighbors are a
 
 Open [`docs/tile-simulator.html`](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html) in a browser to preview the tile layout for any image size and settings.
 
-You can see how I use it in my [`personal ComfyUI workflow`]("Chroma%20+%20z-image%20Hybrid%20workflow.json").
+You can see how I use it in my [`personal ComfyUI workflow`](Chroma%20+%20z-image%20Hybrid%20workflow.json).
 
 ## Masked refine
 
