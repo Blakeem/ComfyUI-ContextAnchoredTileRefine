@@ -1,0 +1,241 @@
+> **Source:** https://docs.comfy.org/registry/specifications (mdx source: `registry/specifications.mdx` in [Comfy-Org/docs](https://github.com/Comfy-Org/docs); page title "pyproject.toml")
+> **Doc set version:** docs.comfy.org (current, main branch)
+> **Retrieved:** 2026-07-22
+
+# Specifications
+
+The `pyproject.toml` file contains two main sections for ComfyUI custom nodes: `[project]` and `[tool.comfy]`. Below are the specifications for each section.
+
+## [project] Section
+
+### name (required)
+The node id uniquely identifies the custom node and will be used in URLs from the registry. Users can install the node by referencing this name:
+
+```bash
+comfy node install <node-id>
+```
+
+**Requirements:**
+- Must be less than 100 characters
+- Can only contain alphanumeric characters, hyphens, underscores, and periods
+- Cannot have consecutive special characters
+- Cannot start with a number or special character
+- Case-insensitive comparison
+
+**Best Practices:**
+- Use a short, descriptive name
+- Don't include "ComfyUI" in the name
+- Make it memorable and easy to type
+
+**Examples:**
+```toml
+name = "image-processor"      # ✅ Good: Simple and clear
+name = "super-resolution"     # ✅ Good: Describes functionality
+name = "ComfyUI-enhancer"    # ❌ Bad: Includes ComfyUI
+name = "123-tool"            # ❌ Bad: Starts with number
+```
+
+See the official [python documentation](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#name) for more details.
+
+### version (required)
+Uses [semantic versioning](https://semver.org/) with a three-digit version number X.Y.Z:
+
+- X (**MAJOR**): Breaking changes
+- Y (**MINOR**): New features (backwards compatible)
+- Z (**PATCH**): Bug fixes
+
+**Examples:**
+```toml
+version = "1.0.0"    # Initial release
+version = "1.1.0"    # Added new features
+version = "1.1.1"    # Bug fix
+version = "2.0.0"    # Breaking changes
+```
+
+### license (optional)
+Specifies the license for your custom node. Can be specified in two ways:
+
+1. **File Reference:**
+```toml
+license = { file = "LICENSE" }     # ✅ Points to LICENSE file
+license = { file = "LICENSE.txt" } # ✅ Points to LICENSE.txt
+license = "LICENSE"                # ❌ Incorrect format
+```
+
+2. **License Name:**
+```toml
+license = { text = "MIT License" }  # ✅ Correct format
+license = { text = "Apache-2.0" }   # ✅ Correct format
+license = "MIT LICENSE"             # ❌ Incorrect format
+```
+
+Common licenses: [MIT](https://opensource.org/license/mit), [GPL](https://www.gnu.org/licenses/gpl-3.0.en.html), [Apache](https://www.apache.org/licenses/LICENSE-2.0)
+
+### description (recommended)
+A brief description of what your custom node does.
+
+```toml
+description = "A super resolution node for enhancing image quality"
+```
+
+### repository (required)
+Links to related resources:
+
+```toml
+[project.urls]
+Repository = "https://github.com/username/repository"
+```
+
+### urls (recommended)
+Links to related resources:
+
+```toml
+[project.urls]
+Documentation = "https://github.com/username/repository/wiki"
+"Bug Tracker" = "https://github.com/username/repository/issues"
+```
+
+### requires-python (recommended)
+Specifies the Python versions that your node supports:
+
+```toml
+requires-python = ">=3.8"        # Python 3.8 or higher
+requires-python = ">=3.8,<3.11"  # Python 3.8 up to (but not including) 3.11
+```
+
+### Frontend Version Compatibility (optional)
+If your node has specific requirements for which ComfyUI frontend versions it supports, you can specify this using the `comfyui-frontend-package` dependency. This package is published on [PyPI](https://pypi.org/project/comfyui-frontend-package/).
+
+For example, use this field when:
+- Your custom node uses frontend APIs that were introduced in a specific version
+- You've identified incompatibilities between your node and certain frontend versions
+- Your node requires specific UI features only available in newer frontend versions
+
+```toml
+[project]
+dependencies = [
+    "comfyui-frontend-package>=1.20.0"       # Requires frontend 1.20.0 or newer
+    "comfyui-frontend-package<=1.21.6"       # Restricts to frontend versions up to 1.21.6
+    "comfyui-frontend-package>=1.19,<1.22"   # Works with frontend 1.19 to 1.21.x
+    "comfyui-frontend-package~=1.20.0"       # Compatible with 1.20.x but not 1.21.0
+    "comfyui-frontend-package!=1.21.3"       # Works with any version except 1.21.3
+]
+```
+
+### classifiers (recommended)
+Use classifiers to specify operating system compatibility and GPU accelerators. This information is used to help users find the right node for their system.
+
+```toml
+[project]
+classifiers = [
+    # For OS-independent nodes (works on all operating systems)
+    "Operating System :: OS Independent",
+
+    # OR for OS-specific nodes, specify the supported systems:
+    "Operating System :: Microsoft :: Windows",  # Windows specific
+    "Operating System :: POSIX :: Linux",  # Linux specific
+    "Operating System :: MacOS",  # macOS specific
+    
+    # GPU Accelerator support
+    "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+    "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+    "Environment :: GPU :: Intel Arc",      # Intel Arc support
+    "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+    "Environment :: GPU :: Apple Metal",    # Apple Metal support
+]
+```
+
+## [tool.comfy] Section
+
+### PublisherId (required)
+Your unique publisher identifier, typically matching your GitHub username.
+
+**Examples:**
+```toml
+PublisherId = "john-doe"        # ✅ Matches GitHub username
+PublisherId = "image-wizard"    # ✅ Unique identifier
+```
+
+### DisplayName (optional)
+A user-friendly name for your custom node.
+
+```toml
+DisplayName = "Super Resolution Node"
+```
+
+### Icon (optional)
+URL to your custom node's icon that will be displayed on the ComfyUI Registry and ComfyUI-Manager.
+
+**Requirements:**
+- File types: SVG, PNG, JPG, or GIF
+- Maximum resolution: 400px × 400px
+- Aspect ratio should be square
+
+```toml
+Icon = "https://raw.githubusercontent.com/username/repo/main/icon.png"
+```
+
+### Banner (optional)
+URL to a larger banner image that will be displayed on the ComfyUI Registry and ComfyUI-Manager.
+
+**Requirements:**
+- File types: SVG, PNG, JPG, or GIF
+- Aspect ratio: 21:9
+
+```toml
+Banner = "https://raw.githubusercontent.com/username/repo/main/banner.png"
+```
+
+### requires-comfyui (optional)
+Specifies which version of ComfyUI your node is compatible with. This helps users ensure they have the correct version of ComfyUI installed.
+
+**Supported operators:** `<`, `>`, `<=`, `>=`, `~=`, `<>`, `!=` and ranges
+
+```toml
+requires-comfyui = ">=1.0.0"        # ComfyUI 1.0.0 or higher
+requires-comfyui = ">=1.0.0,<2.0.0"  # ComfyUI 1.0.0 up to (but not including) 2.0.0
+requires-comfyui = "~=1.0.0"         # Compatible release: version 1.0.0 or newer, but not version 2.0.0
+requires-comfyui = "!=1.2.3"         # Any version except 1.2.3
+requires-comfyui = ">0.1.3,<1.0.0"   # Greater than 0.1.3 and less than 1.0.0
+```
+
+### includes (optional)
+Specifies whether to force include certain specific folders. For some situations, such as custom nodes in frontend projects, the final packaged output folder might be included in .gitignore. In such cases, we need to force include it for registry use.
+
+```toml
+includes = ['dist']
+```
+
+> **Tip:** To exclude files from the published archive (the inverse of `includes`), see [`.comfyignore`](/registry/publishing#exclude-files-with-comfyignore) on the publishing page.
+
+## Complete Example
+```toml
+[project]
+name = "super-resolution-node"
+version = "1.0.0"
+description = "Enhance image quality using advanced super resolution techniques"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "comfyui-frontend-package<=1.21.6"  # Frontend version compatibility
+]
+classifiers = [
+    "Operating System :: OS Independent"  # Works on all operating systems
+]
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.urls]
+Repository = "https://github.com/username/super-resolution-node"
+Documentation = "https://github.com/username/super-resolution-node/wiki"
+"Bug Tracker" = "https://github.com/username/super-resolution-node/issues"
+
+[tool.comfy]
+PublisherId = "image-wizard"
+DisplayName = "Super Resolution Node"
+Icon = "https://raw.githubusercontent.com/username/super-resolution-node/main/icon.png"
+Banner = "https://raw.githubusercontent.com/username/super-resolution-node/main/banner.png"
+requires-comfyui = ">=1.0.0"  # ComfyUI version compatibility
+```

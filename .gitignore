@@ -1,0 +1,17 @@
+# AIPG workflows checkout (separate repo) + local Claude state
+aipg/
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

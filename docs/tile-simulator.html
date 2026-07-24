@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tile Layout Simulator — Context-Anchored Tile Upscale v2</title>
+<style>
+/* ============================== Theme ============================== */
+:root {
+  color-scheme: light dark;
+  --bg: #f2f4f7;
+  --panel: #ffffff;
+  --text: #1b2430;
+  --muted: #5b6b7c;
+  --border: #d9e0e8;
+  --accent: #0b6bcb;
+  --err: #b3251e;
+  --warn: #8a6100;
+  --ok: #1a7f37;
+  --err-bg: rgba(179, 37, 30, 0.08);
+  --warn-bg: rgba(154, 109, 0, 0.10);
+  --info-bg: rgba(11, 107, 203, 0.08);
+  --ok-bg: rgba(26, 127, 55, 0.10);
+  /* canvas drawing colors */
+  --canvas-bg: #fbfcfe;
+  --canvas-edge: #37424f;
+  --core-a: #d9e6f5;
+  --core-b: #bed4ec;
+  --core-line: rgba(55, 84, 116, 0.45);
+  /* context_overlap band, color-coded by side */
+  --kept-fill: rgba(26, 127, 55, 0.34);        /* kept + feathered (top/left) */
+  --kept-fill-hi: rgba(26, 127, 55, 0.62);
+  --discard-fill: rgba(179, 37, 30, 0.30);     /* sampled then discarded (right/bottom) */
+  --discard-fill-hi: rgba(179, 37, 30, 0.58);
+  /* context_anchor halo (frozen context, discarded) */
+  --ring-fill: rgba(126, 87, 235, 0.22);
+  --ring-fill-hi: rgba(126, 87, 235, 0.45);
+  --crop-line: #067a55;
+  --scrim: rgba(242, 244, 247, 0.55);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151b;
+    --panel: #1a2028;
+    --text: #e4eaf2;
+    --muted: #93a3b5;
+    --border: #2b3543;
+    --accent: #58a6ff;
+    --err: #ff6f61;
+    --warn: #e3b341;
+    --ok: #3fb950;
+    --err-bg: rgba(255, 111, 97, 0.12);
+    --warn-bg: rgba(227, 179, 65, 0.12);
+    --info-bg: rgba(88, 166, 255, 0.12);
+    --ok-bg: rgba(63, 185, 80, 0.12);
+    --canvas-bg: #0d1117;
+    --canvas-edge: #b8c4d0;
+    --core-a: #263a52;
+    --core-b: #335173;
+    --core-line: rgba(160, 190, 220, 0.40);
+    --kept-fill: rgba(63, 185, 80, 0.36);
+    --kept-fill-hi: rgba(63, 185, 80, 0.64);
+    --discard-fill: rgba(255, 111, 97, 0.32);
+    --discard-fill-hi: rgba(255, 111, 97, 0.60);
+    --ring-fill: rgba(167, 139, 250, 0.26);
+    --ring-fill-hi: rgba(167, 139, 250, 0.52);
+    --crop-line: #3ddc97;
+    --scrim: rgba(17, 21, 27, 0.55);
+  }
+}
+
+/* ============================== Layout ============================== */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font: 14px/1.45 system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+header {
+  padding: 10px 18px 8px;
+  border-bottom: 1px solid var(--border);
+}
+header h1 { margin: 0; font-size: 17px; font-weight: 650; }
+header p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+main {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  padding: 14px 18px;
+  min-height: 0;
+  align-items: stretch;
+}
+#viewport {
+  flex: 1;
+  min-width: 0;
+  min-height: 380px;
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#cv { display: block; width: 100%; height: 100%; cursor: crosshair; }
+#scale-note {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  pointer-events: none;
+}
+#tip {
+  position: absolute;
+  display: none;
+  max-width: 300px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.22);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  pointer-events: none;
+  z-index: 5;
+}
+#tip .t-title { font-weight: 650; margin-bottom: 3px; }
+#tip .t-ok { color: var(--ok); font-weight: 600; }
+#tip .t-bad { color: var(--err); font-weight: 650; }
+#tip .t-note { color: var(--muted); }
+
+aside {
+  width: 348px;
+  flex: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 13px;
+}
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* controls */
+.ctl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.ctl { display: flex; flex-direction: column; gap: 2px; }
+.ctl label { font-size: 12px; color: var(--muted); }
+.ctl input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 7px;
+  width: 100%;
+}
+.ctl input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#canvas-size {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+#canvas-size strong { font-variant-numeric: tabular-nums; }
+
+/* readouts */
+#readouts dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+#readouts dt { color: var(--muted); }
+#readouts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.class-list { margin: 2px 0 0; padding-left: 16px; }
+.class-list li { margin: 1px 0; font-variant-numeric: tabular-nums; }
+.callout {
+  margin-top: 9px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* warnings */
+#warnings ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#warnings li { padding: 7px 10px; border-radius: 6px; font-size: 12.8px; }
+#warnings li.w-err  { background: var(--err-bg);  color: var(--err);  font-weight: 600; }
+#warnings li.w-warn { background: var(--warn-bg); color: var(--warn); }
+#warnings li.w-info { background: var(--info-bg); }
+#warnings li.w-none { color: var(--muted); padding: 2px 0; }
+
+/* legend */
+#legend ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#legend li { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; }
+.chip {
+  flex: none;
+  width: 22px;
+  height: 14px;
+  margin-top: 2px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+.chip.split { background: linear-gradient(100deg, var(--core-a) 50%, var(--core-b) 50%); }
+.chip.kept { background: linear-gradient(90deg, rgba(26, 127, 55, 0) 0%, var(--kept-fill-hi) 100%); }
+.chip.discard { background: var(--discard-fill-hi); }
+.chip.ring { background: var(--ring-fill-hi); }
+.chip.crop { background: transparent; border: 2px dashed var(--crop-line); }
+.chip.edge { background: transparent; border: 2px solid var(--canvas-edge); }
+#legend .l-note { color: var(--muted); }
+
+footer {
+  padding: 6px 18px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+#tests summary { cursor: pointer; }
+#tests .pass { color: var(--ok); font-weight: 600; }
+#tests .fail { color: var(--err); font-weight: 700; }
+#tests table { border-collapse: collapse; margin-top: 6px; font-size: 11.5px; }
+#tests td, #tests th { border: 1px solid var(--border); padding: 3px 7px; text-align: left; vertical-align: top; }
+#tests code { font-size: 11px; }
+
+@media (max-width: 920px) {
+  main { flex-direction: column; }
+  aside { width: auto; }
+  #viewport { min-height: 300px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Tile Layout Simulator — Context-Anchored Tile Upscale v2</h1>
+  <p>Reference implementation of the grid algorithm (directional-feather tiling, deterministic raster order). All geometry in upscaled-canvas pixels, drawn strictly to scale.</p>
+</header>
+
+<main>
+  <section id="viewport">
+    <canvas id="cv"></canvas>
+    <div id="scale-note"></div>
+    <div id="tip"></div>
+  </section>
+
+  <aside>
+    <div class="panel">
+      <h2>Inputs</h2>
+      <div class="ctl-grid">
+        <div class="ctl"><label for="in-ow">Original width</label>
+          <input id="in-ow" type="number" min="8" max="32768" step="1" value="1024"></div>
+        <div class="ctl"><label for="in-oh">Original height</label>
+          <input id="in-oh" type="number" min="8" max="32768" step="1" value="1024"></div>
+        <div class="ctl"><label for="in-factor">Upscale factor</label>
+          <input id="in-factor" type="number" min="0.05" max="8" step="0.05" value="2"></div>
+        <div class="ctl"></div>
+        <div class="ctl"><label for="in-mw">max_tile_width (/8)</label>
+          <input id="in-mw" type="number" min="256" max="16384" step="8" value="1024"></div>
+        <div class="ctl"><label for="in-mh">max_tile_height (/8)</label>
+          <input id="in-mh" type="number" min="256" max="16384" step="8" value="1024"></div>
+        <div class="ctl"><label for="in-overlap" title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded.">context_overlap (/8)</label>
+          <input id="in-overlap" type="number" min="0" max="512" step="8" value="8"
+            title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded."></div>
+        <div class="ctl"><label for="in-ctx" title="Context anchor — the frozen-context halo sampled beyond the overlap on every neighbor side. Always discarded (never re-diffused, never composited).">context_anchor (/8)</label>
+          <input id="in-ctx" type="number" min="0" max="512" step="8" value="64"></div>
+      </div>
+      <div id="canvas-size"></div>
+    </div>
+
+    <div class="panel" id="readouts">
+      <h2>Readouts</h2>
+      <div id="readouts-body"></div>
+    </div>
+
+    <div class="panel" id="warnings">
+      <h2>Warnings</h2>
+      <ul id="warnings-body"></ul>
+    </div>
+
+    <div class="panel" id="legend">
+      <h2>Legend</h2>
+      <ul>
+        <li><span class="chip split"></span><span><strong>Tile cores</strong> — alternating tints (checkerboard) so adjacent cores are distinguishable. Cores partition the canvas exactly; every pixel belongs to one core.</span></li>
+        <li><span class="chip kept"></span><span><strong>Context overlap — kept, feathered</strong> (green) — the part of the <code>context_overlap</code> band the node actually composites (<code>paste_rect</code>): the <strong>top</strong> and <strong>left</strong> sides, which border an already-processed neighbor in raster order. Drawn as the actual cross-dissolve: <strong>full green at the seam</strong> (the core edge), fading to transparent over the overlap (a vertical ramp on the top, a horizontal ramp on the left, and a rounded product at the top-left corner into the up-left neighbor). It ends flush at the core's right/bottom edges — the later neighbor feathers those seams. This matches the node's <code>feather_alpha</code> exactly.</span></li>
+        <li><span class="chip discard"></span><span><strong>Context overlap — context only, discarded</strong> (red, flat) — everything in the overlap band the node does <em>not</em> keep: the whole <strong>right</strong> column and <strong>bottom</strong> row, <strong>including the top-right and bottom-left overhang corners</strong>. Sampled/diffused so the model sees continuous context, then thrown away — the node pastes nothing here; the later right/lower neighbor feathers the seam instead.</span></li>
+        <li><span class="chip ring"></span><span><strong>Context anchor — frozen context, discarded</strong> — <code>context_anchor</code> beyond the overlap on every neighbor side: fully frozen, visible-only context, <strong>held to the ground-truth pixels every sampling step</strong> (re-anchored each step so it never drifts) so it continuously pulls the diffused overlap back toward the neighbor. Never re-diffused, never composited, always discarded from the paste.</span></li>
+        <li><span class="chip crop"></span><span><strong>Sampled crop</strong> — dashed outline on the hovered / clicked tile: the exact (symmetric) region the model sees, <code>core + context_overlap + context_anchor</code> on every neighbor side, at true 1:1 size.</span></li>
+        <li><span class="chip edge"></span><span><strong>Canvas edge</strong> — no overlap or anchor extends past it; cores run to the border.</span></li>
+        <li><span class="l-note">Hover a tile for its sampled size vs the caps and which sides are kept (green) vs discarded (red); click to pin, Esc or click outside to unpin.</span></li>
+      </ul>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <details id="tests">
+    <summary>Reference implementation of the grid algorithm &middot; <span id="tests-status"></span></summary>
+    <div id="tests-detail"></div>
+  </details>
+</footer>
+
+<script>
+"use strict";
+
+/* =====================================================================
+ * PURE GRID MATH — reference implementation (no DOM below this banner
+ * until END PURE GRID MATH). The v2 pipeline rewrite is validated
+ * against exactly these functions.
+ * ===================================================================== */
+
+/** Round half-to-even (banker's rounding), matching Python round(). */
+function roundHalfEven(x) {
+  var f = Math.floor(x);
+  var d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return (f % 2 === 0) ? f : f + 1;
+}
+
+/** Nearest multiple of 8, ties to even — matches v1 round_length(). */
+function round8(x) {
+  return roundHalfEven(x / 8) * 8;
+}
+
+/** Smallest multiple of 8 that is >= x. */
+function round8Up(x) {
+  return Math.ceil(x / 8) * 8;
+}
+
+/**
+ * Per-axis grid solve.
+ *
+ *   r = context_overlap + context_anchor           (tile_fade is gone)
+ *   overhead(n) = 0 | r | 2r   for n = 1 | 2 | >= 3
+ *   base(n) = round8_up(ceil(L / n))
+ *   choose the smallest n >= 1 with base(n) + overhead(n) <= cap
+ *
+ * The ring, outward from the core boundary, is two nested bands:
+ * context_overlap (the feather, at the seam) -> context_anchor (the
+ * frozen halo). The per-seam ring width r is their sum. There is NO
+ * fade floor and NO overlap floor — a base is judged on the cap
+ * constraint alone (owner's decision: keep it simple).
+ *
+ * @param {number} L       axis canvas length, already a multiple of 8
+ * @param {number} cap     max tile size on this axis (M)
+ * @param {number} ctx     context_anchor
+ * @param {number} overlap context_overlap (default 0 — no feather)
+ * @returns {{ok:true,n:number,base:number,last:number,overhead:number,r:number}
+ *         | {ok:false,r:number,failN:number,failBase:number,reason:string}}
+ */
+function solveAxis(L, cap, ctx, overlap = 0) {
+  var r = ctx + overlap;
+  var maxN = Math.max(1, Math.ceil(L / 8)) + 1; /* defensive bound; base(maxN) = 8 */
+
+  for (var n = 1; n <= maxN; n++) {
+    var base = round8Up(Math.ceil(L / n));
+    var overhead = (n === 1) ? 0 : (n === 2) ? r : 2 * r;
+
+    if (base + overhead <= cap) {
+      return { ok: true, n: n, base: base, last: L - (n - 1) * base, overhead: overhead, r: r };
+    }
+  }
+  /* Unreachable unless the cap is smaller than the minimum base 8 + overhead. */
+  return { ok: false, r: r, failN: maxN, failBase: 8, reason: "exhausted" };
+}
+
+/** Expand a core rect by `amount` on each side that has a neighbor, clamped to the canvas. */
+function expandRect(core, amount, nb, W, H) {
+  var wantX0 = core.x0 - (nb.left ? amount : 0);
+  var wantX1 = core.x1 + (nb.right ? amount : 0);
+  var wantY0 = core.y0 - (nb.top ? amount : 0);
+  var wantY1 = core.y1 + (nb.bottom ? amount : 0);
+  var x0 = Math.max(0, wantX0);
+  var x1 = Math.min(W, wantX1);
+  var y0 = Math.max(0, wantY0);
+  var y1 = Math.min(H, wantY1);
+  return {
+    x0: x0, y0: y0, x1: x1, y1: y1,
+    clamped: (x0 !== wantX0 || x1 !== wantX1 || y0 !== wantY0 || y1 !== wantY1)
+  };
+}
+
+/** Per-axis position class: "single" (n=1), "end" (first/last), "mid". */
+function axisClass(i, n) {
+  if (n === 1) return "single";
+  return (i === 0 || i === n - 1) ? "end" : "mid";
+}
+
+/** 2D tile class label from the two per-axis classes. */
+function tileClassLabel(cx, cy) {
+  if (cx === "single" && cy === "single") return "single";
+  if (cx === "mid" && cy === "mid") return "interior";
+  if (cx === "end" && cy === "end") return "corner";
+  if ((cx === "end" && cy === "mid") || (cx === "mid" && cy === "end")) return "edge";
+  /* one axis is single: a 1 x N strip */
+  return (cx === "mid" || cy === "mid") ? "strip middle" : "strip end";
+}
+
+/**
+ * Full 2D layout from two per-axis solves. Pure; all values in canvas px.
+ *
+ * Two distinct geometries per tile:
+ *
+ *   cropRect         = core + (overlap + ctx) on EVERY neighbor side.
+ *                      The SYMMETRIC sampled crop — what the model sees.
+ *                      Symmetric on purpose so the frozen context_anchor
+ *                      sits a consistent distance from the core.
+ *   overlapInnerRect = core + overlap on every neighbor side.
+ *                      The anchor halo = cropRect \ overlapInnerRect
+ *                      (frozen context, always discarded).
+ *   pasteRect        = core + overlap on the TOP/LEFT neighbor sides ONLY.
+ *                      The DIRECTIONAL pasted region: core plus the
+ *                      context_overlap band on the sides bordering an
+ *                      already-processed neighbor (kept + feathered).
+ *
+ * In deterministic raster order (row-major, top-left -> bottom-right) a
+ * tile's already-processed neighbors are exactly the tile above (row>0)
+ * and the tile to the left (col>0):
+ *   keptSides      = {top: row>0,  left: col>0}    kept + feathered (green)
+ *   discardedSides = {right: col<nx-1, bottom: row<ny-1}  context only (red)
+ * So each interior seam is feathered exactly once, by the later tile.
+ */
+function buildLayout(W, H, sx, sy, ctx, overlap = 0) {
+  var r = ctx + overlap;
+  var tiles = [];
+  var totalSampledPx = 0;
+  var clampedTiles = 0;
+  var capViolations = 0;
+
+  for (var row = 0; row < sy.n; row++) {
+    for (var col = 0; col < sx.n; col++) {
+      var core = {
+        x0: col * sx.base,
+        y0: row * sy.base,
+        x1: (col === sx.n - 1) ? W : (col + 1) * sx.base,
+        y1: (row === sy.n - 1) ? H : (row + 1) * sy.base
+      };
+      var nb = {
+        left: col > 0, right: col < sx.n - 1,
+        top: row > 0, bottom: row < sy.n - 1
+      };
+      var keptSides = { top: row > 0, left: col > 0 };
+      var discardedSides = { right: col < sx.n - 1, bottom: row < sy.n - 1 };
+
+      var overlapInnerRect = expandRect(core, overlap, nb, W, H);         /* core + overlap, all neighbor sides */
+      var cropRect = expandRect(core, r, nb, W, H);                       /* symmetric sample extent (core + overlap + ctx) */
+      var pasteRect = expandRect(core, overlap,                           /* directional: overlap on top/left only */
+        { left: nb.left, top: nb.top, right: false, bottom: false }, W, H);
+      var sampledW = cropRect.x1 - cropRect.x0;
+      var sampledH = cropRect.y1 - cropRect.y0;
+      var label = tileClassLabel(axisClass(col, sx.n), axisClass(row, sy.n));
+
+      totalSampledPx += sampledW * sampledH;
+      if (cropRect.clamped || overlapInnerRect.clamped) clampedTiles++;
+
+      tiles.push({
+        col: col, row: row, cls: label, nb: nb,
+        keptSides: keptSides, discardedSides: discardedSides,
+        core: core, overlapInnerRect: overlapInnerRect, cropRect: cropRect, pasteRect: pasteRect,
+        sampledW: sampledW, sampledH: sampledH
+      });
+    }
+  }
+  return {
+    W: W, H: H, solX: sx, solY: sy, ctx: ctx, overlap: overlap, r: r,
+    tiles: tiles, totalSampledPx: totalSampledPx, clampedTiles: clampedTiles,
+    capViolations: capViolations /* filled by caller against the caps */
+  };
+}
+
+/* =============== END PURE GRID MATH =============== */
+
+/* =====================================================================
+ * Self-tests: hand-computed cases asserted at load. Each expectation
+ * was derived by hand from the grid algorithm in context_anchored_tile_refine/grid.py.
+ * ===================================================================== */
+
+var SELF_TESTS = [
+  {
+    name: "solveAxis r=ctx+overlap: L=3072 M=2048 ctx=64 overlap=64 (r=128): n=2, base=1536, overhead=r",
+    run: function () {
+      /* n=1: base 3072 > 2048. n=2: base round8Up(1536)=1536, overhead r=128, 1664<=2048. */
+      var s = solveAxis(3072, 2048, 64, 64);
+      return expect(s, { ok: true, n: 2, base: 1536, last: 1536, overhead: 128, r: 128 });
+    }
+  },
+  {
+    name: "n=1 has zero overhead (r irrelevant): L=2048 M=2048 ctx=448 overlap=0 (r=448): n=1, base=2048",
+    run: function () {
+      var s = solveAxis(2048, 2048, 448, 0);
+      return expect(s, { ok: true, n: 1, base: 2048, last: 2048, overhead: 0, r: 448 });
+    }
+  },
+  {
+    name: "Remainder: L=3080 M=2048 ctx=64 overlap=64 (r=128): n=2, base=1544, last=1536",
+    run: function () {
+      /* n=2: base round8Up(1540)=1544, overhead 128, 1672<=2048; last=3080-1544=1536. */
+      var s = solveAxis(3080, 2048, 64, 64);
+      return expect(s, { ok: true, n: 2, base: 1544, last: 1536, overhead: 128 });
+    }
+  },
+  {
+    name: "overhead(2)=r not 2r: L=2064 M=1088 ctx=0 overlap=32 (r=32): n=2 (1032+32=1064 fits)",
+    run: function () {
+      var s = solveAxis(2064, 1088, 0, 32);
+      return expect(s, { ok: true, n: 2, base: 1032, last: 1032, overhead: 32 });
+    }
+  },
+  {
+    name: "n>=3 pays 2r: L=4096 M=1024 ctx=0 overlap=64 (r=64): n=5, base=824, last=800, overhead=2r=128",
+    run: function () {
+      /* n=4: base round8Up(1024)=1024, +2r 128 = 1152 > 1024.
+         n=5: base round8Up(ceil(4096/5)=820)=824, +128 = 952 <= 1024; last=4096-4*824=800. */
+      var s = solveAxis(4096, 1024, 0, 64);
+      return expect(s, { ok: true, n: 5, base: 824, last: 800, overhead: 128, r: 64 });
+    }
+  },
+  {
+    name: "round8 ties-to-even matches Python round_length: round8(1500)=1504",
+    run: function () {
+      return expect({ v: round8(1500) }, { v: 1504 }); /* 187.5 -> 188 (even) */
+    }
+  },
+  {
+    name: "round8 ties-to-even, downward: round8(1012)=1008",
+    run: function () {
+      return expect({ v: round8(1012) }, { v: 1008 }); /* 126.5 -> 126 (even) */
+    }
+  },
+  {
+    name: "round8Up: 1541 -> 1544; 1536 -> 1536",
+    run: function () {
+      return expect({ a: round8Up(1541), b: round8Up(1536) }, { a: 1544, b: 1536 });
+    }
+  },
+  {
+    name: "buildLayout interior: symmetric cropRect all sides vs directional pasteRect top+left only. L=2048 cap 1024 ctx=64 overlap=64 (r=128): 3x3, core 688, crop 944, overlapInner 816, paste 752 (top/left)",
+    run: function () {
+      var sx = solveAxis(2048, 1024, 64, 64);
+      var sy = solveAxis(2048, 1024, 64, 64);
+      if (!sx.ok || !sy.ok) return { pass: false, got: "solve failed", want: "" };
+      var lay = buildLayout(2048, 2048, sx, sy, 64, 64);
+      var it = lay.tiles.filter(function (t) { return t.cls === "interior"; })[0];
+      function dims(rc) { return (rc.x1 - rc.x0) + "x" + (rc.y1 - rc.y0); }
+      /* interior core (col=1,row=1) at (688,688), 688x688.
+         cropRect +128 all sides -> 944x944 at (560,560).
+         overlapInnerRect +64 all sides -> 816x816 at (624,624).
+         pasteRect +64 top/left only -> (624,624)..(1376,1376) = 752x752. */
+      var got = {
+        n: sx.n + "x" + sy.n,
+        core: dims(it.core),
+        crop: dims(it.cropRect), cropX0: it.cropRect.x0,
+        oInner: dims(it.overlapInnerRect), oInnerX0: it.overlapInnerRect.x0,
+        paste: dims(it.pasteRect), pasteX0: it.pasteRect.x0, pasteY0: it.pasteRect.y0,
+        pasteX1: it.pasteRect.x1, pasteY1: it.pasteRect.y1,
+        keptTop: it.keptSides.top, keptLeft: it.keptSides.left,
+        discRight: it.discardedSides.right, discBottom: it.discardedSides.bottom,
+        sampled: it.sampledW + "x" + it.sampledH
+      };
+      var want = {
+        n: "3x3", core: "688x688",
+        crop: "944x944", cropX0: 560,
+        oInner: "816x816", oInnerX0: 624,
+        paste: "752x752", pasteX0: 624, pasteY0: 624, pasteX1: 1376, pasteY1: 1376,
+        keptTop: true, keptLeft: true, discRight: true, discBottom: true,
+        sampled: "944x944"
+      };
+      return expect(got, want);
+    }
+  },
+  {
+    name: "buildLayout (0,0) tile: no processed neighbor -> pasteRect == core; crop expands right+bottom only",
+    run: function () {
+      var sx = solveAxis(2048, 1024, 64, 64);
+      var sy = solveAxis(2048, 1024, 64, 64);
+      var lay = buildLayout(2048, 2048, sx, sy, 64, 64);
+      var c00 = lay.tiles[0]; /* row 0, col 0 */
+      function eqRect(a, b) { return a.x0 === b.x0 && a.y0 === b.y0 && a.x1 === b.x1 && a.y1 === b.y1; }
+      /* core (0,0)..(688,688). keptSides none -> pasteRect == core.
+         cropRect +128 right+bottom only -> (0,0)..(816,816) = 816x816. */
+      var got = {
+        pasteEqCore: eqRect(c00.pasteRect, c00.core),
+        keptTop: c00.keptSides.top, keptLeft: c00.keptSides.left,
+        discRight: c00.discardedSides.right, discBottom: c00.discardedSides.bottom,
+        cropX0: c00.cropRect.x0, cropY0: c00.cropRect.y0,
+        crop: (c00.cropRect.x1 - c00.cropRect.x0) + "x" + (c00.cropRect.y1 - c00.cropRect.y0)
+      };
+      var want = {
+        pasteEqCore: true, keptTop: false, keptLeft: false,
+        discRight: true, discBottom: true, cropX0: 0, cropY0: 0, crop: "816x816"
+      };
+      return expect(got, want);
+    }
+  },
+  {
+    name: "buildLayout first-row non-first-col (col=1,row=0): left overlap KEPT, no top overlap; pasteRect 752x688 at x0=624 y0=0",
+    run: function () {
+      var sx = solveAxis(2048, 1024, 64, 64);
+      var sy = solveAxis(2048, 1024, 64, 64);
+      var lay = buildLayout(2048, 2048, sx, sy, 64, 64);
+      var t = lay.tiles.filter(function (x) { return x.row === 0 && x.col === 1; })[0];
+      /* core at (688,0)..(1376,688). keptSides left only -> pasteRect x0=624 (left kept), y0=0 (top not). */
+      var got = {
+        keptTop: t.keptSides.top, keptLeft: t.keptSides.left,
+        coreX0: t.core.x0, coreY0: t.core.y0,
+        pasteX0: t.pasteRect.x0, pasteY0: t.pasteRect.y0,
+        paste: (t.pasteRect.x1 - t.pasteRect.x0) + "x" + (t.pasteRect.y1 - t.pasteRect.y0)
+      };
+      var want = {
+        keptTop: false, keptLeft: true, coreX0: 688, coreY0: 0,
+        pasteX0: 624, pasteY0: 0, paste: "752x688"
+      };
+      return expect(got, want);
+    }
+  },
+  {
+    name: "buildLayout totals: L=2048 cap 1024 ctx=64 overlap=64: 3x3, interior sampled 944x944, corner(0,0) 816x816, last col 672, partition 2048, total 6553600, all within caps",
+    run: function () {
+      var sx = solveAxis(2048, 1024, 64, 64);
+      var sy = solveAxis(2048, 1024, 64, 64);
+      if (!sx.ok || !sy.ok) return { pass: false, got: "solve failed", want: "" };
+      var lay = buildLayout(2048, 2048, sx, sy, 64, 64);
+      var interior = lay.tiles.filter(function (t) { return t.cls === "interior"; });
+      var c00 = lay.tiles[0];
+      var widthsSum = sx.base * (sx.n - 1) + sx.last;
+      var allWithin = lay.tiles.every(function (t) { return t.sampledW <= 1024 && t.sampledH <= 1024; });
+      var got = {
+        n: sx.n + "x" + sy.n, tiles: lay.tiles.length,
+        interior: interior.length === 1 ? interior[0].sampledW + "x" + interior[0].sampledH : "?",
+        c00: c00.sampledW + "x" + c00.sampledH,
+        lastCol: sx.last, partition: widthsSum,
+        total: lay.totalSampledPx, within: allWithin
+      };
+      var want = {
+        n: "3x3", tiles: 9, interior: "944x944", c00: "816x816",
+        lastCol: 672, partition: 2048, total: 6553600, within: true
+      };
+      return expect(got, want);
+    }
+  }
+];
+
+/** Compare `got` against every key in `want`; report both as JSON. */
+function expect(got, want) {
+  var pass = true;
+  for (var k in want) {
+    if (got[k] !== want[k]) { pass = false; break; }
+  }
+  var slim = {};
+  for (var k2 in want) slim[k2] = got[k2];
+  return { pass: pass, got: JSON.stringify(slim), want: JSON.stringify(want) };
+}
+
+function runSelfTests() {
+  return SELF_TESTS.map(function (t) {
+    var r;
+    try { r = t.run(); }
+    catch (e) { r = { pass: false, got: "threw: " + e.message, want: "" }; }
+    return { name: t.name, pass: r.pass, got: r.got, want: r.want };
+  });
+}
+
+/* =====================================================================
+ * Application state and recompute
+ * ===================================================================== */
+
+var els = {};
+var state = {
+  ow: 1024, oh: 1024, factor: 2,
+  maxW: 1024, maxH: 1024, ctx: 64, overlap: 8,
+  canvasW: 0, canvasH: 0,
+  solX: null, solY: null,
+  layout: null,
+  errors: [],          /* configuration error strings */
+  hoverTile: -1,
+  pinnedTile: -1,
+  view: { scale: 1, offX: 0, offY: 0 } /* CSS px mapping for the drawn canvas */
+};
+
+function clampSnap(v, min, max, step) {
+  if (!isFinite(v)) v = min;
+  v = Math.min(max, Math.max(min, v));
+  return Math.round(v / step) * step;
+}
+
+function readInputs() {
+  state.ow = clampSnap(parseFloat(els.ow.value), 8, 32768, 1);
+  state.oh = clampSnap(parseFloat(els.oh.value), 8, 32768, 1);
+  state.factor = Math.round(clampSnap(parseFloat(els.factor.value), 0.05, 8, 0.05) * 100) / 100;
+  state.maxW = clampSnap(parseFloat(els.mw.value), 256, 16384, 8);
+  state.maxH = clampSnap(parseFloat(els.mh.value), 256, 16384, 8);
+  state.ctx = clampSnap(parseFloat(els.ctxIn.value), 0, 512, 8);
+  state.overlap = clampSnap(parseFloat(els.overlap.value), 0, 512, 8);
+}
+
+function normalizeInputs() {
+  readInputs();
+  els.ow.value = state.ow;
+  els.oh.value = state.oh;
+  els.factor.value = state.factor;
+  els.mw.value = state.maxW;
+  els.mh.value = state.maxH;
+  els.ctxIn.value = state.ctx;
+  els.overlap.value = state.overlap;
+}
+
+function axisErrorMessage(axisName, capName, cap) {
+  return axisName + " axis: configuration error — no tile count satisfies " + capName + " = " + fmt(cap) +
+    " px at this canvas size with context_overlap + context_anchor = " + fmt(state.overlap + state.ctx) +
+    " px per seam side. Raise " + capName + " or reduce context_overlap / context_anchor.";
+}
+
+function recompute() {
+  readInputs();
+
+  state.canvasW = round8(state.ow * state.factor);
+  state.canvasH = round8(state.oh * state.factor);
+  state.errors = [];
+  state.solX = null;
+  state.solY = null;
+  state.layout = null;
+  state.hoverTile = -1;
+  state.pinnedTile = -1;
+
+  if (state.canvasW < 8 || state.canvasH < 8) {
+    state.errors.push("Upscaled canvas is smaller than 8 px (" + state.canvasW + " × " + state.canvasH +
+      "); increase the original size or the upscale factor.");
+  } else {
+    state.solX = solveAxis(state.canvasW, state.maxW, state.ctx, state.overlap);
+    state.solY = solveAxis(state.canvasH, state.maxH, state.ctx, state.overlap);
+    if (!state.solX.ok) state.errors.push(axisErrorMessage("Width", "max_tile_width", state.maxW));
+    if (!state.solY.ok) state.errors.push(axisErrorMessage("Height", "max_tile_height", state.maxH));
+    if (state.solX.ok && state.solY.ok) {
+      state.layout = buildLayout(state.canvasW, state.canvasH, state.solX, state.solY, state.ctx, state.overlap);
+      state.layout.capViolations = state.layout.tiles.filter(function (t) {
+        return t.sampledW > state.maxW || t.sampledH > state.maxH;
+      }).length;
+    }
+  }
+
+  updateCanvasSizeLine();
+  updateReadouts();
+  updateWarnings();
+  render();
+}
+
+/* =====================================================================
+ * Readouts / warnings DOM
+ * ===================================================================== */
+
+function fmt(n) { return Number(n).toLocaleString("en-US"); }
+function mp(px) { return (px / 1e6).toFixed(2); }
+
+function updateCanvasSizeLine() {
+  els.canvasSize.innerHTML = "Upscaled canvas: <strong>" + fmt(state.canvasW) + " × " + fmt(state.canvasH) +
+    " px</strong> (" + mp(state.canvasW * state.canvasH) + " MP) &mdash; round8(" +
+    fmt(state.ow) + " × " + state.factor + "), round8(" + fmt(state.oh) + " × " + state.factor + ")";
+}
+
+/** Group tiles by class label; list distinct sampled sizes with counts. */
+function classSizeGroups(tiles) {
+  var order = ["single", "corner", "edge", "interior", "strip end", "strip middle"];
+  var byClass = {};
+  tiles.forEach(function (t) {
+    var sizes = byClass[t.cls] || (byClass[t.cls] = {});
+    var key = fmt(t.sampledW) + " × " + fmt(t.sampledH);
+    sizes[key] = (sizes[key] || 0) + 1;
+  });
+  return order.filter(function (c) { return byClass[c]; }).map(function (c) {
+    var entries = Object.keys(byClass[c]).map(function (k) {
+      return k + (byClass[c][k] > 1 ? " (×" + byClass[c][k] + ")" : "");
+    });
+    var count = Object.keys(byClass[c]).reduce(function (a, k) { return a + byClass[c][k]; }, 0);
+    return { cls: c, count: count, entries: entries };
+  });
+}
+
+function updateReadouts() {
+  var h = "";
+  if (!state.layout) {
+    h = "<dl><dt>Grid</dt><dd>— (configuration error)</dd></dl>";
+    els.readoutsBody.innerHTML = h;
+    return;
+  }
+  var lay = state.layout;
+  var sx = lay.solX, sy = lay.solY;
+  var canvasPx = lay.W * lay.H;
+  var overheadPct = (lay.totalSampledPx / canvasPx - 1) * 100;
+
+  h += "<dl>";
+  h += "<dt>Grid</dt><dd>" + sx.n + " × " + sy.n + " (" + lay.tiles.length +
+       (lay.tiles.length === 1 ? " tile" : " tiles") + ")</dd>";
+  h += "<dt>Tile core</dt><dd>" + fmt(sx.base) + " × " + fmt(sy.base) + " px</dd>";
+  if (sx.n > 1) {
+    h += "<dt>Last column</dt><dd>" + fmt(sx.last) + " px" +
+         (sx.last === sx.base ? " (= base)" : " (remainder)") + "</dd>";
+  }
+  if (sy.n > 1) {
+    h += "<dt>Last row</dt><dd>" + fmt(sy.last) + " px" +
+         (sy.last === sy.base ? " (= base)" : " (remainder)") + "</dd>";
+  }
+  h += "<dt>Ring / seam side</dt><dd>overlap " + fmt(lay.overlap) + " (feather) + context " +
+       fmt(lay.ctx) + " = " + fmt(lay.r) + " px</dd>";
+  h += "<dt>Caps</dt><dd>" + fmt(state.maxW) + " × " + fmt(state.maxH) + " px</dd>";
+  h += "</dl>";
+
+  h += "<div style='margin-top:8px'>Sampled sizes by tile class:</div><ul class='class-list'>";
+  classSizeGroups(lay.tiles).forEach(function (g) {
+    h += "<li><strong>" + g.cls + "</strong> (" + g.count + "): " + g.entries.join(", ") + "</li>";
+  });
+  h += "</ul>";
+
+  h += "<dl style='margin-top:8px'>";
+  h += "<dt>Canvas</dt><dd>" + mp(canvasPx) + " MP</dd>";
+  h += "<dt>Sampled total</dt><dd>" + mp(lay.totalSampledPx) + " MP (+" + overheadPct.toFixed(1) + "% overhead)</dd>";
+  h += "</dl>";
+
+  if (sx.n === 1 && sy.n === 1) {
+    h += "<div class='callout'>Ideal case: the whole canvas fits in a single tile under the caps — zero seams, no feather, no context halo.</div>";
+  }
+  els.readoutsBody.innerHTML = h;
+}
+
+function updateWarnings() {
+  var items = [];
+  state.errors.forEach(function (e) { items.push({ cls: "w-err", text: e }); });
+
+  if (state.layout && state.layout.capViolations > 0) {
+    items.push({ cls: "w-err", text: "Internal invariant violated: " + state.layout.capViolations +
+      " sampled crop(s) exceed the caps. This should be impossible — bug in the reference implementation." });
+  }
+  if (state.layout && state.layout.clampedTiles > 0) {
+    items.push({ cls: "w-info", text: "Context halo clamped at the canvas edge on " + state.layout.clampedTiles +
+      " tile(s): the overlap + context halo is wider than the canvas remaining past a neighbor (e.g. a last-tile remainder narrower than the ring). Crops never extend past the canvas." });
+  }
+  if (items.length === 0) {
+    items.push({ cls: "w-none", text: "No warnings." });
+  }
+  els.warningsBody.innerHTML = items.map(function (i) {
+    return "<li class='" + i.cls + "'>" + i.text + "</li>";
+  }).join("");
+}
+
+/* =====================================================================
+ * Canvas rendering (everything strictly to scale)
+ * ===================================================================== */
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function fillRectPx(g, rect, color) {
+  g.fillStyle = color;
+  g.fillRect(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
+}
+
+/** True when two rects have identical bounds (so their annulus is empty). */
+function sameRect(a, b) {
+  return a.x0 === b.x0 && a.x1 === b.x1 && a.y0 === b.y0 && a.y1 === b.y1;
+}
+
+/** Fill the region outer minus inner (even-odd rule). */
+function fillAnnulus(g, outer, inner, color) {
+  g.beginPath();
+  g.rect(outer.x0, outer.y0, outer.x1 - outer.x0, outer.y1 - outer.y0);
+  g.rect(inner.x0, inner.y0, inner.x1 - inner.x0, inner.y1 - inner.y0);
+  g.fillStyle = color;
+  g.fill("evenodd");
+}
+
+function strokeRectPx(g, rect, color, widthCss, dashCss, scale) {
+  g.strokeStyle = color;
+  g.lineWidth = widthCss / scale;
+  g.setLineDash(dashCss ? dashCss.map(function (d) { return d / scale; }) : []);
+  g.strokeRect(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
+  g.setLineDash([]);
+}
+
+/** Fill a box given corner coords; no-op when it has zero area. */
+function fillBox(g, x0, y0, x1, y1, color) {
+  if (x1 <= x0 || y1 <= y0) return;
+  g.fillStyle = color;
+  g.fillRect(x0, y0, x1 - x0, y1 - y0);
+}
+
+/** Parse "rgba(r, g, b, a)" / "rgb(r, g, b)" into { r, g, b, a } (a defaults to 1). */
+function parseRGBA(str) {
+  var m = String(str).match(/rgba?\(([^)]+)\)/);
+  if (!m) return { r: 26, g: 127, b: 55, a: 1 };
+  var p = m[1].split(",").map(function (s) { return parseFloat(s.trim()); });
+  return { r: p[0], g: p[1], b: p[2], a: (p.length > 3 ? p[3] : 1) };
+}
+
+/** rgba() string for color `c` with its alpha scaled by `mul` (clamped to [0,1]). */
+function rgbaMul(c, mul) {
+  var a = Math.max(0, Math.min(1, c.a * mul));
+  return "rgba(" + c.r + ", " + c.g + ", " + c.b + ", " + a + ")";
+}
+
+/** Fill a box given corner coords with any paint (color or gradient); no-op on zero area. */
+function fillBoxGrad(g, x0, y0, x1, y1, paint) {
+  if (x1 <= x0 || y1 <= y0) return;
+  g.fillStyle = paint;
+  g.fillRect(x0, y0, x1 - x0, y1 - y0);
+}
+
+/**
+ * Fill [x0,x1]x[y0,y1] with `green` at alpha = fx(x)*fy(y), where each factor is an
+ * independent linear ramp: fx goes a0x->a1x across x, fy goes a0y->a1y across y. This is
+ * the separable feather field. Fast paths render a pure vertical / pure horizontal ramp
+ * as a single canvas gradient; the true 2D product (both axes ramping — the rounded
+ * corners) is stacked as horizontal gradients, one per sub-row (fy ~const per row),
+ * bounded to 64 rows. Coords are canvas px (the ctx transform is 1:1 there).
+ */
+function fillRampRect(g, green, x0, y0, x1, y1, a0x, a1x, a0y, a1y) {
+  if (x1 <= x0 || y1 <= y0) return;
+  if (a0x === a1x) {                 /* pure vertical ramp (or constant): one gradient */
+    var gv = g.createLinearGradient(0, y0, 0, y1);
+    gv.addColorStop(0, rgbaMul(green, a0x * a0y));
+    gv.addColorStop(1, rgbaMul(green, a0x * a1y));
+    fillBoxGrad(g, x0, y0, x1, y1, gv);
+    return;
+  }
+  if (a0y === a1y) {                 /* pure horizontal ramp: one gradient */
+    var gh = g.createLinearGradient(x0, 0, x1, 0);
+    gh.addColorStop(0, rgbaMul(green, a0x * a0y));
+    gh.addColorStop(1, rgbaMul(green, a1x * a0y));
+    fillBoxGrad(g, x0, y0, x1, y1, gh);
+    return;
+  }
+  var h = y1 - y0;                   /* both ramp -> separable product, stacked rows */
+  var steps = Math.min(Math.max(1, Math.round(h)), 64);
+  for (var i = 0; i < steps; i++) {
+    var ya = y0 + h * (i / steps), yb = y0 + h * ((i + 1) / steps);
+    var fy = a0y + (a1y - a0y) * ((i + 0.5) / steps);
+    var grad = g.createLinearGradient(x0, 0, x1, 0);
+    grad.addColorStop(0, rgbaMul(green, a0x * fy));
+    grad.addColorStop(1, rgbaMul(green, a1x * fy));
+    fillBoxGrad(g, x0, ya, x1, yb, grad);
+  }
+}
+
+/**
+ * Draw the KEPT region — paste_rect \ core — as the directional feather the node applies
+ * (feather_alpha in sampling.py). Alpha = ay(y) * ax(x): ay ramps 0->1 across the top
+ * overhang and is 1 over the core rows; ax ramps 0->1 across the left overhang and is 1
+ * over the core columns. So the top strip is a pure vertical ramp (full at the seam,
+ * core.y0), the left strip a pure horizontal ramp (full at core.x0), and the shared
+ * top-left overhang the product of the two — a rounded corner fading into the up-left
+ * neighbor. The strip ends FLAT-full at the core's right (core.x1) and bottom (core.y1)
+ * edges: the node keeps nothing past there (paste_rect stops at the core on those sides),
+ * so the later right/lower neighbor feathers those seams and the overhang beyond them is
+ * discarded (drawn red, below). Green = exactly what the node composites — no right/bottom
+ * taper, no overhang.
+ */
+function drawKeptFeather(g, t, green) {
+  var c = t.core, oi = t.overlapInnerRect;
+  var topB = c.y0 - oi.y0, leftB = c.x0 - oi.x0;   /* kept top/left overhang widths */
+  if (topB <= 0 && leftB <= 0) return;             /* top-left tile: nothing kept */
+
+  /* TOP STRIP  [oi.x0,core.x1] x [oi.y0,core.y0] — alpha = ay(y) * ax(x). */
+  if (topB > 0) {
+    fillRampRect(g, green, oi.x0, oi.y0, c.x0, c.y0, 0, 1, 0, 1); /* top-left overhang: product (rounded) */
+    fillRampRect(g, green, c.x0, oi.y0, c.x1, c.y0, 1, 1, 0, 1);  /* over the core: pure vertical ramp     */
+  }
+  /* LEFT STRIP [oi.x0,core.x0] x [core.y0,core.y1] — alpha = ax(x), full over core rows. */
+  if (leftB > 0) {
+    fillRampRect(g, green, oi.x0, c.y0, c.x0, c.y1, 0, 1, 1, 1);  /* beside the core: pure horizontal ramp */
+  }
+}
+
+/**
+ * Draw the context_overlap band (overlapInnerRect \ core) split into what the node
+ * actually KEEPS vs DISCARDS:
+ *   GREEN = paste_rect \ core (top + left) — kept, drawn as the directional feather
+ *           (see drawKeptFeather). Ends flush with the core's right/bottom edges.
+ *   RED   = overlapInnerRect \ paste_rect — the whole right overlap column (full height)
+ *           and bottom overlap row (full width), INCLUDING the top-right and bottom-left
+ *           overhang corners. Sampled/diffused for context, then discarded: the node
+ *           pastes nothing here; the later right/lower neighbor feathers the seam. Flat.
+ */
+function drawOverlapStrips(g, t, greenCol, discCol) {
+  var c = t.core, oi = t.overlapInnerRect;
+  /* discarded (red): right overlap column (full oi height, incl. top-right overhang) +
+     bottom overlap row (full oi width, incl. bottom-left overhang) = overlapInner \ paste */
+  fillBox(g, c.x1, oi.y0, oi.x1, oi.y1, discCol);  /* right column */
+  fillBox(g, oi.x0, c.y1, oi.x1, oi.y1, discCol);  /* bottom row   */
+  /* kept (green): paste_rect \ core, feathered */
+  drawKeptFeather(g, t, parseRGBA(greenCol));
+}
+
+function render() {
+  var canvas = els.cv;
+  var dpr = window.devicePixelRatio || 1;
+  var box = els.viewport.getBoundingClientRect();
+  var cw = Math.max(50, Math.floor(box.width));
+  var ch = Math.max(50, Math.floor(box.height));
+  canvas.width = Math.round(cw * dpr);
+  canvas.height = Math.round(ch * dpr);
+  var g = canvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cw, ch);
+
+  if (!state.layout) {
+    drawErrorState(g, cw, ch);
+    els.scaleNote.textContent = "";
+    hideTip();
+    return;
+  }
+
+  var lay = state.layout;
+  var pad = 14;
+  var scale = Math.min((cw - 2 * pad) / lay.W, (ch - 2 * pad) / lay.H);
+  scale = Math.min(scale, 8); /* don't blow up tiny canvases absurdly */
+  var offX = (cw - lay.W * scale) / 2;
+  var offY = (ch - lay.H * scale) / 2;
+  state.view = { scale: scale, offX: offX, offY: offY };
+
+  g.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+
+  /* --- base: canvas background + cores (checkerboard tints) --- */
+  var colCoreA = cssVar("--core-a"), colCoreB = cssVar("--core-b");
+  fillRectPx(g, { x0: 0, y0: 0, x1: lay.W, y1: lay.H }, cssVar("--canvas-bg"));
+  lay.tiles.forEach(function (t) {
+    fillRectPx(g, t.core, ((t.col + t.row) % 2 === 0) ? colCoreA : colCoreB);
+  });
+
+  /* --- bands: anchor halo (outer, discarded) then the directional overlap band (inner) --- */
+  var colKept = cssVar("--kept-fill"), colDiscard = cssVar("--discard-fill"), colRing = cssVar("--ring-fill");
+  /* anchor halo = cropRect \ overlapInnerRect (frozen context, always discarded) */
+  lay.tiles.forEach(function (t) {
+    if (!sameRect(t.cropRect, t.overlapInnerRect)) fillAnnulus(g, t.cropRect, t.overlapInnerRect, colRing);
+  });
+  /* context_overlap band, color-coded per side: green kept (top/left), red discarded (right/bottom) */
+  lay.tiles.forEach(function (t) {
+    if (!sameRect(t.overlapInnerRect, t.core)) drawOverlapStrips(g, t, colKept, colDiscard);
+  });
+
+  /* --- core boundaries (seam lines) --- */
+  var colCoreLine = cssVar("--core-line");
+  lay.tiles.forEach(function (t) {
+    strokeRectPx(g, t.core, colCoreLine, 1, null, scale);
+  });
+
+  /* --- active (hovered or pinned) tile emphasis --- */
+  var activeIdx = (state.pinnedTile >= 0) ? state.pinnedTile : state.hoverTile;
+  if (activeIdx >= 0 && activeIdx < lay.tiles.length) {
+    var t = lay.tiles[activeIdx];
+    fillRectPx(g, { x0: 0, y0: 0, x1: lay.W, y1: lay.H }, cssVar("--scrim"));
+    fillRectPx(g, t.core, ((t.col + t.row) % 2 === 0) ? colCoreA : colCoreB);
+    if (!sameRect(t.cropRect, t.overlapInnerRect)) fillAnnulus(g, t.cropRect, t.overlapInnerRect, cssVar("--ring-fill-hi"));
+    if (!sameRect(t.overlapInnerRect, t.core)) drawOverlapStrips(g, t, cssVar("--kept-fill-hi"), cssVar("--discard-fill-hi"));
+    strokeRectPx(g, t.core, cssVar("--canvas-edge"), 1.5, null, scale);
+    strokeRectPx(g, t.pasteRect, cssVar("--kept-fill-hi"), 1.5, null, scale); /* directional paste extent (core + kept feather) */
+    strokeRectPx(g, t.cropRect, cssVar("--crop-line"), 2, [6, 4], scale);     /* symmetric sampled crop */
+  }
+
+  /* --- canvas edge --- */
+  strokeRectPx(g, { x0: 0, y0: 0, x1: lay.W, y1: lay.H }, cssVar("--canvas-edge"), 1.5, null, scale);
+
+  els.scaleNote.textContent = "Rendered at " + (scale * 100).toFixed(1) +
+    "% of true size (1 screen px = " + (1 / scale).toFixed(2) + " canvas px)";
+
+  updateTip(activeIdx);
+}
+
+function drawErrorState(g, cw, ch) {
+  g.fillStyle = cssVar("--err-bg");
+  g.fillRect(0, 0, cw, ch);
+  g.fillStyle = cssVar("--err");
+  g.font = "600 15px system-ui, sans-serif";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText("Configuration error — see Warnings panel", cw / 2, ch / 2 - 12);
+  g.fillStyle = cssVar("--muted");
+  g.font = "13px system-ui, sans-serif";
+  g.fillText("Caps too small for the chosen context_overlap + context_anchor at this canvas size.", cw / 2, ch / 2 + 12);
+}
+
+/* =====================================================================
+ * Hover / selection and tooltip
+ * ===================================================================== */
+
+function tileIndexAt(cssX, cssY) {
+  if (!state.layout) return -1;
+  var lay = state.layout;
+  var v = state.view;
+  var x = (cssX - v.offX) / v.scale;
+  var y = (cssY - v.offY) / v.scale;
+  if (x < 0 || y < 0 || x >= lay.W || y >= lay.H) return -1;
+  var col = (x >= (lay.solX.n - 1) * lay.solX.base) ? lay.solX.n - 1 : Math.floor(x / lay.solX.base);
+  var row = (y >= (lay.solY.n - 1) * lay.solY.base) ? lay.solY.n - 1 : Math.floor(y / lay.solY.base);
+  return row * lay.solX.n + col;
+}
+
+function neighborSidesText(nb) {
+  var sides = [];
+  if (nb.top) sides.push("top");
+  if (nb.left) sides.push("left");
+  if (nb.right) sides.push("right");
+  if (nb.bottom) sides.push("bottom");
+  return sides.length ? sides.join(", ") : "none (single tile on both axes)";
+}
+
+function keptSidesText(k) {
+  var sides = [];
+  if (k.top) sides.push("top");
+  if (k.left) sides.push("left");
+  return sides.length ? sides.join(" + ") : "none (top-left tile — no processed neighbor)";
+}
+
+function discardedSidesText(d) {
+  var sides = [];
+  if (d.right) sides.push("right");
+  if (d.bottom) sides.push("bottom");
+  return sides.length ? sides.join(" + ") : "none (bottom-right tile)";
+}
+
+function updateTip(activeIdx) {
+  if (activeIdx < 0 || !state.layout) { hideTip(); return; }
+  var lay = state.layout;
+  var t = lay.tiles[activeIdx];
+  var withinCaps = t.sampledW <= state.maxW && t.sampledH <= state.maxH;
+
+  var h = "";
+  h += "<div class='t-title'>Tile (" + (t.col + 1) + ", " + (t.row + 1) + ") of " +
+       lay.solX.n + " × " + lay.solY.n + " — " + t.cls +
+       (state.pinnedTile === activeIdx ? " (pinned)" : "") + "</div>";
+  h += "<div>core " + fmt(t.core.x1 - t.core.x0) + " × " + fmt(t.core.y1 - t.core.y0) +
+       " at (" + fmt(t.core.x0) + ", " + fmt(t.core.y0) + ")</div>";
+  h += "<div>sampled <strong>" + fmt(t.sampledW) + " × " + fmt(t.sampledH) + "</strong> — " +
+       (withinCaps
+         ? "<span class='t-ok'>within caps " + fmt(state.maxW) + " × " + fmt(state.maxH) + "</span>"
+         : "<span class='t-bad'>EXCEEDS caps " + fmt(state.maxW) + " × " + fmt(state.maxH) + "</span>") +
+       "</div>";
+  h += "<div class='t-note'>crop = core + overlap + context (symmetric) on: " + neighborSidesText(t.nb) + "</div>";
+  h += "<div class='t-note'><span class='t-ok'>kept &amp; feathered (green):</span> " + keptSidesText(t.keptSides) + "</div>";
+  h += "<div class='t-note'><span class='t-bad'>discarded — context only (red):</span> " + discardedSidesText(t.discardedSides) +
+       "; anchor halo (frozen) discarded on every neighbor side</div>";
+  if (t.cropRect.clamped || t.overlapInnerRect.clamped) {
+    h += "<div class='t-note'>context halo clamped at the canvas edge</div>";
+  }
+  els.tip.innerHTML = h;
+  els.tip.style.display = "block";
+
+  /* anchor at the crop's top-left corner (clamped inside the viewport) */
+  var v = state.view;
+  var px = v.offX + t.cropRect.x0 * v.scale + 8;
+  var py = v.offY + t.cropRect.y0 * v.scale + 8;
+  var box = els.viewport.getBoundingClientRect();
+  var tb = els.tip.getBoundingClientRect();
+  px = Math.min(px, box.width - tb.width - 8);
+  py = Math.min(py, box.height - tb.height - 8);
+  els.tip.style.left = Math.max(4, px) + "px";
+  els.tip.style.top = Math.max(4, py) + "px";
+}
+
+function hideTip() {
+  els.tip.style.display = "none";
+}
+
+function onPointerMove(ev) {
+  var rect = els.cv.getBoundingClientRect();
+  var idx = tileIndexAt(ev.clientX - rect.left, ev.clientY - rect.top);
+  if (idx !== state.hoverTile) {
+    state.hoverTile = idx;
+    if (state.pinnedTile < 0) render();
+  }
+}
+
+function onPointerLeave() {
+  state.hoverTile = -1;
+  if (state.pinnedTile < 0) render();
+}
+
+function onClick(ev) {
+  var rect = els.cv.getBoundingClientRect();
+  var idx = tileIndexAt(ev.clientX - rect.left, ev.clientY - rect.top);
+  state.pinnedTile = (idx === state.pinnedTile) ? -1 : idx; /* -1 when clicking outside */
+  render();
+}
+
+function onKeyDown(ev) {
+  if (ev.key === "Escape" && state.pinnedTile >= 0) {
+    state.pinnedTile = -1;
+    render();
+  }
+}
+
+/* =====================================================================
+ * Self-test footer
+ * ===================================================================== */
+
+function renderSelfTests() {
+  var results = runSelfTests();
+  var passed = results.filter(function (r) { return r.pass; }).length;
+  var ok = passed === results.length;
+  els.testsStatus.innerHTML = "Self-tests: <span class='" + (ok ? "pass" : "fail") + "'>" +
+    passed + "/" + results.length + (ok ? " passed" : " PASSED — FAILURES, do not trust this page") + "</span>";
+
+  var h = "<table><tr><th></th><th>Case</th><th>Expected</th><th>Got</th></tr>";
+  results.forEach(function (r) {
+    h += "<tr><td class='" + (r.pass ? "pass" : "fail") + "'>" + (r.pass ? "pass" : "FAIL") + "</td>" +
+         "<td>" + r.name + "</td><td><code>" + r.want + "</code></td><td><code>" + r.got + "</code></td></tr>";
+  });
+  h += "</table>";
+  els.testsDetail.innerHTML = h;
+}
+
+/* =====================================================================
+ * Init
+ * ===================================================================== */
+
+function init() {
+  els.cv = document.getElementById("cv");
+  els.viewport = document.getElementById("viewport");
+  els.tip = document.getElementById("tip");
+  els.scaleNote = document.getElementById("scale-note");
+  els.ow = document.getElementById("in-ow");
+  els.oh = document.getElementById("in-oh");
+  els.factor = document.getElementById("in-factor");
+  els.mw = document.getElementById("in-mw");
+  els.mh = document.getElementById("in-mh");
+  els.ctxIn = document.getElementById("in-ctx");
+  els.overlap = document.getElementById("in-overlap");
+  els.canvasSize = document.getElementById("canvas-size");
+  els.readoutsBody = document.getElementById("readouts-body");
+  els.warningsBody = document.getElementById("warnings-body");
+  els.testsStatus = document.getElementById("tests-status");
+  els.testsDetail = document.getElementById("tests-detail");
+
+  [els.ow, els.oh, els.factor, els.mw, els.mh, els.overlap, els.ctxIn].forEach(function (el) {
+    el.addEventListener("input", recompute);
+    el.addEventListener("change", function () { normalizeInputs(); recompute(); });
+  });
+
+  els.cv.addEventListener("pointermove", onPointerMove);
+  els.cv.addEventListener("pointerleave", onPointerLeave);
+  els.cv.addEventListener("click", onClick);
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("resize", render);
+  var mq = window.matchMedia("(prefers-color-scheme: dark)");
+  if (mq.addEventListener) mq.addEventListener("change", render);
+
+  renderSelfTests();
+  recompute();
+}
+
+init();
+</script>
+</body>
+</html>

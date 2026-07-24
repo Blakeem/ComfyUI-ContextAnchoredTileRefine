@@ -1,0 +1,6 @@
+# Development-only files kept in git but excluded from the registry archive
+docs/
+tests/
+conftest.py
+.github/
+.comfyignore

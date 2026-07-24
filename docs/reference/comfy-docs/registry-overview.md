@@ -1,0 +1,42 @@
+> **Source:** https://docs.comfy.org/registry/overview (mdx source: `registry/overview.mdx` in [Comfy-Org/docs](https://github.com/Comfy-Org/docs))
+> **Doc set version:** docs.comfy.org (current, main branch)
+> **Retrieved:** 2026-07-22
+
+# Overview
+
+## Introduction
+
+The Registry is a public collection of custom nodes that powers [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager). Developers can publish, version, deprecate, and track metrics related to their custom nodes. ComfyUI users can discover, install, and rate custom nodes from the registry through ComfyUI-Manager.
+
+## Why use the Registry?
+
+The Comfy Registry helps the community by standardizing the development of custom nodes:
+
+**Node Versioning:** Developers frequently publish new versions of their custom nodes which often break workflows that rely on them. With registry nodes being [semantically versioned](https://semver.org/), users can now choose to safely upgrade, deprecate, or lock their node versions in place, knowing in advance how their actions will impact their workflows. The workflow JSON will store the version of the node used, so you can always reliably reproduce your workflows.
+
+**Node Security:** The registry will serve as a backend for the [ComfyUI-manager](https://github.com/Comfy-Org/ComfyUI-Manager). All nodes will be scanned for malicious behaviour such as custom pip wheels, arbitrary system calls, etc. Nodes that pass these checks will have a verification flag beside their name on the UI-manager. For a list of security standards, see the [standards](/registry/standards).
+
+**Search:** Search across all nodes on the Registry to find existing nodes for your workflow.
+
+## Publishing Nodes
+
+Get started publishing your first node by following the [tutorial](/registry/publishing).
+
+## Frequently Asked Questions
+
+**Do registry nodes have unique identifiers?**
+Yes, a custom node on the Registry has a globally unique name and this allows Comfy Workflow JSON files to uniquely identify any custom node without collisions.
+
+**Are there any restrictions on what I can publish?**
+Check the [standards](/registry/standards) for more information.
+
+**How do you ensure node stability?**
+Once a custom node version is published, it cannot be changed. This ensures that users can rely on the stability of the custom node over time.
+
+**How are nodes versioned?**
+Custom nodes are versioned using [semantic versioning](https://semver.org/). This allows users to understand the impact of upgrading to a new version.
+
+**How do I deprecate a node version?**
+You can deprecate a version in the Comfy Registry website by clicking **More Actions > Deprecate**. Users who installed this version will be shown the deprecation message and be encouraged to upgrade to a newer version.
+
+Deprecating versions is useful when an issue is discovered after publishing.
