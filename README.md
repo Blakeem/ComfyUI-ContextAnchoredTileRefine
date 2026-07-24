@@ -4,6 +4,8 @@ A single ComfyUI node for tiled upscaling and for refining masked areas of large
 
 ## Node inputs
 
+![Context-Anchored Tile Refine Node](node.png)
+
 | Input | Type | What it does |
 |---|---|---|
 | `image` | IMAGE | The image to refine (already upscaled or composited). |
@@ -24,6 +26,8 @@ Tiles are processed in raster order, so each tile's top and left neighbors are a
 `context_overlap` keeps the raw input of the shared band and diffuses it twice, once from each side, each reaching out to its `context_anchor`, then blends the two results together. Both start from the same raw pixels and each saw the other side as context, so they agree and the seam disappears. This happens only where a tile borders a tile that was already processed, never at the image border.
 
 Open [`docs/tile-simulator.html`](docs/tile-simulator.html) in a browser to preview the tile layout for any image size and settings.
+
+You can see how I use it in my [`personal ComfyUI workflow`]("Chroma%20+%20z-image%20Hybrid%20workflow.json").
 
 ## Masked refine
 
