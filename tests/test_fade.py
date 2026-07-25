@@ -13,7 +13,7 @@ CORE = grid.Rect(x0=32, y0=32, x1=64, y1=64)
 
 
 def test_gradient_binary_core_indicator_latent_scale():
-    m = sampling.tile_gradient(CROP, CORE, 0, scale=8)
+    m = sampling.tile_gradient(CROP, CORE, scale=8)
 
     assert m.shape == (8, 8)
     assert m.dtype == torch.float32
@@ -25,7 +25,7 @@ def test_gradient_binary_core_indicator_latent_scale():
 
 
 def test_gradient_binary_core_indicator_pixel_scale():
-    a = sampling.tile_gradient(CROP, CORE, 0, scale=1)
+    a = sampling.tile_gradient(CROP, CORE, scale=1)
 
     assert a.shape == (64, 64)
     expected = torch.zeros(64, 64)
@@ -37,7 +37,7 @@ def test_gradient_all_ones_when_crop_equals_core():
     rect = grid.Rect(x0=16, y0=24, x1=56, y1=64)
 
     for scale in (1, 8):
-        m = sampling.tile_gradient(rect, rect, 0, scale=scale)
+        m = sampling.tile_gradient(rect, rect, scale=scale)
         assert torch.equal(m, torch.ones(40 // scale, 40 // scale))
 
 
@@ -46,7 +46,7 @@ def test_gradient_one_sided_binary_indicator():
     crop = grid.Rect(x0=0, y0=0, x1=56, y1=40)
     core = grid.Rect(x0=16, y0=0, x1=56, y1=40)
 
-    m = sampling.tile_gradient(crop, core, 0, scale=8)
+    m = sampling.tile_gradient(crop, core, scale=8)
 
     assert m.shape == (5, 7)
     expected_row = torch.tensor([0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])

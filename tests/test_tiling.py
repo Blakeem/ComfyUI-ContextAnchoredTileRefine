@@ -276,7 +276,7 @@ def test_overlap_masks_forwarded_per_tile(comfy_stubs):
         # Binary overlap_inner_rect indicator (core+overlap = 1, ring = 0), not a ramp.
         # At ctx=0 the crop == overlap_inner_rect, so there is no context ring and the mask
         # is all-ones; the ctx>0 freeze is covered by test_ctx_ring_frozen_in_binary_mask.
-        assert torch.equal(call["denoise_mask"], sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, 0, scale=8))
+        assert torch.equal(call["denoise_mask"], sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8))
         assert torch.equal(call["denoise_mask"], torch.ones(7, 7))
 
 
@@ -296,7 +296,7 @@ def test_ctx_ring_frozen_in_binary_mask(comfy_stubs):
         mask = call["denoise_mask"]
         crop, oir = tile.crop_rect, tile.overlap_inner_rect
         assert mask.shape == (9, 9)
-        assert torch.equal(mask, sampling.tile_gradient(crop, oir, 0, scale=8))
+        assert torch.equal(mask, sampling.tile_gradient(crop, oir, scale=8))
         # Strictly binary, with BOTH a frozen ring (0s) and a released core+overlap (1s).
         assert ((mask == 0.0) | (mask == 1.0)).all()
         assert (mask == 0.0).any()

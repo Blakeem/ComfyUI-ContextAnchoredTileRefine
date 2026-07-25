@@ -55,14 +55,12 @@ def crop_image_to(image, height, width):
     return image[:, :height, :width, :]
 
 
-def tile_gradient(crop, core, fade, scale=1):
+def tile_gradient(crop, core, scale=1):
     # Binary denoise-mask indicator: 1 for
     # every cell whose center lies inside the `core` rect, 0 outside. Cell centers
     # (k+0.5) so one formula works at any grid resolution via `scale`; the pipeline uses
     # scale=8 and passes overlap_inner_rect as `core` (core+overlap diffused at full
-    # strength, context_anchor ring frozen). `fade` is retained for call-site stability
-    # and must be 0: the fractional 1->0 ramp was removed with the pixel-space blend and
-    # the directional-feather rewrite. The mask stays binary because ComfyUI's static
+    # strength, context_anchor ring frozen). The mask stays binary because ComfyUI's static
     # inpaint blend (KSamplerX0Inpaint) re-applies denoise_mask on every step, so a
     # fractional cell is only ever partially denoised — at low step counts (z-image turbo
     # ~8 steps) that leaves an under-refined halo along the seam. A binary {0,1} mask
@@ -288,9 +286,12 @@ def _mask_bbox(mask_bin):
 
 def _expand_snap_clamp(bbox, anchor, H, W):
     # Expand the bbox by `anchor` (the frozen-background halo the subject conditions
-    # against), snap x0/y0 DOWN and x1/y1 UP to /8, then clamp to [0,H]/[0,W]. Snapping
-    # before clamping keeps interior edges on the /8 grid; a mask touching a non-/8 image
-    # border yields a clamped, non-/8 crop that _refine_tiles' internal pad then handles.
+    # against), snap x0/y0 DOWN and x1/y1 UP to /8, then clamp to [0,H]/[0,W] and floor the
+    # result at 8px. Snapping before clamping keeps interior edges on the /8 grid; a mask
+    # touching a non-/8 image border yields a clamped, non-/8 crop that _refine_tiles'
+    # internal pad then handles. That pad is reflect-mode, so it needs pad < dim: with
+    # anchor=0 the clamp can leave fewer than 8px against a non-/8 border, hence the floor
+    # (node.py guarantees H,W >= 8, so widening back always fits).
     y0, y1, x0, x1 = bbox
     y0 = ((y0 - anchor) // 8) * 8
     x0 = ((x0 - anchor) // 8) * 8
@@ -300,6 +301,12 @@ def _expand_snap_clamp(bbox, anchor, H, W):
     x0 = max(0, x0)
     y1 = min(H, y1)
     x1 = min(W, x1)
+    if y1 - y0 < 8:
+        y0 = max(0, y1 - 8)
+        y1 = min(H, y0 + 8)
+    if x1 - x0 < 8:
+        x0 = max(0, x1 - 8)
+        x1 = min(W, x0 + 8)
     return y0, y1, x0, x1
 
 
@@ -329,13 +336,16 @@ def seam_displacements(tile, sub, region):
 
     # Squared difference between this tile's refinement and the already-pasted neighbor,
     # averaged over batch and channels. Only the BAND is a valid error surface: inside the
-    # core, `region` is raw un-refined canvas, so those rows/cols are excluded.
+    # core, `region` is raw un-refined canvas, so the surface is taken from each kept band
+    # directly and the core is never computed. The reduction is elementwise per spatial
+    # position, so band-slicing first yields the same values as slicing a full-tile surface.
     # The DP is small and strictly sequential, so it runs on the CPU.
-    err = ((sub - region) ** 2).mean(dim=(0, 3)).float().cpu()   # [h, w]
     if tile.kept_top and top_band > 0:
-        disp_top = _path_displacement(err[:top_band, :], top_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
+        err_top = ((sub[:, :top_band, :, :] - region[:, :top_band, :, :]) ** 2).mean(dim=(0, 3)).float().cpu()   # [top_band, w]
+        disp_top = _path_displacement(err_top, top_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
     if tile.kept_left and left_band > 0:
-        disp_left = _path_displacement(err[:, :left_band].T.contiguous(), left_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
+        err_left = ((sub[:, :, :left_band, :] - region[:, :, :left_band, :]) ** 2).mean(dim=(0, 3)).float().cpu()   # [h, left_band]
+        disp_left = _path_displacement(err_left.T.contiguous(), left_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
 
     return disp_top, disp_left
 
@@ -494,10 +504,10 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         # surrounding background stays frozen context; the n=1 (unexpanded) masked case
         # yields denoise_mask = region_latent (NOT None), anchoring the in-crop background.
         if region_pixel is None:
-            denoise_mask = tile_gradient(crop, tile.overlap_inner_rect, 0, scale=8) if expanded else None
+            denoise_mask = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else None
         else:
             reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
-            grad = tile_gradient(crop, tile.overlap_inner_rect, 0, scale=8) if expanded else 1.0
+            grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else 1.0
             denoise_mask = grad * reg
         samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
         decoded = vae.decode(samples)

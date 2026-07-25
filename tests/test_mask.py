@@ -57,6 +57,28 @@ def test_expand_snap_clamp_border_clamp_non_multiple():
     assert sampling._expand_snap_clamp((300, 322, 4, 12), 8, 322, 330) == (288, 322, 0, 24)
 
 
+def test_expand_snap_clamp_anchor0_non_multiple_border_floors_at_8():
+    # anchor=0 leaves no snap-down slack: y1/x1 snap up to 24 then clamp to 17, which
+    # would leave a 1px crop. _refine_tiles' reflect pad needs pad < dim, so the crop is
+    # re-expanded back to the 8px floor.
+    assert sampling._expand_snap_clamp((16, 17, 16, 17), 0, 17, 17) == (9, 17, 9, 17)
+
+
+def test_masked_refine_anchor0_corner_mask_on_non_multiple_image(comfy_stubs):
+    # Regression: the 1px crop above used to reach pad_image_to_multiple and raise
+    # "Padding size should be less than the corresponding input dimension".
+    image = torch.rand(1, 17, 17, 3)
+    mask = torch.zeros(1, 17, 17)
+    mask[:, 16, 16] = 1.0
+
+    out, guider, vae, noise = _run_mask(image, mask, ctx=0, overlap=0)
+
+    assert out.shape == image.shape
+    # Everything outside the 8px-floored crop (9:17, 9:17) stays byte-identical.
+    assert torch.equal(out[:, :9, :, :], image[:, :9, :, :])
+    assert torch.equal(out[:, :, :9, :], image[:, :, :9, :])
+
+
 # ---- latent region gate (tile_gradient ∩ region_latent) -------------------
 
 
@@ -79,7 +101,7 @@ def test_region_gate_is_grad_times_region_latent(comfy_stubs):
     assert len(guider.calls) == 4
     for tile, call in zip(layout.tiles, guider.calls):
         crop = tile.crop_rect
-        grad = sampling.tile_gradient(crop, tile.overlap_inner_rect, 0, scale=8)
+        grad = sampling.tile_gradient(crop, tile.overlap_inner_rect, scale=8)
         reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
         dm = call["denoise_mask"]
         assert dm.shape == (1, crop.y1 // 8 - crop.y0 // 8, crop.x1 // 8 - crop.x0 // 8)
