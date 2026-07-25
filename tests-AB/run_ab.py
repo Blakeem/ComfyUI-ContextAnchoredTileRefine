@@ -113,11 +113,8 @@ class RunConfig:
     values, so a new run only spells out what it changes. The model here is the
     UNPATCHED node 185 — see BaseGen for the LoRA'd base-generation settings."""
     label: str                       # goes in the output filename
-    seam_mode: str = "min_error"     # sampling.SEAM_MODES: straight | warp | min_error
     context_anchor: int = 32
     context_overlap: int = 32
-    warp_amount: float = 0.5
-    warp_scale: int = 64
     max_tile_width: int = 1536       # node 234: base width x2
     max_tile_height: int = 2048      # node 235: base height x2
     seed: int = 42                   # node 229 RandomNoise
@@ -155,12 +152,12 @@ IMAGES = [
 RUNS = [
     # The shipped configuration. Add entries to compare against it; each renders one image
     # per IMAGES entry as AB_{image_label}__{run_label}.png.
-    RunConfig(label="min_error", seam_mode="min_error"),
+    RunConfig(label="baseline"),
 ]
 
 # The run whose settings match what was already rendered in ComfyUI, so its output
 # can be diffed against ImageSource.reference as a fidelity check.
-REFERENCE_RUN = "min_error"
+REFERENCE_RUN = "baseline"
 
 # =========================== EDIT ABOVE TO ADD RUNS ===========================
 
@@ -427,9 +424,6 @@ def render(image, run, pixels, conds, empty, model, vae, settings):
             max_tile_height=run.max_tile_height,
             context_anchor=run.context_anchor,
             context_overlap=run.context_overlap,
-            seam_mode=run.seam_mode,
-            warp_amount=run.warp_amount,
-            warp_scale=run.warp_scale,
         )
 
     # refine_image must be size-preserving; verify before the tensor reaches disk.

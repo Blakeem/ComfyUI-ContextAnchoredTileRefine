@@ -32,7 +32,7 @@ def test_paste_geometry_sanity():
 def test_zero_displacement_reproduces_the_straight_ramp_bit_for_bit():
     # disp=None takes a 1-D code path; a zero displacement takes the 2-D one. They must agree
     # EXACTLY, which is what keeps every hand-computed feather/tiling expectation valid and
-    # makes a degenerate warp/min_error identical to `straight`. Comparing _alpha() against
+    # makes a zero displacement identical to no displacement. Comparing _alpha() against
     # feather_alpha's own defaults would just be the same call twice and assert nothing.
     zeros_top = torch.zeros(PASTE.x1 - PASTE.x0)
     zeros_left = torch.zeros(PASTE.y1 - PASTE.y0)
@@ -101,46 +101,6 @@ def test_separability_preserved_corner_is_product_of_the_two_seams():
     assert torch.allclose(a, vertical[:, None] * horizontal[None, :], atol=1e-6)
 
 
-# --- Warp field --------------------------------------------------------------------------
-
-
-def test_warp_field_is_deterministic_and_bounded():
-    a = sampling._warp_field(256, 256, 64, seed=7)
-    b = sampling._warp_field(256, 256, 64, seed=7)
-    c = sampling._warp_field(256, 256, 64, seed=8)
-    assert torch.equal(a, b)                 # same seed -> same field
-    assert not torch.equal(a, c)             # different seed -> different field
-    xs = torch.arange(0, 256, dtype=torch.float32)
-    ys = torch.zeros_like(xs)
-    v = sampling._warp_slice(a, 64, ys, xs)
-    assert v.shape == (256,)
-    assert torch.isfinite(v).all()
-    assert float(v.min()) >= -1.0 and float(v.max()) <= 1.0
-
-
-def test_warp_slice_is_canvas_anchored_not_tile_local():
-    # The crux for multi-tile runs: two tiles that meet along a seam sample the SAME absolute
-    # canvas coords, so they must agree on the displacement where they overlap — otherwise
-    # the meander would reset at every tile boundary and re-create a visible discontinuity.
-    low = sampling._warp_field(512, 512, 64, seed=3)
-    left_xs = torch.arange(0, 300, dtype=torch.float32)
-    right_xs = torch.arange(200, 512, dtype=torch.float32)
-    left = sampling._warp_slice(low, 64, torch.full_like(left_xs, 128.0), left_xs)
-    right = sampling._warp_slice(low, 64, torch.full_like(right_xs, 128.0), right_xs)
-    assert torch.allclose(left[200:300], right[:100], atol=1e-6)
-
-
-def test_warp_field_is_low_frequency_not_grain():
-    # The no-added-grain constraint: the field must vary far more slowly than a pixel, so
-    # neighbouring samples are highly correlated (a white-noise field would not be).
-    low = sampling._warp_field(512, 512, 64, seed=5)
-    xs = torch.arange(0, 512, dtype=torch.float32)
-    v = sampling._warp_slice(low, 64, torch.zeros_like(xs), xs)
-    step = (v[1:] - v[:-1]).abs().mean()
-    spread = (v.max() - v.min())
-    assert float(step) < float(spread) / 50.0
-
-
 # --- Minimum-error path ------------------------------------------------------------------
 
 
@@ -191,11 +151,11 @@ def _crossing_for_valley(row, band, length=24, plateau=None, k=None):
     return int(crossing[0])
 
 
-# --- _seam_displacements: the wiring the default seam mode actually runs through ---------
-# Everything above tests the pieces. These test that min_error hands the RIGHT error surface,
-# to the RIGHT seam, with the RIGHT orientation and sign — the part a containment-only test
-# cannot see, and where a swapped, negated, reversed or core-sourced surface would otherwise
-# go unnoticed because the output still "looks like" a feather.
+# --- seam_displacements: the wiring the composite actually runs through -------------------
+# Everything above tests the pieces. These test that the RIGHT error surface reaches the
+# RIGHT seam with the RIGHT orientation and sign — the part a containment-only test cannot
+# see, and where a swapped, negated, reversed or core-sourced surface would go unnoticed
+# because the output still "looks like" a feather.
 
 
 PASTE_H = TILE.paste_rect.y1 - TILE.paste_rect.y0
@@ -229,8 +189,7 @@ def _planted_tile_inputs(seam):
 
 def _disp(seam):
     sub, region, valley = _planted_tile_inputs(seam)
-    disp_top, disp_left = sampling._seam_displacements(
-        sampling.SEAM_MIN_ERROR, TILE, sub, region, None, 64, 0.5)
+    disp_top, disp_left = sampling.seam_displacements(TILE, sub, region)
     return disp_top, disp_left, valley
 
 
@@ -269,8 +228,7 @@ def test_min_error_reads_the_band_not_the_core():
     sub_polluted[:, TOP_BAND_T:, :, :] = torch.rand(1, PASTE_H - TOP_BAND_T, PASTE_W, 3) * 10.0
 
     clean, _, _ = _disp("top")
-    polluted, _ = sampling._seam_displacements(
-        sampling.SEAM_MIN_ERROR, TILE, sub_polluted, region, None, 64, 0.5)
+    polluted, _ = sampling.seam_displacements(TILE, sub_polluted, region)
 
     assert torch.equal(clean, polluted)
     assert torch.allclose(clean, _u50() - (valley.float() + 0.5) / TOP_BAND_T, atol=1e-6)
@@ -292,21 +250,6 @@ def test_min_error_alpha_handover_follows_the_planted_cut():
     assert max(crossing) - min(crossing) >= 2                  # genuinely not a straight line
     assert crossing[0] < crossing[-1]                          # rises with the staircase
     assert all(b >= a for a, b in zip(crossing, crossing[1:]))  # tracks it over the whole seam
-
-
-def test_straight_and_warp_do_not_consult_the_error_surface():
-    # straight must produce no displacement at all, and warp must ignore sub/region entirely
-    # (it is seeded off the canvas, not the image) — otherwise the A/B is not comparing what
-    # the mode names claim.
-    sub, region, _ = _planted_tile_inputs("top")
-    assert sampling._seam_displacements(sampling.SEAM_STRAIGHT, TILE, sub, region, None, 64, 0.5) == (None, None)
-
-    low = sampling._warp_field(224, 160, 64, seed=5)
-    from_planted = sampling._seam_displacements(sampling.SEAM_WARP, TILE, sub, region, low, 64, 0.5)
-    from_noise = sampling._seam_displacements(
-        sampling.SEAM_WARP, TILE, torch.rand_like(sub), torch.rand_like(region), low, 64, 0.5)
-    assert torch.equal(from_planted[0], from_noise[0])
-    assert torch.equal(from_planted[1], from_noise[1])
 
 
 def test_path_displacement_biases_the_feather_toward_the_cut():

@@ -70,17 +70,12 @@ class RecordingPreviewer:
         return ("JPEG", len(self.calls), 512)
 
 
-def _run(image, cap_w=32, cap_h=32, ctx=0, overlap=0, guider=None, seam_mode=sampling.SEAM_STRAIGHT):
+def _run(image, cap_w=32, cap_h=32, ctx=0, overlap=0, guider=None):
     # Tiny caps force real grids (refine_image sits below the widget-min-256
     # validation): L=80 cap=32 -> n=3, bases 32/32/16.
-    # seam_mode is pinned to `straight` rather than left at the pipeline default: every
-    # expectation in this module is hand-assembled from the undisplaced feather, which is the
-    # analytically checkable case. min_error's displacement is image-dependent (a DP over the
-    # tiles' own disagreement) and is pinned in test_seam_modes.py; the two meet in
-    # test_default_seam_mode_only_moves_pixels_inside_a_kept_band below.
     guider = guider if guider is not None else GridGuider()
     vae, noise = GridVAE(), GridNoise()
-    out = sampling.refine_image(image, guider, object(), SIGMAS, vae, noise, max_tile_width=cap_w, max_tile_height=cap_h, context_anchor=ctx, context_overlap=overlap, seam_mode=seam_mode)
+    out = sampling.refine_image(image, guider, object(), SIGMAS, vae, noise, max_tile_width=cap_w, max_tile_height=cap_h, context_anchor=ctx, context_overlap=overlap)
     return out, guider, vae, noise
 
 
@@ -238,7 +233,7 @@ def _decode_tile(canvas, source, layout, idx):
     return refined.movedim(1, -1).repeat_interleave(8, dim=1).repeat_interleave(8, dim=2)
 
 
-def _simulate_feather_canvas(image, layout, n_tiles=None):
+def _simulate_feather_canvas(image, layout, n_tiles=None, displace=True):
     # The fakes' math with the SAME encode-source split, directional feather, paste_rect,
     # and raster order as production (all tiles here are expanded: crop != core). Each tile
     # decodes its full crop — diffused core+overlap from the frozen raw source, anchor ring
@@ -247,6 +242,13 @@ def _simulate_feather_canvas(image, layout, n_tiles=None):
     # bands. The composite expression matches sampling.refine_image exactly; feather_alpha's
     # own math is pinned independently in test_feather.py. Test images are /8-aligned, so the
     # frozen raw source is the input `image` itself (padded == image).
+    #
+    # The seam displacement comes from sampling.seam_displacements, deliberately: it is a DP
+    # over the two tiles' own disagreement, so re-deriving it here would be a second copy of
+    # the algorithm rather than an independent check. Its VALUES are pinned in
+    # test_seam_routing.py; what this mirror independently reproduces is the VAE round trip,
+    # the raster order, the encode-source split, and the paste geometry.
+    # displace=False gives the undisplaced composite, used to show what routing changed.
     source = image
     canvas = image.clone()
     tiles = layout.tiles if n_tiles is None else layout.tiles[:n_tiles]
@@ -255,7 +257,9 @@ def _simulate_feather_canvas(image, layout, n_tiles=None):
         decoded = _decode_tile(canvas, source, layout, i)
         sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
         region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
-        alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left)[..., None]
+        disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
+        alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
+                                       disp_top=disp_top, disp_left=disp_left)[..., None]
         canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
     return canvas
 
@@ -372,41 +376,53 @@ def test_later_tile_feathers_into_earlier_neighbor(comfy_stubs):
     # ctx=0 → inner == crop, so tile 1's diffused crop encodes entirely from the RAW source
     # (the anchor ring is empty); after_t0 only supplies a ring here, so it is unused.
     t1_decoded = _decode_tile(after_t0, image, layout, 1)          # tile 1's decoded crop (56x56)
-    # The exact left-band alpha the pipeline uses (kept_top False → any row is the x ramp);
-    # feather_alpha's own math is pinned in test_feather.py.
-    alpha_col = sampling.feather_alpha(t1.paste_rect, t1.core, layout.overlap, t1.kept_top, t1.kept_left)[0, :16]
+    # The exact alpha the pipeline uses. The left band is routed onto the minimum-error path,
+    # so it varies row by row and cannot be written as a single column; the displacement comes
+    # from the production helper (its values are pinned in test_seam_routing.py) while the
+    # composite arithmetic below stays hand-written.
+    paste, crop = t1.paste_rect, t1.crop_rect
+    sub = t1_decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
+    region = after_t0[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
+    disp_top, disp_left = sampling.seam_displacements(t1, sub, region)
+    alpha = sampling.feather_alpha(paste, t1.core, layout.overlap, t1.kept_top, t1.kept_left,
+                                   disp_top=disp_top, disp_left=disp_left)
+    alpha_band = alpha[0:24, 0:16]                  # the part tiles 2/3 never touch
 
     neighbor_band = after_t0[:, 0:24, 24:40, :]     # tile 0's independent refinement (what hard paste keeps)
     tile_band = t1_decoded[:, 0:24, 0:16, :]        # tile 1's INDEPENDENT refinement of the same RAW pixels
-    expected_band = alpha_col[None, None, :, None] * tile_band + (1.0 - alpha_col)[None, None, :, None] * neighbor_band
+    expected_band = alpha_band[None, ..., None] * tile_band + (1.0 - alpha_band)[None, ..., None] * neighbor_band
 
     # Feathered band matches the hand-computed blend exactly, and is NOT the hard paste.
     assert torch.equal(out[:, 0:24, 24:40, :], expected_band)
     assert not torch.equal(out[:, 0:24, 24:40, :], neighbor_band)
-    # Ramp endpoints: solid at the seam (plateau), ~neighbor at the outer edge.
-    assert alpha_col[15].item() == 1.0 and alpha_col[0].item() < 0.05
+    # Ramp endpoints: near-solid at the seam, ~neighbor at the outer edge. Not exactly 1.0 and
+    # 0.0 any more, because routing slides the transition along the band per row.
+    assert float(alpha_band[:, 15].min()) > 0.9
+    assert float(alpha_band[:, 0].max()) < 0.2
+    # No assertion that the routed path MEANDERS here: the fake VAE's arange noise makes the
+    # error surface uniform along this seam, so a constant path is the correct answer for it.
+    # Meandering is pinned against a planted staircase in test_seam_routing.py.
     # Seam side: tile 1's core (cols 40..80) is 100% tile 1 — no blend past the seam.
     assert torch.equal(out[:, 0:24, 40:80, :], t1_decoded[:, 0:24, 16:56, :])
 
 
-def test_default_seam_mode_only_moves_pixels_inside_a_kept_band(comfy_stubs):
-    # The default is min_error, which displaces the feather transition off a straight line.
-    # The safety property that makes any seam mode admissible: it can only ever re-weight
-    # pixels INSIDE a kept overlap band (paste_rect \ core). Everywhere else alpha is exactly
-    # 1.0, so the output is this tile's own refinement and cannot be a blend of raw canvas.
-    # Checked at ctx=0, where the frozen anchor ring is empty and every tile's encode comes
-    # from the raw source — so a band change cannot propagate into a later tile's decode and
-    # the comparison isolates the composite. (At ctx>0 a band change legitimately re-conditions
-    # later tiles, which is the anchor doing its job.)
+def test_routing_only_moves_pixels_inside_a_kept_band(comfy_stubs):
+    # The safety property that makes minimum-error routing admissible: bending the feather can
+    # only ever re-weight pixels INSIDE a kept overlap band (paste_rect \ core). Everywhere
+    # else alpha is exactly 1.0, so the output is this tile's own refinement and can never be
+    # a blend of raw canvas. Checked at ctx=0, where the frozen anchor ring is empty and every
+    # tile's encode comes from the raw source, so a band change cannot propagate into a later
+    # tile's decode and the comparison isolates the composite. (At ctx>0 a band change
+    # legitimately re-conditions later tiles, which is the anchor doing its job.)
     image = torch.rand(1, 80, 80, 3)
 
-    straight, _, _, _ = _run(image, cap_w=56, cap_h=56, overlap=16, seam_mode=sampling.SEAM_STRAIGHT)
-    routed, _, _, _ = _run(image, cap_w=56, cap_h=56, overlap=16, seam_mode=sampling.SEAM_MIN_ERROR)
+    routed, _, _, _ = _run(image, cap_w=56, cap_h=56, overlap=16)
+    layout = _layout(80, 80, 56, 56, overlap=16)
+    straight = _simulate_feather_canvas(image, layout, displace=False)
 
     assert torch.isfinite(routed).all()
     assert not torch.equal(routed, straight)      # the routed cut genuinely does something
 
-    layout = _layout(80, 80, 56, 56, overlap=16)
     band_mask = torch.zeros(80, 80, dtype=torch.bool)
     for tile in layout.tiles:
         paste, core = tile.paste_rect, tile.core
@@ -419,23 +435,15 @@ def test_default_seam_mode_only_moves_pixels_inside_a_kept_band(comfy_stubs):
     assert not bool((differs & ~band_mask).any())  # every difference lies in a kept band
 
 
-def test_every_seam_mode_returns_the_full_input_size(comfy_stubs):
-    # Cheap end-to-end guard against a whole class of bug: a withdrawn seam-blend experiment
-    # once shadowed the local holding the canvas width, so the final crop_image_to() cropped
-    # the output to 8px wide. Every unit test still passed, because they exercise the alpha
+def test_output_keeps_the_full_input_size(comfy_stubs):
+    # Cheap end-to-end guard against a whole class of bug: a withdrawn seam experiment once
+    # shadowed the local holding the canvas width, so the final crop_image_to() cropped the
+    # output to 8px wide. Every unit test still passed, because they exercise the alpha
     # builders directly and never go through _refine_tiles. Shape catches it; nothing else did.
-    image = torch.rand(1, 80, 80, 3)
-
-    for mode in sampling.SEAM_MODES:
-        out, _, _, _ = _run(image, cap_w=56, cap_h=56, overlap=16, seam_mode=mode)
-        assert out.shape == image.shape, mode
-        assert torch.isfinite(out).all(), mode
-
-    # ...and a non-square canvas, so a height/width mix-up cannot pass either.
-    tall = torch.rand(1, 96, 64, 3)
-    for mode in sampling.SEAM_MODES:
-        out, _, _, _ = _run(tall, cap_w=48, cap_h=48, overlap=16, seam_mode=mode)
-        assert out.shape == tall.shape, mode
+    for image, cap in ((torch.rand(1, 80, 80, 3), 56), (torch.rand(1, 96, 64, 3), 48)):
+        out, _, _, _ = _run(image, cap_w=cap, cap_h=cap, overlap=16)
+        assert out.shape == image.shape
+        assert torch.isfinite(out).all()
 
 
 def test_feather_second_tile_encodes_raw_source_at_ctx0(comfy_stubs):

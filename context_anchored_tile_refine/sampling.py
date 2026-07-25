@@ -4,24 +4,19 @@ import torch
 
 from . import grid
 
-# seam_mode values (how the feather's transition is positioned along a seam).
-SEAM_STRAIGHT = "straight"     # no displacement — the transition is a straight line
-SEAM_WARP = "warp"             # displaced by low-frequency seeded coherent noise
-SEAM_MIN_ERROR = "min_error"   # displaced toward the Efros-Freeman minimum-error path
-# A list, NOT a tuple: ComfyUI only range-checks a COMBO when the schema entry is a list
-# (execution.py gates the membership test on isinstance(input_type, list)), and the datatype
-# reference specifies COMBO as list[str]. As a tuple an API-submitted typo would pass
-# validation, match no branch in _seam_displacements, and silently run as `straight`.
-SEAM_MODES = [SEAM_STRAIGHT, SEAM_WARP, SEAM_MIN_ERROR]
-
-# How WIDE the handover is, once seam_mode has POSITIONED it, is not configurable: the
-# full-band feather below is the only method. Two alternatives were built and A/B'd against
-# it on a night sky and a face (a narrow ramp landing exactly on the routed cut, and a binary
-# cut with no blending at all). All three measured the same tile-level DC step to within
-# 0.05/255, because that step spans the whole tile and no choice of handover position inside
-# a 32px band can move it. Visually the binary cut lost outright, tearing at a high-contrast
-# silhouette edge, so the feather stays and the axis was removed rather than left as dead
-# configuration.
+# How a seam is hidden is not configurable, by design: the node exposes only the geometry
+# that genuinely depends on the image (the tile caps, context_anchor, context_overlap) and
+# bakes in everything that A/B testing settled. Four alternatives were built, compared on a
+# night sky and a close-up face, and removed once they lost:
+#   a straight transition          an unbroken line is easy to spot even when it is faint
+#   a coherent-noise meander       organic, but reads as random next to a routed cut
+#   a ramp landing exactly on the  measured identical to the shipped feather; the routed
+#     routed cut                     path's benefit does not depend on landing precisely
+#   a hard cut, no blending        tore at a high-contrast silhouette edge
+# The last two matter for anyone tempted to re-add them: all placements measured the same
+# tile-level DC step to within 0.05/255, because that step spans the WHOLE tile and no
+# handover position inside a 32px band can move it. Only the hard cut differed visually,
+# and it lost.
 
 # Inter-tile feather curve, settled by visual A/B in ComfyUI (the only judge that counts
 # here) across character/landscape scenes and a deliberate worst case: a night sky with a
@@ -183,38 +178,6 @@ def feather_alpha(paste_rect, core, overlap, kept_top, kept_left, plateau=FEATHE
     return (ay * ax).clamp(0.0, 1.0)
 
 
-
-def _warp_field(canvas_h, canvas_w, scale, seed):
-    # Low-resolution seeded grid, one cell per `scale` canvas px. Sampling it bicubically
-    # (see _warp_slice) IS coherent value noise with a feature size of ~`scale` px — the
-    # cheap, grain-free way to get a smooth field. Generating it small is the point: white
-    # noise at pixel scale would read as grit, and the whole reason this hides a seam
-    # instead of adding texture is that the field varies far more slowly than a pixel.
-    # Kept at low res (a few KB) rather than materialized canvas-sized.
-    grid_h = max(2, math.ceil(canvas_h / scale) + 1)
-    grid_w = max(2, math.ceil(canvas_w / scale) + 1)
-    generator = torch.Generator().manual_seed(int(seed) & 0x7FFFFFFF)
-    low = torch.randn(1, 1, grid_h, grid_w, generator=generator, dtype=torch.float32)
-    return low / (low.std() + 1e-6)
-
-
-def _warp_slice(low, scale, ys, xs):
-    # Sample the warp field at ABSOLUTE canvas coords (ys, xs, both [n] float32) -> [n] in
-    # [-1,1]. Absolute coords are what make the warp canvas-anchored rather than tile-local:
-    # two tiles that meet along a shared seam sample the same coordinates and therefore agree
-    # on the displacement, so the meander runs continuously across the whole canvas instead
-    # of resetting at every tile boundary. Same draw-once/slice-per-tile discipline as
-    # canvas_noise. Bicubic keeps the field smooth (bilinear would kink at cell edges).
-    grid_h, grid_w = low.shape[2], low.shape[3]
-    # Cell j spans canvas [j*scale, (j+1)*scale); grid_sample(align_corners=False) maps
-    # normalized g to index (g+1)/2*size - 0.5, so index c/scale - 0.5 <=> g = 2c/(scale*size) - 1.
-    gx = xs / scale * 2.0 / grid_w - 1.0
-    gy = ys / scale * 2.0 / grid_h - 1.0
-    sample_grid = torch.stack([gx, gy], dim=-1)[None, None]  # [1,1,n,2], last dim is (x,y)
-    out = torch.nn.functional.grid_sample(low, sample_grid, mode="bicubic", align_corners=False, padding_mode="border")
-    return out[0, 0, 0].clamp(-1.0, 1.0)
-
-
 def _min_error_path(err):
     # Efros-Freeman minimum-error boundary cut (Image Quilting, SIGGRAPH 2001), 1-D DP.
     # err: [band, length] squared difference between the two tiles across the overlap band.
@@ -263,8 +226,8 @@ def _path_displacement(err, band, plateau, k):
     # compressed: at band 32 the reachable 50%-crossings are rows 7..26, so a cut requested at
     # row 0 lands near row 7. That compression is deliberate — an untapered shift would shove
     # the transition hard against the core edge or the outer edge and re-create exactly the
-    # step the feather exists to hide — and the seam_mode A/B was judged on this behavior.
-    # Making it land exactly is a real visual change, not a bug fix: re-run the A/B first.
+    # step the feather exists to hide. A variant that landed exactly on the cut was built and
+    # compared: it measured the same and looked the same, so the attenuation costs nothing.
     path = _min_error_path(err)
     u50 = (0.5 ** (1.0 / k)) * (1.0 - plateau)
     u_path = (path.to(torch.float32) + 0.5) / band
@@ -354,39 +317,25 @@ def _aa_alpha(sub_mask):
     return x[:, 0]
 
 
-def _seam_displacements(seam_mode, tile, sub, region, warp_low, warp_scale, warp_amount):
-    # Per-tile displacement for each kept seam, in band-normalized units: [w] for the top
-    # seam, [h] for the left seam (None = leave that seam straight). This is the ONLY thing
-    # that differs between seam modes — every mode then feeds the same feather curve — so an
-    # A/B comparison isolates the boundary shape and nothing else.
+def seam_displacements(tile, sub, region):
+    # Per-kept-seam displacement, in band-normalized units: [w] for the top seam, [h] for the
+    # left seam, None where that side has no already-processed neighbor. This is what bends
+    # the feather's transition off a straight line and onto the minimum-error path.
     paste, core = tile.paste_rect, tile.core
     top_band = core.y0 - paste.y0
     left_band = core.x0 - paste.x0
-    want_top = tile.kept_top and top_band > 0
-    want_left = tile.kept_left and left_band > 0
     disp_top = None
     disp_left = None
 
-    if seam_mode == SEAM_WARP:
-        # Sampled at absolute canvas coords along each seam line, so adjacent tiles agree.
-        if want_top:
-            xs = torch.arange(paste.x0, paste.x1, dtype=torch.float32)
-            ys = torch.full_like(xs, float(core.y0))
-            disp_top = warp_amount * _warp_slice(warp_low, warp_scale, ys, xs)
-        if want_left:
-            ys = torch.arange(paste.y0, paste.y1, dtype=torch.float32)
-            xs = torch.full_like(ys, float(core.x0))
-            disp_left = warp_amount * _warp_slice(warp_low, warp_scale, ys, xs)
-    elif seam_mode == SEAM_MIN_ERROR:
-        # Squared difference between this tile's refinement and the already-pasted neighbor,
-        # averaged over batch and channels. Only the BAND is a valid error surface: inside
-        # the core, `region` is raw un-refined canvas, so those rows/cols are excluded.
-        # The DP is small and strictly sequential, so it runs on the CPU.
-        err = ((sub - region) ** 2).mean(dim=(0, 3)).float().cpu()   # [h, w]
-        if want_top:
-            disp_top = _path_displacement(err[:top_band, :], top_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
-        if want_left:
-            disp_left = _path_displacement(err[:, :left_band].T.contiguous(), left_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
+    # Squared difference between this tile's refinement and the already-pasted neighbor,
+    # averaged over batch and channels. Only the BAND is a valid error surface: inside the
+    # core, `region` is raw un-refined canvas, so those rows/cols are excluded.
+    # The DP is small and strictly sequential, so it runs on the CPU.
+    err = ((sub - region) ** 2).mean(dim=(0, 3)).float().cpu()   # [h, w]
+    if tile.kept_top and top_band > 0:
+        disp_top = _path_displacement(err[:top_band, :], top_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
+    if tile.kept_left and left_band > 0:
+        disp_left = _path_displacement(err[:, :left_band].T.contiguous(), left_band, FEATHER_PLATEAU, FEATHER_FALLOFF)
 
     return disp_top, disp_left
 
@@ -433,7 +382,7 @@ def _manifest_line(tile_idx, tile):
     )
 
 
-def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode=SEAM_MIN_ERROR, warp_amount=0.5, warp_scale=64, region_pixel=None):
+def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → composite by a directional feather → crop back.
     # A 1x1 grid (or overlap=ctx=0) reproduces the feature-2 whole-image path bit for bit.
@@ -481,10 +430,6 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     dummy = torch.zeros((batch, vae.latent_channels, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
     canvas_noise = noise.generate_noise({"samples": dummy})
 
-    # Seeded warp field for the `warp` seam mode, drawn once per run and sampled per seam in
-    # absolute canvas coords (same discipline as canvas_noise). Seeding off noise.seed keeps
-    # a run reproducible: same seed -> same meander.
-    warp_low = _warp_field(canvas_h, canvas_w, max(8, warp_scale), noise.seed) if seam_mode == SEAM_WARP else None
 
     steps = sigmas.shape[-1] - 1
     for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles))
@@ -580,7 +525,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
             # Seam-mode displacement: straight (None), a coherent-noise meander, or the
             # minimum-error cut. Computed from sub/region, so it must follow both.
-            disp_top, disp_left = _seam_displacements(seam_mode, tile, sub, region, warp_low, max(8, warp_scale), warp_amount)
+            disp_top, disp_left = seam_displacements(tile, sub, region)
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
             if debug_dir is not None:
                 # region is a VIEW into canvas, so dump it BEFORE the composite overwrites it.
@@ -605,21 +550,21 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     return crop_image_to(canvas, height, width)
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode=SEAM_MIN_ERROR, warp_amount=0.5, warp_scale=64, mask=None):
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
     # Entry point. Without a mask this is the whole-image / multi-tile refine, byte-for-
     # byte the extracted _refine_tiles body. With a mask: harden (>=0.5) → union bbox over
     # the batch → crop to bbox + context_anchor (frozen-background halo) → tile-refine the
     # crop with every tile's denoise_mask gated to the masked region → composite the
     # refined crop back through a 1px anti-aliased edge. The mask=0 background survives from
     # the ORIGINAL pixels (never the VAE-decoded crop), so it is never re-diffused.
-    # seam_mode (and the warp_* knobs it may use) positions the inter-tile directional
-    # feather only; it never touches the mask-boundary composite, which stays a hard binary
-    # gate plus a 1px anti-alias (mask-boundary-conditioning-not-feather).
+    # The minimum-error routing shapes the inter-tile directional feather only; it never
+    # touches the mask-boundary composite, which stays a hard binary gate plus a 1px
+    # anti-alias (mask-boundary-conditioning-not-feather).
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         return image.clone()
     if mask is None:
-        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode, warp_amount, warp_scale, region_pixel=None)
+        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None)
 
     # Region-mask path. Harden a soft input at 0.5 — a fractional denoise mask would leave
     # the under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
@@ -632,7 +577,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     y0, y1, x0, x1 = _expand_snap_clamp(bbox, context_anchor, height, width)
     sub_image = image[:, y0:y1, x0:x1, :]
     sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode, warp_amount, warp_scale, region_pixel=sub_mask)
+    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask)
     # Composite the refined crop back through the anti-aliased mask edge. Outside the crop,
     # and wherever aa == 0 inside it, the output is the byte-identical original image.
     # Narrow to RGB: _refine_tiles decodes a 3-channel refined_sub (as the no-mask path does,

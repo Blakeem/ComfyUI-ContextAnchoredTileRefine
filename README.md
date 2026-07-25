@@ -17,9 +17,9 @@ A single ComfyUI node for tiled upscaling and for refining masked areas of large
 | `max_tile_width` / `max_tile_height` | INT | Largest pixel size the model sees per tile, including the context rings. Set to the largest your model handles well. |
 | `context_anchor` | INT | Width of the frozen border each tile sees but never changes. Holds already-refined neighbors, and the area around a mask, steady. Applies on every tile edge. |
 | `context_overlap` | INT | Width of the blend band shared with an already-processed neighbor. 0 gives hard seams. Applies only where a tile borders an earlier tile. |
-| `seam_mode` | COMBO | Where the handover sits inside that band. `min_error` (default) routes it through pixels where the two tiles already agree. `straight` keeps it a straight line. `warp` makes it meander along a seeded noise field. |
-| `warp_amount` / `warp_scale` | INT / FLOAT | Only used by `seam_mode=warp`. How far the handover wanders, and the wavelength of the meander. |
 | `mask` | MASK (optional) | Refine only this region. Everything outside it is left untouched. |
+
+There is nothing else to tune. How the seam itself is hidden is baked in, because testing settled it once and the answer did not depend on the image. What does depend on the image is tiling geometry, which is why those four inputs remain.
 
 `context_anchor` and `context_overlap` default to 32, which is invisible on most scenes. Raise `context_overlap` toward 128 for large smooth gradients such as an open sky, where there is no texture for the seam to hide in. Detailed scenes need less, not more.
 
@@ -29,11 +29,17 @@ Tiles are processed in raster order, so each tile's top and left neighbors are a
 
 `context_overlap` keeps the raw input of the shared band and diffuses it twice, once from each side, each reaching out to its `context_anchor`, then blends the two results together. Both start from the same raw pixels and each saw the other side as context, so they agree and the seam disappears. This happens only where a tile borders a tile that was already processed, never at the image border.
 
-The blend across that band is a directional feather. It holds the seam-adjacent pixels fully on the new tile, then falls off to nothing at the outer edge, reaching zero with zero slope so there is no visible junction against the neighbor. A plain linear ramp does leave one, because the small brightness difference between two independent refinements becomes a bounded gradient that the eye reads as a line.
+### The blend
 
-`seam_mode=min_error` then bends that handover off a straight line, following the Efros-Freeman minimum-error path so it passes through pixels where the two refinements already match. A straight boundary is easy to spot even when it is faint, and a curved one that tracks the image content is not.
+Two things happen in that band: a feather decides how the handover fades, and a routed path decides where it sits.
 
-The shape of the feather is fixed rather than exposed. Two alternatives were built and compared on a night sky and a close-up face: a narrow ramp landing exactly on the routed path, and a hard cut with no blending at all. All three measured the same, and the hard cut tore at a high-contrast silhouette edge, so only the feather remains.
+The feather holds the pixels next to the seam fully on the new tile, then falls off to nothing at the outer edge. It reaches zero with zero slope, so there is no junction against the neighbor's untouched pixels. A plain linear ramp does leave one: two independent refinements of the same content differ slightly in brightness, and a linear ramp turns that difference into a bounded gradient that the eye reads as a line. Concretely the curve holds the seam-most 10 percent of the band solid, then falls off as a squared ramp.
+
+The path comes from the **minimum error boundary cut** in Efros and Freeman, *Image Quilting for Texture Synthesis and Transfer*, SIGGRAPH 2001. Their problem is different from ours, but the sub-problem is identical: two overlapping patches, and a need to pick the cut between them that is least visible. Their answer is to build the squared difference between the two patches across the overlap, then run dynamic programming to find the connected path through it with the lowest total error. That path threads through the pixels where the two already agree, so switching there shows nothing.
+
+This node builds the same error surface between a tile's refinement and its already-refined neighbor, runs the same DP, and then uses the result differently: the path positions the feather rather than acting as a hard cut. Image quilting cuts along the path and pastes; here the feather's midpoint is drawn toward it, so the handover follows the image content instead of running dead straight. A straight boundary is easy to spot even when it is faint. One that bends around detail is not.
+
+Both parts are fixed rather than exposed. Four alternatives were built and compared on a night sky with a radiating moon and a close-up face: a straight transition, a meander along seeded noise, a ramp landing exactly on the routed path, and a hard cut with no blending. Every one measured the same, because the brightness difference between two tiles spans the whole tile and no choice of handover position inside a 32 pixel band can move it. The hard cut was the only one that differed visibly, and it lost, tearing at a high-contrast silhouette edge.
 
 Open [`docs/tile-simulator.html`](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html) in a browser to preview the tile layout for any image size and settings.
 

@@ -7,9 +7,6 @@ MAX_RESOLUTION = 16384
 class ContextAnchoredTileRefine:
     @classmethod
     def INPUT_TYPES(s):
-        # Lazy so node.py's module scope keeps importing nothing but torch; INPUT_TYPES is
-        # only called at schema-build time, well after import.
-        from .sampling import SEAM_MODES
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "The upscaled image to refine tile by tile."}),
@@ -22,9 +19,6 @@ class ContextAnchoredTileRefine:
                 "max_tile_height": ("INT", {"default": 1024, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
                 "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge (including up against a mask) then cropped away. With a mask it also sets the frozen-background halo the masked region conditions against — keep it > 0. Always additive: the ring outside a tile core is context_overlap + context_anchor. 32-256 is the useful range; 32 suits most scenes."}),
                 "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width (multi-tile runs only; never applied at a mask boundary). Each tile is sampled oversized; on sides bordering an already-processed neighbor (top/left) this band is fully diffused and feathered into that neighbor (100% at the seam → 0% over the band); elsewhere it's context, then cropped. 32-256 is the useful range: DETAILED scenes need LESS (32 is invisible even when you know where the seam is) because the seam has texture to hide in and to route through, while a large smooth gradient (an open night sky) is the hard case and wants 128+. 0 = hard seams."}),
-                "seam_mode": (SEAM_MODES, {"default": "min_error", "tooltip": "How the feather's transition is POSITIONED along a seam. Its SHAPE is baked in (a 10% solid plateau at the seam, then a k=2 fall-off) — settled by A/B, not scene-dependent. min_error (default) = bias it toward the Efros-Freeman minimum-error path, i.e. toward pixels where the two tiles already agree; the most natural-looking. straight = a perfectly straight line, which the eye can lock onto. warp = slide it along a low-frequency seeded noise field so the boundary meanders organically; grain-free, but reads as more random than min_error. No effect at context_overlap=0."}),
-                "warp_amount": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "seam_mode=warp only: how far the transition wanders, as a fraction of the context_overlap width. 0 = straight. Too high pushes the transition against the band edges and can expose a wavy ghost; 0.3-0.8 is the useful range."}),
-                "warp_scale": ("INT", {"default": 64, "min": 8, "max": 512, "step": 8, "tooltip": "seam_mode=warp only: feature size of the noise field in pixels — how long a wavelength the meander has. Keep it WELL above pixel scale (and above context_overlap): large = a slow organic curve, small = a fast wiggle that starts to read as grain. Try 2-4x context_overlap."}),
             },
             "optional": {
                 "mask": ("MASK", {"tooltip": "Optional region mask: only the masked region is refined (hardened at 0.5), cropped to the mask plus context_anchor, with a 1px anti-aliased edge; the unmasked background is left untouched. Feed an inverted mask for a second pass."}),
@@ -56,7 +50,7 @@ class ContextAnchoredTileRefine:
                 return "{} must be between {} and {}, got {}".format(name, minimum, maximum, value)
         return True
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode="min_error", warp_amount=0.5, warp_scale=64, mask=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
         if image.ndim != 4:
             raise ValueError("image must be a [B,H,W,C] IMAGE tensor, got {} dimensions".format(image.ndim))
         if image.shape[1] < 8 or image.shape[2] < 8:
@@ -76,4 +70,4 @@ class ContextAnchoredTileRefine:
             if mask.shape[0] == 1 and image.shape[0] != 1:
                 mask = mask.expand(image.shape[0], -1, -1)
         from . import sampling
-        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, seam_mode, warp_amount, warp_scale, mask=mask),)
+        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask),)
