@@ -1,6 +1,6 @@
 # Context-Anchored Tile Refine, project guide
 
-Single-node ComfyUI custom node (v1.0.0). It refines an already-upscaled IMAGE by dynamic tiling,
+Single-node ComfyUI custom node. It refines an already-upscaled IMAGE by dynamic tiling,
 or refines only a masked region of a large image without processing the rest. Upscaling happens
 outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.9.
 
