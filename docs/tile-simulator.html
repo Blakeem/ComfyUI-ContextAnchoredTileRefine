@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tile Layout Simulator — Context-Anchored Tile Upscale v2</title>
+<title>Tile Layout Simulator &middot; Context-Anchored Tile Refine</title>
 <style>
 /* ============================== Theme ============================== */
 :root {
@@ -27,13 +27,11 @@
   --core-a: #d9e6f5;
   --core-b: #bed4ec;
   --core-line: rgba(55, 84, 116, 0.45);
-  /* context_overlap band, color-coded by side */
-  --kept-fill: rgba(26, 127, 55, 0.34);        /* kept + feathered (top/left) */
+  --kept-fill: rgba(26, 127, 55, 0.34);        /* blend band, kept + feathered */
   --kept-fill-hi: rgba(26, 127, 55, 0.62);
-  --discard-fill: rgba(179, 37, 30, 0.30);     /* sampled then discarded (right/bottom) */
+  --discard-fill: rgba(179, 37, 30, 0.30);     /* sampled then discarded */
   --discard-fill-hi: rgba(179, 37, 30, 0.58);
-  /* context_anchor halo (frozen context, discarded) */
-  --ring-fill: rgba(126, 87, 235, 0.22);
+  --ring-fill: rgba(126, 87, 235, 0.22);       /* frozen anchor halo */
   --ring-fill-hi: rgba(126, 87, 235, 0.45);
   --crop-line: #067a55;
   --scrim: rgba(242, 244, 247, 0.55);
@@ -55,8 +53,8 @@
     --ok-bg: rgba(63, 185, 80, 0.12);
     --canvas-bg: #0d1117;
     --canvas-edge: #b8c4d0;
-    --core-a: #263a52;
-    --core-b: #335173;
+    --core-a: #22354b;
+    --core-b: #37587d;
     --core-line: rgba(160, 190, 220, 0.40);
     --kept-fill: rgba(63, 185, 80, 0.36);
     --kept-fill-hi: rgba(63, 185, 80, 0.64);
@@ -121,7 +119,7 @@ main {
 #tip {
   position: absolute;
   display: none;
-  max-width: 300px;
+  width: 250px;
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -133,12 +131,14 @@ main {
   z-index: 5;
 }
 #tip .t-title { font-weight: 650; margin-bottom: 3px; }
+#tip .t-row { color: var(--muted); }
+#tip .t-row b { color: var(--text); font-weight: 600; }
 #tip .t-ok { color: var(--ok); font-weight: 600; }
 #tip .t-bad { color: var(--err); font-weight: 650; }
-#tip .t-note { color: var(--muted); }
+#tip .t-pin { color: var(--accent); font-weight: 600; }
 
 aside {
-  width: 348px;
+  width: 330px;
   flex: none;
   overflow-y: auto;
   display: flex;
@@ -159,9 +159,11 @@ aside {
   text-transform: uppercase;
   color: var(--muted);
 }
+.hint { margin: 7px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
 
 /* controls */
 .ctl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.ctl-grid.three { grid-template-columns: 1fr 1fr 1fr; }
 .ctl { display: flex; flex-direction: column; gap: 2px; }
 .ctl label { font-size: 12px; color: var(--muted); }
 .ctl input {
@@ -174,20 +176,18 @@ aside {
   width: 100%;
 }
 .ctl input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-#canvas-size {
-  margin-top: 10px;
+#input-size {
+  margin-top: 9px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
   font-size: 13px;
 }
-#canvas-size strong { font-variant-numeric: tabular-nums; }
+#input-size strong { font-variant-numeric: tabular-nums; }
 
 /* readouts */
-#readouts dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+#readouts dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
 #readouts dt { color: var(--muted); }
 #readouts dd { margin: 0; font-variant-numeric: tabular-nums; }
-.class-list { margin: 2px 0 0; padding-left: 16px; }
-.class-list li { margin: 1px 0; font-variant-numeric: tabular-nums; }
 .callout {
   margin-top: 9px;
   padding: 7px 10px;
@@ -195,23 +195,22 @@ aside {
   background: var(--ok-bg);
   color: var(--ok);
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
-/* feather profile plot */
-#feather-cv { width: 100%; height: 128px; display: block; border-radius: 6px; }
-#feather-cap { margin-top: 7px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.5; }
+/* blend profile plot */
+#feather-cv { width: 100%; height: 110px; display: block; border-radius: 6px; }
+#feather-cv[hidden] { display: none; }
+#feather-cap { margin-top: 6px; font-size: 11.5px; color: var(--muted); line-height: 1.4; }
 
 /* warnings */
 #warnings ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-#warnings li { padding: 7px 10px; border-radius: 6px; font-size: 12.8px; }
+#warnings li { padding: 7px 10px; border-radius: 6px; font-size: 12.5px; }
 #warnings li.w-err  { background: var(--err-bg);  color: var(--err);  font-weight: 600; }
-#warnings li.w-warn { background: var(--warn-bg); color: var(--warn); }
 #warnings li.w-info { background: var(--info-bg); }
-#warnings li.w-none { color: var(--muted); padding: 2px 0; }
 
 /* legend */
-#legend ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+#legend ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 #legend li { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; }
 .chip {
   flex: none;
@@ -226,8 +225,6 @@ aside {
 .chip.discard { background: var(--discard-fill-hi); }
 .chip.ring { background: var(--ring-fill-hi); }
 .chip.crop { background: transparent; border: 2px dashed var(--crop-line); }
-.chip.edge { background: transparent; border: 2px solid var(--canvas-edge); }
-#legend .l-note { color: var(--muted); }
 
 footer {
   padding: 6px 18px 10px;
@@ -252,8 +249,8 @@ footer {
 <body>
 
 <header>
-  <h1>Tile Layout Simulator — Context-Anchored Tile Upscale v2</h1>
-  <p>Reference implementation of the grid algorithm (directional-feather tiling, deterministic raster order). All geometry in upscaled-canvas pixels, drawn strictly to scale.</p>
+  <h1>Tile Layout Simulator</h1>
+  <p>See how Context-Anchored Tile Refine will split your image before you run it. Everything is drawn to scale.</p>
 </header>
 
 <main>
@@ -265,40 +262,40 @@ footer {
 
   <aside>
     <div class="panel">
-      <h2>Inputs</h2>
-      <div class="ctl-grid">
-        <div class="ctl"><label for="in-ow">Original width</label>
-          <input id="in-ow" type="number" min="8" max="32768" step="1" value="1024"></div>
-        <div class="ctl"><label for="in-oh">Original height</label>
-          <input id="in-oh" type="number" min="8" max="32768" step="1" value="1024"></div>
-        <div class="ctl"><label for="in-factor">Upscale factor</label>
+      <h2>Image</h2>
+      <div class="ctl-grid three">
+        <div class="ctl"><label for="in-w">Width</label>
+          <input id="in-w" type="number" min="8" max="32768" step="1" value="1024"></div>
+        <div class="ctl"><label for="in-h">Height</label>
+          <input id="in-h" type="number" min="8" max="32768" step="1" value="1024"></div>
+        <div class="ctl"><label for="in-factor">Upscale &times;</label>
           <input id="in-factor" type="number" min="0.05" max="8" step="0.05" value="2"></div>
-        <div class="ctl"></div>
-        <div class="ctl"><label for="in-mw">max_tile_width (/8)</label>
+      </div>
+      <div id="input-size"></div>
+      <p class="hint">Upscaling happens before the node. Use 1 if you already have the final size.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Node settings</h2>
+      <div class="ctl-grid">
+        <div class="ctl"><label for="in-mw">max_tile_width</label>
           <input id="in-mw" type="number" min="256" max="16384" step="8" value="1024"></div>
-        <div class="ctl"><label for="in-mh">max_tile_height (/8)</label>
+        <div class="ctl"><label for="in-mh">max_tile_height</label>
           <input id="in-mh" type="number" min="256" max="16384" step="8" value="1024"></div>
-        <div class="ctl"><label for="in-overlap" title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded.">context_overlap (/8)</label>
-          <input id="in-overlap" type="number" min="0" max="512" step="8" value="32"
-            title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded."></div>
-        <div class="ctl"><label for="in-ctx" title="Context anchor — the frozen-context halo sampled beyond the overlap on every neighbor side. Always discarded (never re-diffused, never composited).">context_anchor (/8)</label>
+        <div class="ctl"><label for="in-overlap">context_overlap</label>
+          <input id="in-overlap" type="number" min="0" max="512" step="8" value="32"></div>
+        <div class="ctl"><label for="in-ctx">context_anchor</label>
           <input id="in-ctx" type="number" min="0" max="512" step="8" value="32"></div>
       </div>
-      <div id="canvas-size"></div>
+      <p class="hint">The caps are the largest crop the model ever sees, rings included.</p>
     </div>
 
     <div class="panel" id="readouts">
-      <h2>Readouts</h2>
+      <h2>Layout</h2>
       <div id="readouts-body"></div>
     </div>
 
-    <div class="panel" id="feather">
-      <h2>Feather profile</h2>
-      <canvas id="feather-cv"></canvas>
-      <div id="feather-cap"></div>
-    </div>
-
-    <div class="panel" id="warnings">
+    <div class="panel" id="warnings" hidden>
       <h2>Warnings</h2>
       <ul id="warnings-body"></ul>
     </div>
@@ -306,21 +303,26 @@ footer {
     <div class="panel" id="legend">
       <h2>Legend</h2>
       <ul>
-        <li><span class="chip split"></span><span><strong>Tile cores</strong> — alternating tints (checkerboard) so adjacent cores are distinguishable. Cores partition the canvas exactly; every pixel belongs to one core.</span></li>
-        <li><span class="chip kept"></span><span><strong>Context overlap — kept, feathered</strong> (green) — the part of the <code>context_overlap</code> band the node actually composites (<code>paste_rect</code>): the <strong>top</strong> and <strong>left</strong> sides, which border an already-processed neighbor in raster order. Drawn as the actual cross-dissolve using the baked-in feather profile (see the <strong>Feather profile</strong> panel): <strong>solid green plateau at the seam</strong> (the core edge stays 100% this tile), then a fast drop and a soft feather out into the neighbor — a vertical profile on the top, a horizontal one on the left, and their rounded product at the top-left corner into the up-left neighbor. It ends flush at the core's right/bottom edges — the later neighbor feathers those seams. This mirrors <code>feather_alpha</code> (a 10% solid plateau then a <code>k=2</code> fall-off) in <code>sampling.py</code>. The node also bends this transition onto the minimum-error path between the two tiles, which is image-dependent and therefore not simulated here.</span></li>
-        <li><span class="chip discard"></span><span><strong>Context overlap — context only, discarded</strong> (red, flat) — everything in the overlap band the node does <em>not</em> keep: the whole <strong>right</strong> column and <strong>bottom</strong> row, <strong>including the top-right and bottom-left overhang corners</strong>. Sampled/diffused so the model sees continuous context, then thrown away — the node pastes nothing here; the later right/lower neighbor feathers the seam instead.</span></li>
-        <li><span class="chip ring"></span><span><strong>Context anchor — frozen context, discarded</strong> — <code>context_anchor</code> beyond the overlap on every neighbor side: fully frozen, visible-only context, <strong>held to the ground-truth pixels every sampling step</strong> (re-anchored each step so it never drifts) so it continuously pulls the diffused overlap back toward the neighbor. Never re-diffused, never composited, always discarded from the paste.</span></li>
-        <li><span class="chip crop"></span><span><strong>Sampled crop</strong> — dashed outline on the hovered / clicked tile: the exact (symmetric) region the model sees, <code>core + context_overlap + context_anchor</code> on every neighbor side, at true 1:1 size.</span></li>
-        <li><span class="chip edge"></span><span><strong>Canvas edge</strong> — no overlap or anchor extends past it; cores run to the border.</span></li>
-        <li><span class="l-note">Hover a tile for its sampled size vs the caps and which sides are kept (green) vs discarded (red); click to pin, Esc or click outside to unpin.</span></li>
+        <li><span class="chip split"></span><span><strong>Tile core</strong>. The region a tile owns outright. Cores cover the image exactly, with no gaps or repeats.</span></li>
+        <li><span class="chip kept"></span><span><strong>Blend band</strong>. Feathered into the neighbor above and to the left, which was refined first.</span></li>
+        <li><span class="chip discard"></span><span><strong>Context, discarded</strong>. Sampled so the model sees past the core, then thrown away. The next tile blends that seam instead.</span></li>
+        <li><span class="chip ring"></span><span><strong>Anchor halo</strong>. Frozen pixels the tile reads but never changes. Carries the finished neighbors into the tile.</span></li>
+        <li><span class="chip crop"></span><span><strong>Sampled crop</strong>. Everything the model sees for the hovered tile.</span></li>
       </ul>
+      <p class="hint">Hover a tile for its numbers. Click to pin it, Esc or click outside to unpin.</p>
+    </div>
+
+    <div class="panel" id="feather">
+      <h2>Blend across the seam</h2>
+      <canvas id="feather-cv"></canvas>
+      <div id="feather-cap"></div>
     </div>
   </aside>
 </main>
 
 <footer>
   <details id="tests">
-    <summary>Reference implementation of the grid algorithm &middot; <span id="tests-status"></span></summary>
+    <summary>Grid math mirrors <code>grid.py</code> &middot; <span id="tests-status"></span></summary>
     <div id="tests-detail"></div>
   </details>
 </footer>
@@ -330,8 +332,7 @@ footer {
 
 /* =====================================================================
  * PURE GRID MATH — reference implementation (no DOM below this banner
- * until END PURE GRID MATH). The v2 pipeline rewrite is validated
- * against exactly these functions.
+ * until END PURE GRID MATH). Mirrors context_anchored_tile_refine/grid.py.
  * ===================================================================== */
 
 /** Round half-to-even (banker's rounding), matching Python round(). */
@@ -343,12 +344,12 @@ function roundHalfEven(x) {
   return (f % 2 === 0) ? f : f + 1;
 }
 
-/** Nearest multiple of 8, ties to even — matches v1 round_length(). */
+/** Nearest multiple of 8, ties to even — matches grid.round8(). */
 function round8(x) {
   return roundHalfEven(x / 8) * 8;
 }
 
-/** Smallest multiple of 8 that is >= x. */
+/** Smallest multiple of 8 that is >= x — matches grid.round8_up(). */
 function round8Up(x) {
   return Math.ceil(x / 8) * 8;
 }
@@ -356,16 +357,15 @@ function round8Up(x) {
 /**
  * Per-axis grid solve.
  *
- *   r = context_overlap + context_anchor           (tile_fade is gone)
+ *   r = context_overlap + context_anchor
  *   overhead(n) = 0 | r | 2r   for n = 1 | 2 | >= 3
  *   base(n) = round8_up(ceil(L / n))
  *   choose the smallest n >= 1 with base(n) + overhead(n) <= cap
  *
  * The ring, outward from the core boundary, is two nested bands:
  * context_overlap (the feather, at the seam) -> context_anchor (the
- * frozen halo). The per-seam ring width r is their sum. There is NO
- * fade floor and NO overlap floor — a base is judged on the cap
- * constraint alone (owner's decision: keep it simple).
+ * frozen halo). The per-seam ring width r is their sum. There is no
+ * overlap floor: a base is judged on the cap constraint alone.
  *
  * @param {number} L       axis canvas length, already a multiple of 8
  * @param {number} cap     max tile size on this axis (M)
@@ -425,25 +425,23 @@ function tileClassLabel(cx, cy) {
 /**
  * Full 2D layout from two per-axis solves. Pure; all values in canvas px.
  *
- * Two distinct geometries per tile:
+ * Three distinct geometries per tile:
  *
  *   cropRect         = core + (overlap + ctx) on EVERY neighbor side.
  *                      The SYMMETRIC sampled crop — what the model sees.
  *                      Symmetric on purpose so the frozen context_anchor
  *                      sits a consistent distance from the core.
- *   overlapInnerRect = core + overlap on every neighbor side.
- *                      The anchor halo = cropRect \ overlapInnerRect
- *                      (frozen context, always discarded).
+ *   overlapInnerRect = core + overlap on every neighbor side. The diffused
+ *                      region; the anchor halo = cropRect \ overlapInnerRect.
  *   pasteRect        = core + overlap on the TOP/LEFT neighbor sides ONLY.
- *                      The DIRECTIONAL pasted region: core plus the
- *                      context_overlap band on the sides bordering an
- *                      already-processed neighbor (kept + feathered).
+ *                      The directional pasted region, feathered into the
+ *                      already-processed neighbor.
  *
  * In deterministic raster order (row-major, top-left -> bottom-right) a
  * tile's already-processed neighbors are exactly the tile above (row>0)
  * and the tile to the left (col>0):
- *   keptSides      = {top: row>0,  left: col>0}    kept + feathered (green)
- *   discardedSides = {right: col<nx-1, bottom: row<ny-1}  context only (red)
+ *   keptSides      = {top: row>0,  left: col>0}            kept + feathered
+ *   discardedSides = {right: col<nx-1, bottom: row<ny-1}   context only
  * So each interior seam is feathered exactly once, by the later tile.
  */
 function buildLayout(W, H, sx, sy, ctx, overlap = 0) {
@@ -498,7 +496,7 @@ function buildLayout(W, H, sx, sy, ctx, overlap = 0) {
 
 /* =====================================================================
  * Self-tests: hand-computed cases asserted at load. Each expectation
- * was derived by hand from the grid algorithm in context_anchored_tile_refine/grid.py.
+ * was derived by hand from context_anchored_tile_refine/grid.py.
  * ===================================================================== */
 
 var SELF_TESTS = [
@@ -542,7 +540,7 @@ var SELF_TESTS = [
     }
   },
   {
-    name: "round8 ties-to-even matches Python round_length: round8(1500)=1504",
+    name: "round8 ties-to-even matches Python round(): round8(1500)=1504",
     run: function () {
       return expect({ v: round8(1500) }, { v: 1504 }); /* 187.5 -> 188 (even) */
     }
@@ -691,15 +689,22 @@ function runSelfTests() {
  * ===================================================================== */
 
 var els = {};
+
+/** Past this the page would spend seconds per frame filling gradients; report instead. */
+var MAX_DRAWN_TILES = 4096;
+
 var state = {
-  ow: 1024, oh: 1024, factor: 2,
+  srcW: 1024, srcH: 1024, factor: 2,
   maxW: 1024, maxH: 1024, ctx: 32, overlap: 32,
-  canvasW: 0, canvasH: 0,
+  inputW: 0, inputH: 0,       /* what you hand the node (source x factor) */
+  canvasW: 0, canvasH: 0,     /* after the node's pad up to /8 */
   solX: null, solY: null,
   layout: null,
-  errors: [],          /* configuration error strings */
+  errors: [],                 /* configuration error strings */
   hoverTile: -1,
   pinnedTile: -1,
+  mouse: { x: 0, y: 0 },      /* last pointer position, viewport CSS px */
+  pinPos: null,               /* pointer position when a tile was pinned */
   view: { scale: 1, offX: 0, offY: 0 } /* CSS px mapping for the drawn canvas */
 };
 
@@ -710,8 +715,8 @@ function clampSnap(v, min, max, step) {
 }
 
 function readInputs() {
-  state.ow = clampSnap(parseFloat(els.ow.value), 8, 32768, 1);
-  state.oh = clampSnap(parseFloat(els.oh.value), 8, 32768, 1);
+  state.srcW = clampSnap(parseFloat(els.w.value), 8, 32768, 1);
+  state.srcH = clampSnap(parseFloat(els.h.value), 8, 32768, 1);
   state.factor = Math.round(clampSnap(parseFloat(els.factor.value), 0.05, 8, 0.05) * 100) / 100;
   state.maxW = clampSnap(parseFloat(els.mw.value), 256, 16384, 8);
   state.maxH = clampSnap(parseFloat(els.mh.value), 256, 16384, 8);
@@ -721,8 +726,8 @@ function readInputs() {
 
 function normalizeInputs() {
   readInputs();
-  els.ow.value = state.ow;
-  els.oh.value = state.oh;
+  els.w.value = state.srcW;
+  els.h.value = state.srcH;
   els.factor.value = state.factor;
   els.mw.value = state.maxW;
   els.mh.value = state.maxH;
@@ -731,32 +736,40 @@ function normalizeInputs() {
 }
 
 function axisErrorMessage(axisName, capName, cap) {
-  return axisName + " axis: configuration error — no tile count satisfies " + capName + " = " + fmt(cap) +
-    " px at this canvas size with context_overlap + context_anchor = " + fmt(state.overlap + state.ctx) +
-    " px per seam side. Raise " + capName + " or reduce context_overlap / context_anchor.";
+  return axisName + " does not fit: no tile count satisfies " + capName + " = " + fmt(cap) +
+    " px with context_overlap + context_anchor = " + fmt(state.overlap + state.ctx) +
+    " px per seam side. Raise " + capName + ", or lower context_overlap / context_anchor.";
 }
 
 function recompute() {
   readInputs();
 
-  state.canvasW = round8(state.ow * state.factor);
-  state.canvasH = round8(state.oh * state.factor);
+  /* The node never upscales: the factor models whatever ran before it, then the node
+     reflect-pads up to /8 (pad_image_to_multiple) and crops back at the end. */
+  state.inputW = Math.max(8, Math.round(state.srcW * state.factor));
+  state.inputH = Math.max(8, Math.round(state.srcH * state.factor));
+  state.canvasW = round8Up(state.inputW);
+  state.canvasH = round8Up(state.inputH);
   state.errors = [];
   state.solX = null;
   state.solY = null;
   state.layout = null;
   state.hoverTile = -1;
   state.pinnedTile = -1;
+  state.pinPos = null;
 
-  if (state.canvasW < 8 || state.canvasH < 8) {
-    state.errors.push("Upscaled canvas is smaller than 8 px (" + state.canvasW + " × " + state.canvasH +
-      "); increase the original size or the upscale factor.");
-  } else {
-    state.solX = solveAxis(state.canvasW, state.maxW, state.ctx, state.overlap);
-    state.solY = solveAxis(state.canvasH, state.maxH, state.ctx, state.overlap);
-    if (!state.solX.ok) state.errors.push(axisErrorMessage("Width", "max_tile_width", state.maxW));
-    if (!state.solY.ok) state.errors.push(axisErrorMessage("Height", "max_tile_height", state.maxH));
-    if (state.solX.ok && state.solY.ok) {
+  state.solX = solveAxis(state.canvasW, state.maxW, state.ctx, state.overlap);
+  state.solY = solveAxis(state.canvasH, state.maxH, state.ctx, state.overlap);
+  if (!state.solX.ok) state.errors.push(axisErrorMessage("Width", "max_tile_width", state.maxW));
+  if (!state.solY.ok) state.errors.push(axisErrorMessage("Height", "max_tile_height", state.maxH));
+  if (state.solX.ok && state.solY.ok) {
+    var tileCount = state.solX.n * state.solY.n;
+    if (tileCount > MAX_DRAWN_TILES) {
+      /* Drawing tens of thousands of feathered tiles would lock the page up. The solve is
+         still correct, so report it rather than grinding. */
+      state.errors.push("This works out to " + fmt(tileCount) + " tiles (" + state.solX.n +
+        " × " + state.solY.n + "), too many to draw. Raise the tile caps or use a smaller image.");
+    } else {
       state.layout = buildLayout(state.canvasW, state.canvasH, state.solX, state.solY, state.ctx, state.overlap);
       state.layout.capViolations = state.layout.tiles.filter(function (t) {
         return t.sampledW > state.maxW || t.sampledH > state.maxH;
@@ -764,7 +777,7 @@ function recompute() {
     }
   }
 
-  updateCanvasSizeLine();
+  updateInputSizeLine();
   updateReadouts();
   updateWarnings();
   render();
@@ -778,74 +791,53 @@ function recompute() {
 function fmt(n) { return Number(n).toLocaleString("en-US"); }
 function mp(px) { return (px / 1e6).toFixed(2); }
 
-function updateCanvasSizeLine() {
-  els.canvasSize.innerHTML = "Upscaled canvas: <strong>" + fmt(state.canvasW) + " × " + fmt(state.canvasH) +
-    " px</strong> (" + mp(state.canvasW * state.canvasH) + " MP) &mdash; round8(" +
-    fmt(state.ow) + " × " + state.factor + "), round8(" + fmt(state.oh) + " × " + state.factor + ")";
-}
-
-/** Group tiles by class label; list distinct sampled sizes with counts. */
-function classSizeGroups(tiles) {
-  var order = ["single", "corner", "edge", "interior", "strip end", "strip middle"];
-  var byClass = {};
-  tiles.forEach(function (t) {
-    var sizes = byClass[t.cls] || (byClass[t.cls] = {});
-    var key = fmt(t.sampledW) + " × " + fmt(t.sampledH);
-    sizes[key] = (sizes[key] || 0) + 1;
-  });
-  return order.filter(function (c) { return byClass[c]; }).map(function (c) {
-    var entries = Object.keys(byClass[c]).map(function (k) {
-      return k + (byClass[c][k] > 1 ? " (×" + byClass[c][k] + ")" : "");
-    });
-    var count = Object.keys(byClass[c]).reduce(function (a, k) { return a + byClass[c][k]; }, 0);
-    return { cls: c, count: count, entries: entries };
-  });
+function updateInputSizeLine() {
+  var h = "Into the node: <strong>" + fmt(state.inputW) + " &times; " + fmt(state.inputH) +
+    " px</strong> (" + mp(state.inputW * state.inputH) + " MP)";
+  if (state.canvasW !== state.inputW || state.canvasH !== state.inputH) {
+    h += "<br><span style='color:var(--muted)'>padded to " + fmt(state.canvasW) + " &times; " +
+      fmt(state.canvasH) + " for the /8 grid, then cropped back</span>";
+  }
+  els.inputSize.innerHTML = h;
 }
 
 function updateReadouts() {
-  var h = "";
   if (!state.layout) {
-    h = "<dl><dt>Grid</dt><dd>— (configuration error)</dd></dl>";
-    els.readoutsBody.innerHTML = h;
+    els.readoutsBody.innerHTML = "<dl><dt>Grid</dt><dd>see the warning below</dd></dl>";
     return;
   }
   var lay = state.layout;
   var sx = lay.solX, sy = lay.solY;
-  var canvasPx = lay.W * lay.H;
-  var overheadPct = (lay.totalSampledPx / canvasPx - 1) * 100;
-
-  h += "<dl>";
-  h += "<dt>Grid</dt><dd>" + sx.n + " × " + sy.n + " (" + lay.tiles.length +
-       (lay.tiles.length === 1 ? " tile" : " tiles") + ")</dd>";
-  h += "<dt>Tile core</dt><dd>" + fmt(sx.base) + " × " + fmt(sy.base) + " px</dd>";
-  if (sx.n > 1) {
-    h += "<dt>Last column</dt><dd>" + fmt(sx.last) + " px" +
-         (sx.last === sx.base ? " (= base)" : " (remainder)") + "</dd>";
-  }
-  if (sy.n > 1) {
-    h += "<dt>Last row</dt><dd>" + fmt(sy.last) + " px" +
-         (sy.last === sy.base ? " (= base)" : " (remainder)") + "</dd>";
-  }
-  h += "<dt>Ring / seam side</dt><dd>overlap " + fmt(lay.overlap) + " (feather) + context " +
-       fmt(lay.ctx) + " = " + fmt(lay.r) + " px</dd>";
-  h += "<dt>Feather</dt><dd>plateau " + Math.round(FEATHER_PLATEAU * 100) + "% + k=" +
-       FEATHER_FALLOFF + " fall-off (baked in)</dd>";
-  h += "<dt>Caps</dt><dd>" + fmt(state.maxW) + " × " + fmt(state.maxH) + " px</dd>";
-  h += "</dl>";
-
-  h += "<div style='margin-top:8px'>Sampled sizes by tile class:</div><ul class='class-list'>";
-  classSizeGroups(lay.tiles).forEach(function (g) {
-    h += "<li><strong>" + g.cls + "</strong> (" + g.count + "): " + g.entries.join(", ") + "</li>";
+  var maxSampledW = 0, maxSampledH = 0;
+  lay.tiles.forEach(function (t) {
+    if (t.sampledW > maxSampledW) maxSampledW = t.sampledW;
+    if (t.sampledH > maxSampledH) maxSampledH = t.sampledH;
   });
-  h += "</ul>";
+  var withinCaps = maxSampledW <= state.maxW && maxSampledH <= state.maxH;
+  var overheadPct = (lay.totalSampledPx / (lay.W * lay.H) - 1) * 100;
 
-  h += "<dl style='margin-top:8px'>";
-  h += "<dt>Canvas</dt><dd>" + mp(canvasPx) + " MP</dd>";
-  h += "<dt>Sampled total</dt><dd>" + mp(lay.totalSampledPx) + " MP (+" + overheadPct.toFixed(1) + "% overhead)</dd>";
+  var h = "<dl>";
+  h += "<dt>Tiles</dt><dd>" + sx.n + " &times; " + sy.n + " = " + lay.tiles.length +
+       (lay.tiles.length === 1 ? " tile" : " tiles") + "</dd>";
+  h += "<dt>Tile core</dt><dd>" + fmt(sx.base) + " &times; " + fmt(sy.base) + " px";
+  var rem = [];
+  if (sx.n > 1 && sx.last !== sx.base) rem.push("last column " + fmt(sx.last));
+  if (sy.n > 1 && sy.last !== sy.base) rem.push("last row " + fmt(sy.last));
+  if (rem.length) h += " <span style='color:var(--muted)'>(" + rem.join(", ") + ")</span>";
+  h += "</dd>";
+  h += "<dt>Largest crop</dt><dd><span style='" +
+       (withinCaps ? "" : "color:var(--err);font-weight:600") + "'>" +
+       fmt(maxSampledW) + " &times; " + fmt(maxSampledH) + " px</span> " +
+       "<span style='color:var(--muted)'>of " + fmt(state.maxW) + " &times; " + fmt(state.maxH) + "</span></dd>";
+  if (lay.tiles.length > 1) {
+    h += "<dt>Ring per seam</dt><dd>" + fmt(lay.overlap) + " blend + " + fmt(lay.ctx) +
+         " anchor = " + fmt(lay.r) + " px</dd>";
+    h += "<dt>Extra work</dt><dd>+" + overheadPct.toFixed(0) + "% pixels sampled</dd>";
+  }
   h += "</dl>";
 
   if (sx.n === 1 && sy.n === 1) {
-    h += "<div class='callout'>Ideal case: the whole canvas fits in a single tile under the caps — zero seams, no feather, no context halo.</div>";
+    h += "<div class='callout'>One tile: the whole image fits under the caps, so there are no seams at all.</div>";
   }
   els.readoutsBody.innerHTML = h;
 }
@@ -856,54 +848,63 @@ function updateWarnings() {
 
   if (state.layout && state.layout.capViolations > 0) {
     items.push({ cls: "w-err", text: "Internal invariant violated: " + state.layout.capViolations +
-      " sampled crop(s) exceed the caps. This should be impossible — bug in the reference implementation." });
+      " sampled crop(s) exceed the caps. This should be impossible, so it is a bug in this page." });
   }
   if (state.layout && state.layout.clampedTiles > 0) {
-    items.push({ cls: "w-info", text: "Context halo clamped at the canvas edge on " + state.layout.clampedTiles +
-      " tile(s): the overlap + context halo is wider than the canvas remaining past a neighbor (e.g. a last-tile remainder narrower than the ring). Crops never extend past the canvas." });
+    items.push({ cls: "w-info", text: "The context ring runs into the image edge on " + state.layout.clampedTiles +
+      " tile(s), so it is trimmed there. Crops never extend past the image." });
   }
-  if (items.length === 0) {
-    items.push({ cls: "w-none", text: "No warnings." });
-  }
+  els.warnings.hidden = items.length === 0;
   els.warningsBody.innerHTML = items.map(function (i) {
     return "<li class='" + i.cls + "'>" + i.text + "</li>";
   }).join("");
 }
 
 /**
- * Plot the feather profile: alpha (weight of this tile) vs seam-distance, seam at the LEFT,
- * neighbor at the RIGHT. Shades the solid plateau, draws the continuous curve, and overlays
- * the discrete per-pixel samples for the current context_overlap (cell-centered, as the node
- * samples them). The caption lists those sampled alphas seam->outer for small bands.
+ * Plot the blend profile: weight of the new tile vs position across the band, seam at the
+ * LEFT, neighbor at the RIGHT. Shades the solid plateau, draws the continuous curve, and
+ * overlays the per-pixel samples for the current context_overlap (cell-centered, as the
+ * node samples them).
  */
 function updateFeatherPlot() {
   var cv = els.featherCv;
   if (!cv) return;
+
+  /* Nothing to say about seams without a layout to have seams in. */
+  els.feather.hidden = !state.layout;
+  if (!state.layout) return;
+
+  if (state.overlap === 0 || state.layout.tiles.length === 1) {
+    cv.hidden = true;
+    els.featherCap.textContent = (state.layout.tiles.length === 1)
+      ? "One tile, so there is no seam to blend."
+      : "context_overlap = 0: no blend, tiles meet at a hard seam.";
+    return;
+  }
+  cv.hidden = false;
+
   var dpr = window.devicePixelRatio || 1;
-  var W = Math.max(120, Math.floor(cv.clientWidth || 320)), H = 128;
+  var W = Math.max(120, Math.floor(cv.clientWidth || 300)), H = 110;
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
   var g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
 
-  var padL = 30, padR = 12, padT = 10, padB = 22;
+  var padL = 26, padR = 10, padT = 8, padB = 20;
   var pw = W - padL - padR, ph = H - padT - padB;
-  function X(d) { return padL + d * pw; }          /* d = seam-distance, 0 at seam (left) */
-  function Y(a) { return padT + (1 - a) * ph; }     /* a = alpha, 1 at top */
+  function X(d) { return padL + d * pw; }          /* d = distance from the seam, 0 at the left */
+  function Y(a) { return padT + (1 - a) * ph; }    /* a = weight, 1 at the top */
   function alphaAt(d) { return featherProfile(1 - d); }
 
-  /* plateau shading (solid, seam side) */
   if (FEATHER_PLATEAU > 0) {
     g.fillStyle = cssVar("--ok-bg");
     g.fillRect(X(0), padT, FEATHER_PLATEAU * pw, ph);
   }
-  /* gridlines at alpha = 0.5 and the plateau edge */
   g.strokeStyle = cssVar("--border"); g.lineWidth = 1;
   g.beginPath(); g.moveTo(X(0), Y(0.5)); g.lineTo(X(1), Y(0.5)); g.stroke();
   g.strokeRect(padL, padT, pw, ph);
 
-  /* continuous curve */
   g.strokeStyle = cssVar("--ok"); g.lineWidth = 2; g.beginPath();
   for (var i = 0; i <= 120; i++) {
     var d = i / 120, x = X(d), y = Y(alphaAt(d));
@@ -911,36 +912,26 @@ function updateFeatherPlot() {
   }
   g.stroke();
 
-  /* discrete per-pixel samples for the current overlap width (cell-centered) */
+  /* per-pixel samples across the current band (cell-centered) */
   var band = Math.max(1, Math.round(state.overlap));
-  var vals = [];
   g.fillStyle = cssVar("--accent");
   for (var j = 0; j < band; j++) {
-    var dc = (j + 0.5) / band;                     /* seam-distance of pixel j (j=0 nearest seam) */
-    var a = alphaAt(dc);
-    vals.push(a);
-    g.beginPath(); g.arc(X(dc), Y(a), 2.4, 0, Math.PI * 2); g.fill();
+    var dc = (j + 0.5) / band;
+    g.beginPath(); g.arc(X(dc), Y(alphaAt(dc)), 2.2, 0, Math.PI * 2); g.fill();
   }
 
-  /* axis labels */
   g.fillStyle = cssVar("--muted"); g.font = "10px system-ui, sans-serif";
   g.textAlign = "right"; g.textBaseline = "middle";
   g.fillText("1", padL - 4, Y(1)); g.fillText("0", padL - 4, Y(0));
   g.textAlign = "left"; g.textBaseline = "alphabetic";
-  g.fillText("seam", padL, H - 7);
+  g.fillText("seam", padL, H - 6);
   g.textAlign = "right";
-  g.fillText("neighbor", W - padR, H - 7);
+  g.fillText("neighbor", W - padR, H - 6);
 
-  /* caption: plateau in px + the sampled alphas seam->outer */
-  var plateauPx = Math.round(FEATHER_PLATEAU * band);
-  var cap = "baked curve: plateau " + Math.round(FEATHER_PLATEAU * 100) + "% (≈" + plateauPx +
-    " of " + band + " px solid) · falloff k=" + FEATHER_FALLOFF;
-  if (state.overlap === 0) {
-    cap = "context_overlap = 0 — no feather (hard seam).";
-  } else if (band <= 16) {
-    cap += "<br>α seam→outer: " + vals.map(function (v) { return v.toFixed(2); }).join(", ");
-  }
-  els.featherCap.innerHTML = cap;
+  els.featherCap.innerHTML = "Weight of the new tile across the " + band +
+    " px band. Fixed curve: the seam-most " + Math.round(FEATHER_PLATEAU * 100) +
+    "% stays solid, then a squared ramp to zero. The node also bends this transition onto " +
+    "the lowest-error path between the two tiles, which depends on the image and is not drawn here.";
 }
 
 /* =====================================================================
@@ -1007,25 +998,23 @@ function fillBoxGrad(g, x0, y0, x1, y1, paint) {
 }
 
 /**
- * Feather profile: weight of THIS tile in the cross-dissolve as a function of `u`, the
+ * Blend profile: weight of THIS tile in the cross-dissolve as a function of `u`, the
  * normalized position across the kept band (u=0 at the outer edge against the neighbor,
- * u=1 at the seam / core edge). Mirrors _feather_ramp in sampling.py:
+ * u=1 at the seam / core edge). Mirrors _ramp_curve in sampling.py:
  *
- *   base  = clamp(u / (1 - plateau), 0, 1)     1.0 once u reaches the plateau (u >= 1-plateau)
- *   alpha = base^k                             fast drop -> soft feather at the outer edge
+ *   base  = clamp(u / (1 - plateau), 0, 1)     1.0 once u reaches the plateau
+ *   alpha = base^k                             fast drop, then a soft landing on zero
  *
- * Defined on normalized u so the SHAPE is identical at any band width — a wider overlap
- * just samples the same curve at more pixels, which is why the curve is fixed and only
- * context_overlap is tuned per scene. The constants mirror FEATHER_PLATEAU /
- * FEATHER_FALLOFF in sampling.py; they were node widgets during A/B tuning and are now
- * baked in there too, so they are no longer simulator inputs.
+ * Defined on normalized u so the SHAPE is identical at any band width: a wider overlap
+ * just samples the same curve at more pixels. The constants mirror FEATHER_PLATEAU /
+ * FEATHER_FALLOFF in sampling.py, where they are baked in.
  */
 var FEATHER_PLATEAU = 0.10;
 var FEATHER_FALLOFF = 2.0;
 
 function featherProfile(u) {
   var denom = Math.max(1e-6, 1 - FEATHER_PLATEAU);   // guard plateau -> 1
-  var base = Math.min(1, u / denom);                 // 1.0 through the plateau
+  var base = Math.min(1, Math.max(0, u) / denom);    // 1.0 through the plateau
   return Math.pow(base, FEATHER_FALLOFF);
 }
 
@@ -1039,11 +1028,9 @@ function axisFactor(a0, a1, t) {
 
 /**
  * Fill [x0,x1]x[y0,y1] with `green` at alpha = axisFactor_x(tx) * axisFactor_y(ty), the
- * separable feather field. Each ramping axis now follows featherProfile (plateau + fall-off)
- * instead of a straight line, approximated by a multi-stop canvas gradient. Pure vertical /
- * pure horizontal ramps are one gradient; the true 2D product (both axes ramping — the
- * rounded corner) is stacked as horizontal gradients, one per sub-row (fy ~const per row).
- * Coords are canvas px (the ctx transform is 1:1 there).
+ * separable feather field, approximated by multi-stop canvas gradients. Pure vertical /
+ * pure horizontal ramps are one gradient; the true 2D product (both axes ramping, the
+ * rounded corner) is stacked as horizontal gradients, one per sub-row.
  */
 function fillRampRect(g, green, x0, y0, x1, y1, a0x, a1x, a0y, a1y) {
   if (x1 <= x0 || y1 <= y0) return;
@@ -1089,48 +1076,35 @@ function fillRampRect(g, green, x0, y0, x1, y1, a0x, a1x, a0y, a1y) {
  * Draw the KEPT region — paste_rect \ core — as the directional feather the node applies
  * (feather_alpha in sampling.py). Alpha = ay(y) * ax(x): ay ramps 0->1 across the top
  * overhang and is 1 over the core rows; ax ramps 0->1 across the left overhang and is 1
- * over the core columns. So the top strip is a pure vertical ramp (full at the seam,
- * core.y0), the left strip a pure horizontal ramp (full at core.x0), and the shared
- * top-left overhang the product of the two — a rounded corner fading into the up-left
- * neighbor. The strip ends FLAT-full at the core's right (core.x1) and bottom (core.y1)
- * edges: the node keeps nothing past there (paste_rect stops at the core on those sides),
- * so the later right/lower neighbor feathers those seams and the overhang beyond them is
- * discarded (drawn red, below). Green = exactly what the node composites — no right/bottom
- * taper, no overhang.
+ * over the core columns. So the top strip is a pure vertical ramp (full at the seam), the
+ * left strip a pure horizontal ramp, and the shared top-left overhang the product of the
+ * two. The strips end FLAT-full at the core's right and bottom edges: the node keeps
+ * nothing past there, so the later neighbor feathers those seams instead.
  */
 function drawKeptFeather(g, t, green) {
   var c = t.core, oi = t.overlapInnerRect;
   var topB = c.y0 - oi.y0, leftB = c.x0 - oi.x0;   /* kept top/left overhang widths */
   if (topB <= 0 && leftB <= 0) return;             /* top-left tile: nothing kept */
 
-  /* TOP STRIP  [oi.x0,core.x1] x [oi.y0,core.y0] — alpha = ay(y) * ax(x). */
   if (topB > 0) {
     fillRampRect(g, green, oi.x0, oi.y0, c.x0, c.y0, 0, 1, 0, 1); /* top-left overhang: product (rounded) */
     fillRampRect(g, green, c.x0, oi.y0, c.x1, c.y0, 1, 1, 0, 1);  /* over the core: pure vertical ramp     */
   }
-  /* LEFT STRIP [oi.x0,core.x0] x [core.y0,core.y1] — alpha = ax(x), full over core rows. */
   if (leftB > 0) {
     fillRampRect(g, green, oi.x0, c.y0, c.x0, c.y1, 0, 1, 1, 1);  /* beside the core: pure horizontal ramp */
   }
 }
 
 /**
- * Draw the context_overlap band (overlapInnerRect \ core) split into what the node
- * actually KEEPS vs DISCARDS:
- *   GREEN = paste_rect \ core (top + left) — kept, drawn as the directional feather
- *           (see drawKeptFeather). Ends flush with the core's right/bottom edges.
- *   RED   = overlapInnerRect \ paste_rect — the whole right overlap column (full height)
- *           and bottom overlap row (full width), INCLUDING the top-right and bottom-left
- *           overhang corners. Sampled/diffused for context, then discarded: the node
- *           pastes nothing here; the later right/lower neighbor feathers the seam. Flat.
+ * Draw the context_overlap band (overlapInnerRect \ core) split into what the node keeps
+ * vs discards. GREEN = paste_rect \ core (top + left), drawn as the real feather. RED =
+ * overlapInnerRect \ paste_rect: the whole right column and bottom row, corners included,
+ * sampled for context then thrown away.
  */
 function drawOverlapStrips(g, t, greenCol, discCol) {
   var c = t.core, oi = t.overlapInnerRect;
-  /* discarded (red): right overlap column (full oi height, incl. top-right overhang) +
-     bottom overlap row (full oi width, incl. bottom-left overhang) = overlapInner \ paste */
   fillBox(g, c.x1, oi.y0, oi.x1, oi.y1, discCol);  /* right column */
   fillBox(g, oi.x0, c.y1, oi.x1, oi.y1, discCol);  /* bottom row   */
-  /* kept (green): paste_rect \ core, feathered */
   drawKeptFeather(g, t, parseRGBA(greenCol));
 }
 
@@ -1172,11 +1146,9 @@ function render() {
 
   /* --- bands: anchor halo (outer, discarded) then the directional overlap band (inner) --- */
   var colKept = cssVar("--kept-fill"), colDiscard = cssVar("--discard-fill"), colRing = cssVar("--ring-fill");
-  /* anchor halo = cropRect \ overlapInnerRect (frozen context, always discarded) */
   lay.tiles.forEach(function (t) {
     if (!sameRect(t.cropRect, t.overlapInnerRect)) fillAnnulus(g, t.cropRect, t.overlapInnerRect, colRing);
   });
-  /* context_overlap band, color-coded per side: green kept (top/left), red discarded (right/bottom) */
   lay.tiles.forEach(function (t) {
     if (!sameRect(t.overlapInnerRect, t.core)) drawOverlapStrips(g, t, colKept, colDiscard);
   });
@@ -1196,15 +1168,15 @@ function render() {
     if (!sameRect(t.cropRect, t.overlapInnerRect)) fillAnnulus(g, t.cropRect, t.overlapInnerRect, cssVar("--ring-fill-hi"));
     if (!sameRect(t.overlapInnerRect, t.core)) drawOverlapStrips(g, t, cssVar("--kept-fill-hi"), cssVar("--discard-fill-hi"));
     strokeRectPx(g, t.core, cssVar("--canvas-edge"), 1.5, null, scale);
-    strokeRectPx(g, t.pasteRect, cssVar("--kept-fill-hi"), 1.5, null, scale); /* directional paste extent (core + kept feather) */
-    strokeRectPx(g, t.cropRect, cssVar("--crop-line"), 2, [6, 4], scale);     /* symmetric sampled crop */
+    strokeRectPx(g, t.pasteRect, cssVar("--kept-fill-hi"), 1.5, null, scale); /* directional paste extent */
+    strokeRectPx(g, t.cropRect, cssVar("--crop-line"), 2, [6, 4], scale);     /* symmetric sampled crop  */
   }
 
   /* --- canvas edge --- */
   strokeRectPx(g, { x0: 0, y0: 0, x1: lay.W, y1: lay.H }, cssVar("--canvas-edge"), 1.5, null, scale);
 
-  els.scaleNote.textContent = "Rendered at " + (scale * 100).toFixed(1) +
-    "% of true size (1 screen px = " + (1 / scale).toFixed(2) + " canvas px)";
+  els.scaleNote.textContent = "Shown at " + (scale * 100).toFixed(1) +
+    "% of true size (1 screen px = " + (1 / scale).toFixed(2) + " image px)";
 
   updateTip(activeIdx);
 }
@@ -1216,10 +1188,10 @@ function drawErrorState(g, cw, ch) {
   g.font = "600 15px system-ui, sans-serif";
   g.textAlign = "center";
   g.textBaseline = "middle";
-  g.fillText("Configuration error — see Warnings panel", cw / 2, ch / 2 - 12);
+  g.fillText("Nothing to draw with these settings", cw / 2, ch / 2 - 12);
   g.fillStyle = cssVar("--muted");
   g.font = "13px system-ui, sans-serif";
-  g.fillText("Caps too small for the chosen context_overlap + context_anchor at this canvas size.", cw / 2, ch / 2 + 12);
+  g.fillText("See the warning in the panel.", cw / 2, ch / 2 + 12);
 }
 
 /* =====================================================================
@@ -1238,79 +1210,86 @@ function tileIndexAt(cssX, cssY) {
   return row * lay.solX.n + col;
 }
 
-function neighborSidesText(nb) {
-  var sides = [];
-  if (nb.top) sides.push("top");
-  if (nb.left) sides.push("left");
-  if (nb.right) sides.push("right");
-  if (nb.bottom) sides.push("bottom");
-  return sides.length ? sides.join(", ") : "none (single tile on both axes)";
+function sidesText(sides, noneText) {
+  return sides.length ? sides.join(" + ") : noneText;
 }
 
 function keptSidesText(k) {
   var sides = [];
   if (k.top) sides.push("top");
   if (k.left) sides.push("left");
-  return sides.length ? sides.join(" + ") : "none (top-left tile — no processed neighbor)";
+  return sidesText(sides, "nothing (first tile, no neighbor yet)");
 }
 
 function discardedSidesText(d) {
   var sides = [];
   if (d.right) sides.push("right");
   if (d.bottom) sides.push("bottom");
-  return sides.length ? sides.join(" + ") : "none (bottom-right tile)";
+  return sidesText(sides, "none (last tile)");
 }
 
 function updateTip(activeIdx) {
   if (activeIdx < 0 || !state.layout) { hideTip(); return; }
   var lay = state.layout;
   var t = lay.tiles[activeIdx];
+  var pinned = state.pinnedTile === activeIdx;
   var withinCaps = t.sampledW <= state.maxW && t.sampledH <= state.maxH;
 
   var h = "";
-  h += "<div class='t-title'>Tile (" + (t.col + 1) + ", " + (t.row + 1) + ") of " +
-       lay.solX.n + " × " + lay.solY.n + " — " + t.cls +
-       (state.pinnedTile === activeIdx ? " (pinned)" : "") + "</div>";
-  h += "<div>core " + fmt(t.core.x1 - t.core.x0) + " × " + fmt(t.core.y1 - t.core.y0) +
-       " at (" + fmt(t.core.x0) + ", " + fmt(t.core.y0) + ")</div>";
-  h += "<div>sampled <strong>" + fmt(t.sampledW) + " × " + fmt(t.sampledH) + "</strong> — " +
-       (withinCaps
-         ? "<span class='t-ok'>within caps " + fmt(state.maxW) + " × " + fmt(state.maxH) + "</span>"
-         : "<span class='t-bad'>EXCEEDS caps " + fmt(state.maxW) + " × " + fmt(state.maxH) + "</span>") +
+  h += "<div class='t-title'>Tile " + (t.col + 1) + ", " + (t.row + 1) + " of " +
+       lay.solX.n + " &times; " + lay.solY.n + (pinned ? " <span class='t-pin'>pinned</span>" : "") + "</div>";
+  h += "<div class='t-row'>core <b>" + fmt(t.core.x1 - t.core.x0) + " &times; " + fmt(t.core.y1 - t.core.y0) +
+       "</b> at " + fmt(t.core.x0) + ", " + fmt(t.core.y0) + "</div>";
+  h += "<div class='t-row'>model sees <b>" + fmt(t.sampledW) + " &times; " + fmt(t.sampledH) + "</b> " +
+       (withinCaps ? "<span class='t-ok'>within caps</span>"
+                   : "<span class='t-bad'>over caps " + fmt(state.maxW) + " &times; " + fmt(state.maxH) + "</span>") +
        "</div>";
-  h += "<div class='t-note'>crop = core + overlap + context (symmetric) on: " + neighborSidesText(t.nb) + "</div>";
-  h += "<div class='t-note'><span class='t-ok'>kept &amp; feathered (green):</span> " + keptSidesText(t.keptSides) + "</div>";
-  h += "<div class='t-note'><span class='t-bad'>discarded — context only (red):</span> " + discardedSidesText(t.discardedSides) +
-       "; anchor halo (frozen) discarded on every neighbor side</div>";
-  if (t.cropRect.clamped || t.overlapInnerRect.clamped) {
-    h += "<div class='t-note'>context halo clamped at the canvas edge</div>";
+  if (lay.tiles.length > 1) {
+    h += "<div class='t-row'>blended into: <b>" + keptSidesText(t.keptSides) + "</b></div>";
+    h += "<div class='t-row'>context only: <b>" + discardedSidesText(t.discardedSides) + "</b>, plus the anchor halo</div>";
+    if (t.cropRect.clamped || t.overlapInnerRect.clamped) {
+      h += "<div class='t-row'>ring trimmed at the image edge</div>";
+    }
   }
   els.tip.innerHTML = h;
   els.tip.style.display = "block";
+  placeTip(pinned && state.pinPos ? state.pinPos : state.mouse);
+}
 
-  /* anchor at the crop's top-left corner (clamped inside the viewport) */
-  var v = state.view;
-  var px = v.offX + t.cropRect.x0 * v.scale + 8;
-  var py = v.offY + t.cropRect.y0 * v.scale + 8;
+/** Position the tooltip near the pointer, flipping to the other side at the viewport edge
+ *  so it never covers what the pointer is over. */
+function placeTip(pos) {
   var box = els.viewport.getBoundingClientRect();
   var tb = els.tip.getBoundingClientRect();
-  px = Math.min(px, box.width - tb.width - 8);
-  py = Math.min(py, box.height - tb.height - 8);
-  els.tip.style.left = Math.max(4, px) + "px";
-  els.tip.style.top = Math.max(4, py) + "px";
+  var gap = 16, margin = 6;
+  var x = pos.x + gap;
+  var y = pos.y + gap;
+  if (x + tb.width > box.width - margin) x = pos.x - gap - tb.width;
+  if (y + tb.height > box.height - margin) y = pos.y - gap - tb.height;
+  x = Math.max(margin, Math.min(x, box.width - tb.width - margin));
+  y = Math.max(margin, Math.min(y, box.height - tb.height - margin));
+  els.tip.style.left = x + "px";
+  els.tip.style.top = y + "px";
 }
 
 function hideTip() {
   els.tip.style.display = "none";
 }
 
+function pointerPos(ev) {
+  var rect = els.viewport.getBoundingClientRect();
+  return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+}
+
 function onPointerMove(ev) {
-  var rect = els.cv.getBoundingClientRect();
-  var idx = tileIndexAt(ev.clientX - rect.left, ev.clientY - rect.top);
+  state.mouse = pointerPos(ev);
+  var idx = tileIndexAt(state.mouse.x, state.mouse.y);
   if (idx !== state.hoverTile) {
     state.hoverTile = idx;
-    if (state.pinnedTile < 0) render();
+    if (state.pinnedTile < 0) { render(); return; }
   }
+  /* same tile: just keep the tooltip under the cursor, no redraw */
+  if (state.pinnedTile < 0 && idx >= 0) placeTip(state.mouse);
 }
 
 function onPointerLeave() {
@@ -1319,15 +1298,18 @@ function onPointerLeave() {
 }
 
 function onClick(ev) {
-  var rect = els.cv.getBoundingClientRect();
-  var idx = tileIndexAt(ev.clientX - rect.left, ev.clientY - rect.top);
-  state.pinnedTile = (idx === state.pinnedTile) ? -1 : idx; /* -1 when clicking outside */
+  state.mouse = pointerPos(ev);
+  var idx = tileIndexAt(state.mouse.x, state.mouse.y);
+  var unpin = (idx === state.pinnedTile) || idx < 0;
+  state.pinnedTile = unpin ? -1 : idx;
+  state.pinPos = unpin ? null : state.mouse;
   render();
 }
 
 function onKeyDown(ev) {
   if (ev.key === "Escape" && state.pinnedTile >= 0) {
     state.pinnedTile = -1;
+    state.pinPos = null;
     render();
   }
 }
@@ -1340,8 +1322,8 @@ function renderSelfTests() {
   var results = runSelfTests();
   var passed = results.filter(function (r) { return r.pass; }).length;
   var ok = passed === results.length;
-  els.testsStatus.innerHTML = "Self-tests: <span class='" + (ok ? "pass" : "fail") + "'>" +
-    passed + "/" + results.length + (ok ? " passed" : " PASSED — FAILURES, do not trust this page") + "</span>";
+  els.testsStatus.innerHTML = "<span class='" + (ok ? "pass" : "fail") + "'>" +
+    passed + "/" + results.length + (ok ? " checks pass" : " checks pass, so do not trust this page") + "</span>";
 
   var h = "<table><tr><th></th><th>Case</th><th>Expected</th><th>Got</th></tr>";
   results.forEach(function (r) {
@@ -1361,22 +1343,24 @@ function init() {
   els.viewport = document.getElementById("viewport");
   els.tip = document.getElementById("tip");
   els.scaleNote = document.getElementById("scale-note");
-  els.ow = document.getElementById("in-ow");
-  els.oh = document.getElementById("in-oh");
+  els.w = document.getElementById("in-w");
+  els.h = document.getElementById("in-h");
   els.factor = document.getElementById("in-factor");
   els.mw = document.getElementById("in-mw");
   els.mh = document.getElementById("in-mh");
   els.ctxIn = document.getElementById("in-ctx");
   els.overlap = document.getElementById("in-overlap");
-  els.canvasSize = document.getElementById("canvas-size");
+  els.inputSize = document.getElementById("input-size");
   els.readoutsBody = document.getElementById("readouts-body");
+  els.feather = document.getElementById("feather");
   els.featherCv = document.getElementById("feather-cv");
   els.featherCap = document.getElementById("feather-cap");
+  els.warnings = document.getElementById("warnings");
   els.warningsBody = document.getElementById("warnings-body");
   els.testsStatus = document.getElementById("tests-status");
   els.testsDetail = document.getElementById("tests-detail");
 
-  [els.ow, els.oh, els.factor, els.mw, els.mh, els.overlap, els.ctxIn].forEach(function (el) {
+  [els.w, els.h, els.factor, els.mw, els.mh, els.overlap, els.ctxIn].forEach(function (el) {
     el.addEventListener("input", recompute);
     el.addEventListener("change", function () { normalizeInputs(); recompute(); });
   });
