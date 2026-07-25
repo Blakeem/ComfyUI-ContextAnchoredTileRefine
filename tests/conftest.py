@@ -14,8 +14,12 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-DESKTOP_COMFYUI_ROOT = Path(
-    r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"
+# Comfy Desktop's bundled source tree, tried after the standard custom_nodes layout.
+# Ordered newest-install-first: the @comfyorgcomfyui-electron path is a pre-rename desktop
+# build (0.3.45, no z-image) that may not exist any more, so it is only a last resort.
+DESKTOP_COMFYUI_ROOTS = (
+    Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),
+    Path(r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"),
 )
 
 
@@ -38,9 +42,10 @@ def _resolve_comfyui_root():
         return standard_root, trace
     trace.append("standard layout {}: no 'comfy' directory".format(standard_root))
 
-    if (DESKTOP_COMFYUI_ROOT / "comfy").is_dir():
-        return DESKTOP_COMFYUI_ROOT, trace
-    trace.append("Desktop install {}: no 'comfy' directory".format(DESKTOP_COMFYUI_ROOT))
+    for desktop_root in DESKTOP_COMFYUI_ROOTS:
+        if (desktop_root / "comfy").is_dir():
+            return desktop_root, trace
+        trace.append("Desktop install {}: no 'comfy' directory".format(desktop_root))
 
     return None, trace
 

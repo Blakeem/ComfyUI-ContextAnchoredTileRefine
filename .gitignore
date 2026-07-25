@@ -2,6 +2,9 @@
 aipg/
 .claude/
 
+# A/B harness scratch: cached upscaled input tensors, regenerated on demand
+tests-AB/cache/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,622 @@
+{
+  "6": {
+    "inputs": {
+      "text": [
+        "160",
+        0
+      ],
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": [
+        "192",
+        0
+      ],
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "34": {
+    "inputs": {
+      "images": [
+        "228",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "35": {
+    "inputs": {
+      "model_name": "4xFaceUpDAT.safetensors"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load Upscale Model"
+    }
+  },
+  "36": {
+    "inputs": {
+      "images": [
+        "112",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "38": {
+    "inputs": {
+      "noise": [
+        "39",
+        0
+      ],
+      "guider": [
+        "109",
+        0
+      ],
+      "sampler": [
+        "55",
+        0
+      ],
+      "sigmas": [
+        "93",
+        0
+      ],
+      "latent_image": [
+        "110",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "39": {
+    "inputs": {
+      "noise_seed": 19578
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "55": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "65": {
+    "inputs": {
+      "lora_name": "chroma-flash-heun_r32-fp32.safetensors",
+      "strength_model": 1,
+      "model": [
+        "185",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "93": {
+    "inputs": {
+      "scheduler": "normal",
+      "steps": [
+        "123",
+        0
+      ],
+      "denoise": [
+        "107",
+        0
+      ],
+      "model": [
+        "65",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "Scheduler"
+    }
+  },
+  "107": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float"
+    }
+  },
+  "109": {
+    "inputs": {
+      "cfg": [
+        "113",
+        0
+      ],
+      "neg_scale": 1,
+      "model": [
+        "65",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "empty_conditioning": [
+        "111",
+        0
+      ]
+    },
+    "class_type": "PerpNegGuider",
+    "_meta": {
+      "title": "Perp-Neg Guider"
+    }
+  },
+  "110": {
+    "inputs": {
+      "width": [
+        "173",
+        0
+      ],
+      "height": [
+        "174",
+        0
+      ],
+      "batch_size": [
+        "175",
+        0
+      ]
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "Width + Height + Batch Size"
+    }
+  },
+  "111": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Blank"
+    }
+  },
+  "112": {
+    "inputs": {
+      "samples": [
+        "38",
+        0
+      ],
+      "vae": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "113": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "PerpNegGuider Cfg"
+    }
+  },
+  "118": {
+    "inputs": {
+      "mode": "always",
+      "volume": 0.5,
+      "file": "notify.mp3",
+      "any": [
+        "112",
+        0
+      ]
+    },
+    "class_type": "PlaySound|pysssss",
+    "_meta": {
+      "title": "PlaySound 🐍"
+    }
+  },
+  "123": {
+    "inputs": {
+      "value": 9
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Steps"
+    }
+  },
+  "160": {
+    "inputs": {
+      "value": "Woman's face close-up, blush, foundation, studio lighting"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "170": {
+    "inputs": {
+      "scheduler": "beta",
+      "steps": 9,
+      "denoise": 0.35,
+      "model": [
+        "185",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "Scheduler"
+    }
+  },
+  "171": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "173": {
+    "inputs": {
+      "value": 768
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Width"
+    }
+  },
+  "174": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Height"
+    }
+  },
+  "175": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Batch Size"
+    }
+  },
+  "183": {
+    "inputs": {
+      "cfg": 1,
+      "neg_scale": 1,
+      "model": [
+        "185",
+        0
+      ],
+      "positive": [
+        "189",
+        0
+      ],
+      "negative": [
+        "193",
+        0
+      ],
+      "empty_conditioning": [
+        "190",
+        0
+      ]
+    },
+    "class_type": "PerpNegGuider",
+    "_meta": {
+      "title": "Perp-Neg Guider"
+    }
+  },
+  "184": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "185": {
+    "inputs": {
+      "unet_name": "ungloryhailZImage_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "188": {
+    "inputs": {
+      "sampler_name": "heun"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "189": {
+    "inputs": {
+      "text": [
+        "160",
+        0
+      ],
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "190": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Blank"
+    }
+  },
+  "192": {
+    "inputs": {
+      "value": "cartoon, cgi, disproportionate body, jpeg compression, scribbles, AI generated, shredded cloth"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "193": {
+    "inputs": {
+      "text": [
+        "192",
+        0
+      ],
+      "clip": [
+        "184",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "223": {
+    "inputs": {
+      "upscale_model": [
+        "35",
+        0
+      ],
+      "image": [
+        "112",
+        0
+      ]
+    },
+    "class_type": "ImageUpscaleWithModel",
+    "_meta": {
+      "title": "Upscale Image (using Model)"
+    }
+  },
+  "224": {
+    "inputs": {
+      "resize_type": "scale dimensions",
+      "resize_type.width": [
+        "225",
+        0
+      ],
+      "resize_type.height": [
+        "226",
+        0
+      ],
+      "resize_type.crop": "disabled",
+      "scale_method": "lanczos",
+      "input": [
+        "223",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize Image/Mask"
+    }
+  },
+  "225": {
+    "inputs": {
+      "expression": "a*b",
+      "a": [
+        "173",
+        0
+      ],
+      "b": [
+        "232",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Width Math Expression 🐍"
+    }
+  },
+  "226": {
+    "inputs": {
+      "expression": "a*b",
+      "a": [
+        "174",
+        0
+      ],
+      "b": [
+        "232",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Height Math Expression 🐍"
+    }
+  },
+  "228": {
+    "inputs": {
+      "max_tile_width": [
+        "234",
+        0
+      ],
+      "max_tile_height": [
+        "235",
+        0
+      ],
+      "context_anchor": 32,
+      "context_overlap": 32,
+      "seam_mode": "min_error",
+      "warp_amount": 0.5,
+      "warp_scale": 64,
+      "image": [
+        "224",
+        0
+      ],
+      "guider": [
+        "183",
+        0
+      ],
+      "sampler": [
+        "188",
+        0
+      ],
+      "sigmas": [
+        "170",
+        0
+      ],
+      "vae": [
+        "17",
+        0
+      ],
+      "noise": [
+        "229",
+        0
+      ]
+    },
+    "class_type": "ContextAnchoredTileRefine",
+    "_meta": {
+      "title": "Context-Anchored Tile Refine"
+    }
+  },
+  "229": {
+    "inputs": {
+      "noise_seed": 42
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "232": {
+    "inputs": {
+      "value": 3
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Upscale Multiplier"
+    }
+  },
+  "234": {
+    "inputs": {
+      "expression": "a*2",
+      "a": [
+        "173",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Max Width Math Expression 🐍"
+    }
+  },
+  "235": {
+    "inputs": {
+      "expression": "a*2",
+      "a": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Max Height Math Expression 🐍"
+    }
+  },
+  "245": {
+    "inputs": {
+      "filename_prefix": "AB-Test-Images/AB-Test-3x",
+      "images": [
+        "228",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

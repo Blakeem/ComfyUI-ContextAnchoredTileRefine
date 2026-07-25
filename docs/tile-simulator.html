@@ -198,6 +198,10 @@ aside {
   font-size: 13px;
 }
 
+/* feather profile plot */
+#feather-cv { width: 100%; height: 128px; display: block; border-radius: 6px; }
+#feather-cap { margin-top: 7px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.5; }
+
 /* warnings */
 #warnings ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 #warnings li { padding: 7px 10px; border-radius: 6px; font-size: 12.8px; }
@@ -275,10 +279,10 @@ footer {
         <div class="ctl"><label for="in-mh">max_tile_height (/8)</label>
           <input id="in-mh" type="number" min="256" max="16384" step="8" value="1024"></div>
         <div class="ctl"><label for="in-overlap" title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded.">context_overlap (/8)</label>
-          <input id="in-overlap" type="number" min="0" max="512" step="8" value="8"
+          <input id="in-overlap" type="number" min="0" max="512" step="8" value="32"
             title="Context overlap — the directional feather width. On sides bordering an already-processed neighbor (top/left in raster order) this band is kept and feathered into that neighbor; on sides bordering an unprocessed neighbor (right/bottom) it is sampled for context then discarded."></div>
         <div class="ctl"><label for="in-ctx" title="Context anchor — the frozen-context halo sampled beyond the overlap on every neighbor side. Always discarded (never re-diffused, never composited).">context_anchor (/8)</label>
-          <input id="in-ctx" type="number" min="0" max="512" step="8" value="64"></div>
+          <input id="in-ctx" type="number" min="0" max="512" step="8" value="32"></div>
       </div>
       <div id="canvas-size"></div>
     </div>
@@ -286,6 +290,12 @@ footer {
     <div class="panel" id="readouts">
       <h2>Readouts</h2>
       <div id="readouts-body"></div>
+    </div>
+
+    <div class="panel" id="feather">
+      <h2>Feather profile</h2>
+      <canvas id="feather-cv"></canvas>
+      <div id="feather-cap"></div>
     </div>
 
     <div class="panel" id="warnings">
@@ -297,7 +307,7 @@ footer {
       <h2>Legend</h2>
       <ul>
         <li><span class="chip split"></span><span><strong>Tile cores</strong> — alternating tints (checkerboard) so adjacent cores are distinguishable. Cores partition the canvas exactly; every pixel belongs to one core.</span></li>
-        <li><span class="chip kept"></span><span><strong>Context overlap — kept, feathered</strong> (green) — the part of the <code>context_overlap</code> band the node actually composites (<code>paste_rect</code>): the <strong>top</strong> and <strong>left</strong> sides, which border an already-processed neighbor in raster order. Drawn as the actual cross-dissolve: <strong>full green at the seam</strong> (the core edge), fading to transparent over the overlap (a vertical ramp on the top, a horizontal ramp on the left, and a rounded product at the top-left corner into the up-left neighbor). It ends flush at the core's right/bottom edges — the later neighbor feathers those seams. This matches the node's <code>feather_alpha</code> exactly.</span></li>
+        <li><span class="chip kept"></span><span><strong>Context overlap — kept, feathered</strong> (green) — the part of the <code>context_overlap</code> band the node actually composites (<code>paste_rect</code>): the <strong>top</strong> and <strong>left</strong> sides, which border an already-processed neighbor in raster order. Drawn as the actual cross-dissolve using the baked-in feather profile (see the <strong>Feather profile</strong> panel): <strong>solid green plateau at the seam</strong> (the core edge stays 100% this tile), then a fast drop and a soft feather out into the neighbor — a vertical profile on the top, a horizontal one on the left, and their rounded product at the top-left corner into the up-left neighbor. It ends flush at the core's right/bottom edges — the later neighbor feathers those seams. This mirrors <code>feather_alpha</code> (a 10% solid plateau then a <code>k=2</code> fall-off) in <code>sampling.py</code>. The node also displaces this transition off a straight line by default (<code>seam_mode=min_error</code>), which is image-dependent and therefore not simulated here.</span></li>
         <li><span class="chip discard"></span><span><strong>Context overlap — context only, discarded</strong> (red, flat) — everything in the overlap band the node does <em>not</em> keep: the whole <strong>right</strong> column and <strong>bottom</strong> row, <strong>including the top-right and bottom-left overhang corners</strong>. Sampled/diffused so the model sees continuous context, then thrown away — the node pastes nothing here; the later right/lower neighbor feathers the seam instead.</span></li>
         <li><span class="chip ring"></span><span><strong>Context anchor — frozen context, discarded</strong> — <code>context_anchor</code> beyond the overlap on every neighbor side: fully frozen, visible-only context, <strong>held to the ground-truth pixels every sampling step</strong> (re-anchored each step so it never drifts) so it continuously pulls the diffused overlap back toward the neighbor. Never re-diffused, never composited, always discarded from the paste.</span></li>
         <li><span class="chip crop"></span><span><strong>Sampled crop</strong> — dashed outline on the hovered / clicked tile: the exact (symmetric) region the model sees, <code>core + context_overlap + context_anchor</code> on every neighbor side, at true 1:1 size.</span></li>
@@ -683,7 +693,7 @@ function runSelfTests() {
 var els = {};
 var state = {
   ow: 1024, oh: 1024, factor: 2,
-  maxW: 1024, maxH: 1024, ctx: 64, overlap: 8,
+  maxW: 1024, maxH: 1024, ctx: 32, overlap: 32,
   canvasW: 0, canvasH: 0,
   solX: null, solY: null,
   layout: null,
@@ -758,6 +768,7 @@ function recompute() {
   updateReadouts();
   updateWarnings();
   render();
+  updateFeatherPlot();
 }
 
 /* =====================================================================
@@ -817,6 +828,8 @@ function updateReadouts() {
   }
   h += "<dt>Ring / seam side</dt><dd>overlap " + fmt(lay.overlap) + " (feather) + context " +
        fmt(lay.ctx) + " = " + fmt(lay.r) + " px</dd>";
+  h += "<dt>Feather</dt><dd>plateau " + Math.round(FEATHER_PLATEAU * 100) + "% + k=" +
+       FEATHER_FALLOFF + " fall-off (baked in)</dd>";
   h += "<dt>Caps</dt><dd>" + fmt(state.maxW) + " × " + fmt(state.maxH) + " px</dd>";
   h += "</dl>";
 
@@ -855,6 +868,79 @@ function updateWarnings() {
   els.warningsBody.innerHTML = items.map(function (i) {
     return "<li class='" + i.cls + "'>" + i.text + "</li>";
   }).join("");
+}
+
+/**
+ * Plot the feather profile: alpha (weight of this tile) vs seam-distance, seam at the LEFT,
+ * neighbor at the RIGHT. Shades the solid plateau, draws the continuous curve, and overlays
+ * the discrete per-pixel samples for the current context_overlap (cell-centered, as the node
+ * samples them). The caption lists those sampled alphas seam->outer for small bands.
+ */
+function updateFeatherPlot() {
+  var cv = els.featherCv;
+  if (!cv) return;
+  var dpr = window.devicePixelRatio || 1;
+  var W = Math.max(120, Math.floor(cv.clientWidth || 320)), H = 128;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  var g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  var padL = 30, padR = 12, padT = 10, padB = 22;
+  var pw = W - padL - padR, ph = H - padT - padB;
+  function X(d) { return padL + d * pw; }          /* d = seam-distance, 0 at seam (left) */
+  function Y(a) { return padT + (1 - a) * ph; }     /* a = alpha, 1 at top */
+  function alphaAt(d) { return featherProfile(1 - d); }
+
+  /* plateau shading (solid, seam side) */
+  if (FEATHER_PLATEAU > 0) {
+    g.fillStyle = cssVar("--ok-bg");
+    g.fillRect(X(0), padT, FEATHER_PLATEAU * pw, ph);
+  }
+  /* gridlines at alpha = 0.5 and the plateau edge */
+  g.strokeStyle = cssVar("--border"); g.lineWidth = 1;
+  g.beginPath(); g.moveTo(X(0), Y(0.5)); g.lineTo(X(1), Y(0.5)); g.stroke();
+  g.strokeRect(padL, padT, pw, ph);
+
+  /* continuous curve */
+  g.strokeStyle = cssVar("--ok"); g.lineWidth = 2; g.beginPath();
+  for (var i = 0; i <= 120; i++) {
+    var d = i / 120, x = X(d), y = Y(alphaAt(d));
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.stroke();
+
+  /* discrete per-pixel samples for the current overlap width (cell-centered) */
+  var band = Math.max(1, Math.round(state.overlap));
+  var vals = [];
+  g.fillStyle = cssVar("--accent");
+  for (var j = 0; j < band; j++) {
+    var dc = (j + 0.5) / band;                     /* seam-distance of pixel j (j=0 nearest seam) */
+    var a = alphaAt(dc);
+    vals.push(a);
+    g.beginPath(); g.arc(X(dc), Y(a), 2.4, 0, Math.PI * 2); g.fill();
+  }
+
+  /* axis labels */
+  g.fillStyle = cssVar("--muted"); g.font = "10px system-ui, sans-serif";
+  g.textAlign = "right"; g.textBaseline = "middle";
+  g.fillText("1", padL - 4, Y(1)); g.fillText("0", padL - 4, Y(0));
+  g.textAlign = "left"; g.textBaseline = "alphabetic";
+  g.fillText("seam", padL, H - 7);
+  g.textAlign = "right";
+  g.fillText("neighbor", W - padR, H - 7);
+
+  /* caption: plateau in px + the sampled alphas seam->outer */
+  var plateauPx = Math.round(FEATHER_PLATEAU * band);
+  var cap = "baked curve: plateau " + Math.round(FEATHER_PLATEAU * 100) + "% (≈" + plateauPx +
+    " of " + band + " px solid) · falloff k=" + FEATHER_FALLOFF;
+  if (state.overlap === 0) {
+    cap = "context_overlap = 0 — no feather (hard seam).";
+  } else if (band <= 16) {
+    cap += "<br>α seam→outer: " + vals.map(function (v) { return v.toFixed(2); }).join(", ");
+  }
+  els.featherCap.innerHTML = cap;
 }
 
 /* =====================================================================
@@ -921,37 +1007,80 @@ function fillBoxGrad(g, x0, y0, x1, y1, paint) {
 }
 
 /**
- * Fill [x0,x1]x[y0,y1] with `green` at alpha = fx(x)*fy(y), where each factor is an
- * independent linear ramp: fx goes a0x->a1x across x, fy goes a0y->a1y across y. This is
- * the separable feather field. Fast paths render a pure vertical / pure horizontal ramp
- * as a single canvas gradient; the true 2D product (both axes ramping — the rounded
- * corners) is stacked as horizontal gradients, one per sub-row (fy ~const per row),
- * bounded to 64 rows. Coords are canvas px (the ctx transform is 1:1 there).
+ * Feather profile: weight of THIS tile in the cross-dissolve as a function of `u`, the
+ * normalized position across the kept band (u=0 at the outer edge against the neighbor,
+ * u=1 at the seam / core edge). Mirrors _feather_ramp in sampling.py:
+ *
+ *   base  = clamp(u / (1 - plateau), 0, 1)     1.0 once u reaches the plateau (u >= 1-plateau)
+ *   alpha = base^k                             fast drop -> soft feather at the outer edge
+ *
+ * Defined on normalized u so the SHAPE is identical at any band width — a wider overlap
+ * just samples the same curve at more pixels, which is why the curve is fixed and only
+ * context_overlap is tuned per scene. The constants mirror FEATHER_PLATEAU /
+ * FEATHER_FALLOFF in sampling.py; they were node widgets during A/B tuning and are now
+ * baked in there too, so they are no longer simulator inputs.
+ */
+var FEATHER_PLATEAU = 0.10;
+var FEATHER_FALLOFF = 2.0;
+
+function featherProfile(u) {
+  var denom = Math.max(1e-6, 1 - FEATHER_PLATEAU);   // guard plateau -> 1
+  var base = Math.min(1, u / denom);                 // 1.0 through the plateau
+  return Math.pow(base, FEATHER_FALLOFF);
+}
+
+/** Per-axis feather factor at normalized position t in [0,1] (t=0 at x0/y0, t=1 at x1/y1).
+ *  Constant axis (a0===a1) returns that constant; a ramping axis follows featherProfile,
+ *  oriented so the seam end (the 1-endpoint) reads ~1. */
+function axisFactor(a0, a1, t) {
+  if (a0 === a1) return a0;
+  return (a1 > a0) ? featherProfile(t) : featherProfile(1 - t);
+}
+
+/**
+ * Fill [x0,x1]x[y0,y1] with `green` at alpha = axisFactor_x(tx) * axisFactor_y(ty), the
+ * separable feather field. Each ramping axis now follows featherProfile (plateau + fall-off)
+ * instead of a straight line, approximated by a multi-stop canvas gradient. Pure vertical /
+ * pure horizontal ramps are one gradient; the true 2D product (both axes ramping — the
+ * rounded corner) is stacked as horizontal gradients, one per sub-row (fy ~const per row).
+ * Coords are canvas px (the ctx transform is 1:1 there).
  */
 function fillRampRect(g, green, x0, y0, x1, y1, a0x, a1x, a0y, a1y) {
   if (x1 <= x0 || y1 <= y0) return;
-  if (a0x === a1x) {                 /* pure vertical ramp (or constant): one gradient */
+  var rampX = (a0x !== a1x), rampY = (a0y !== a1y);
+  var S1 = 28;                       /* stops along a single ramping axis */
+
+  if (!rampX) {                      /* x constant -> vertical gradient (or flat) */
+    var cx = axisFactor(a0x, a1x, 0);
     var gv = g.createLinearGradient(0, y0, 0, y1);
-    gv.addColorStop(0, rgbaMul(green, a0x * a0y));
-    gv.addColorStop(1, rgbaMul(green, a0x * a1y));
+    for (var i = 0; i <= S1; i++) {
+      var ty = i / S1;
+      gv.addColorStop(ty, rgbaMul(green, cx * axisFactor(a0y, a1y, ty)));
+    }
     fillBoxGrad(g, x0, y0, x1, y1, gv);
     return;
   }
-  if (a0y === a1y) {                 /* pure horizontal ramp: one gradient */
+  if (!rampY) {                      /* y constant -> horizontal gradient */
+    var cy = axisFactor(a0y, a1y, 0);
     var gh = g.createLinearGradient(x0, 0, x1, 0);
-    gh.addColorStop(0, rgbaMul(green, a0x * a0y));
-    gh.addColorStop(1, rgbaMul(green, a1x * a0y));
+    for (var j = 0; j <= S1; j++) {
+      var tx = j / S1;
+      gh.addColorStop(tx, rgbaMul(green, axisFactor(a0x, a1x, tx) * cy));
+    }
     fillBoxGrad(g, x0, y0, x1, y1, gh);
     return;
   }
   var h = y1 - y0;                   /* both ramp -> separable product, stacked rows */
-  var steps = Math.min(Math.max(1, Math.round(h)), 64);
-  for (var i = 0; i < steps; i++) {
-    var ya = y0 + h * (i / steps), yb = y0 + h * ((i + 1) / steps);
-    var fy = a0y + (a1y - a0y) * ((i + 0.5) / steps);
+  var rows = Math.min(Math.max(1, Math.round(h)), 48);
+  var S2 = 12;                       /* stops along x within each sub-row */
+  for (var r = 0; r < rows; r++) {
+    var ya = y0 + h * (r / rows), yb = y0 + h * ((r + 1) / rows);
+    var fy = axisFactor(a0y, a1y, (r + 0.5) / rows);
     var grad = g.createLinearGradient(x0, 0, x1, 0);
-    grad.addColorStop(0, rgbaMul(green, a0x * fy));
-    grad.addColorStop(1, rgbaMul(green, a1x * fy));
+    for (var m = 0; m <= S2; m++) {
+      var mtx = m / S2;
+      grad.addColorStop(mtx, rgbaMul(green, axisFactor(a0x, a1x, mtx) * fy));
+    }
     fillBoxGrad(g, x0, ya, x1, yb, grad);
   }
 }
@@ -1241,6 +1370,8 @@ function init() {
   els.overlap = document.getElementById("in-overlap");
   els.canvasSize = document.getElementById("canvas-size");
   els.readoutsBody = document.getElementById("readouts-body");
+  els.featherCv = document.getElementById("feather-cv");
+  els.featherCap = document.getElementById("feather-cap");
   els.warningsBody = document.getElementById("warnings-body");
   els.testsStatus = document.getElementById("tests-status");
   els.testsDetail = document.getElementById("tests-detail");
@@ -1250,13 +1381,14 @@ function init() {
     el.addEventListener("change", function () { normalizeInputs(); recompute(); });
   });
 
+  function redrawAll() { render(); updateFeatherPlot(); }
   els.cv.addEventListener("pointermove", onPointerMove);
   els.cv.addEventListener("pointerleave", onPointerLeave);
   els.cv.addEventListener("click", onClick);
   window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("resize", render);
+  window.addEventListener("resize", redrawAll);
   var mq = window.matchMedia("(prefers-color-scheme: dark)");
-  if (mq.addEventListener) mq.addEventListener("change", render);
+  if (mq.addEventListener) mq.addEventListener("change", redrawAll);
 
   renderSelfTests();
   recompute();
