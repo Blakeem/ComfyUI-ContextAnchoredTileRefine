@@ -133,19 +133,22 @@ class RunConfig:
 
 
 IMAGES = [
+    # No `reference=`: the ComfyUI renders that used to serve as a fidelity baseline were
+    # made with PerpNeg + heun/beta + the chroma-flash LoRA. This harness now runs CFGGuider
+    # + euler/simple with no LoRA, so diffing against them would report a large number that
+    # means nothing. Set reference= again only if BaseGen/RunConfig are restored to match a
+    # specific recorded render.
     ImageSource(
         label="nightsky",
         filename="AB-Test_00001_.png",
         positive="Clear night sky, small full moon with failt nebula and star clusters, high ISO.",
         negative="cartoon, cgi, disproportionate body, jpeg compression, scribbles, AI generated, shredded cloth",
-        reference="AB-Test-3x_00001_.png",
     ),
     ImageSource(
         label="face",
         filename="AB-Test_00002_.png",
         positive="Woman's face close-up, blush, foundation, studio lighting",
         negative="cartoon, cgi, disproportionate body, jpeg compression, scribbles, AI generated, shredded cloth",
-        reference="AB-Test-3x_00002_.png",
     ),
 ]
 
