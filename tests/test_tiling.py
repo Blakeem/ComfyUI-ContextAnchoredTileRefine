@@ -243,11 +243,12 @@ def _simulate_feather_canvas(image, layout, n_tiles=None, displace=True):
     # own math is pinned independently in test_feather.py. Test images are /8-aligned, so the
     # frozen raw source is the input `image` itself (padded == image).
     #
-    # The seam displacement comes from sampling.seam_displacements, deliberately: it is a DP
-    # over the two tiles' own disagreement, so re-deriving it here would be a second copy of
-    # the algorithm rather than an independent check. Its VALUES are pinned in
-    # test_seam_routing.py; what this mirror independently reproduces is the VAE round trip,
-    # the raster order, the encode-source split, and the paste geometry.
+    # The seam displacement and the per-tile DC offset come from sampling, deliberately: both
+    # are reductions over the two tiles' own disagreement, so re-deriving them here would be a
+    # second copy of the algorithm rather than an independent check. Their VALUES are pinned in
+    # test_seam_routing.py and test_dc_match.py; what this mirror independently reproduces is
+    # the VAE round trip, the raster order, the encode-source split, and the paste geometry —
+    # including that the DC offset is subtracted BEFORE the routing surface is built.
     # displace=False gives the undisplaced composite, used to show what routing changed.
     source = image
     canvas = image.clone()
@@ -257,6 +258,9 @@ def _simulate_feather_canvas(image, layout, n_tiles=None, displace=True):
         decoded = _decode_tile(canvas, source, layout, i)
         sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
         region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
+        dc_offset = sampling.seam_dc_offset(tile, sub, region)
+        if dc_offset is not None:
+            sub = sub - dc_offset
         disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
         alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
                                        disp_top=disp_top, disp_left=disp_left)[..., None]
@@ -383,13 +387,20 @@ def test_later_tile_feathers_into_earlier_neighbor(comfy_stubs):
     paste, crop = t1.paste_rect, t1.crop_rect
     sub = t1_decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
     region = after_t0[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
+    # Second mirror of the production composite (this test does not use
+    # _simulate_feather_canvas), so it carries the DC match and the same subtract-then-route
+    # order. With these fakes both tiles refine the shared band identically, so the offset is
+    # exactly 0.0 and `sub` is unchanged by it; the call is here for parity, not for effect.
+    dc_offset = sampling.seam_dc_offset(t1, sub, region)
+    if dc_offset is not None:
+        sub = sub - dc_offset
     disp_top, disp_left = sampling.seam_displacements(t1, sub, region)
     alpha = sampling.feather_alpha(paste, t1.core, layout.overlap, t1.kept_top, t1.kept_left,
                                    disp_top=disp_top, disp_left=disp_left)
     alpha_band = alpha[0:24, 0:16]                  # the part tiles 2/3 never touch
 
     neighbor_band = after_t0[:, 0:24, 24:40, :]     # tile 0's independent refinement (what hard paste keeps)
-    tile_band = t1_decoded[:, 0:24, 0:16, :]        # tile 1's INDEPENDENT refinement of the same RAW pixels
+    tile_band = sub[:, 0:24, 0:16, :]               # tile 1's INDEPENDENT refinement of the same RAW pixels
     expected_band = alpha_band[None, ..., None] * tile_band + (1.0 - alpha_band)[None, ..., None] * neighbor_band
 
     # Feathered band matches the hand-computed blend exactly, and is NOT the hard paste.
@@ -403,7 +414,7 @@ def test_later_tile_feathers_into_earlier_neighbor(comfy_stubs):
     # error surface uniform along this seam, so a constant path is the correct answer for it.
     # Meandering is pinned against a planted staircase in test_seam_routing.py.
     # Seam side: tile 1's core (cols 40..80) is 100% tile 1 — no blend past the seam.
-    assert torch.equal(out[:, 0:24, 40:80, :], t1_decoded[:, 0:24, 16:56, :])
+    assert torch.equal(out[:, 0:24, 40:80, :], sub[:, 0:24, 16:56, :])
 
 
 def test_routing_only_moves_pixels_inside_a_kept_band(comfy_stubs):

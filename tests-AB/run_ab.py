@@ -147,6 +147,58 @@ IMAGES = [
         positive="Woman's face close-up, blush, foundation, studio lighting",
         negative="cartoon, cgi, disproportionate body, jpeg compression, scribbles, AI generated, shredded cloth",
     ),
+] + [
+    # ---- seam-hostile candidates -------------------------------------------------------
+    # Screening set for the per-tile DC match sample-size run. The grid is 2x2 at 2304x3072,
+    # so both seams cross the exact CENTRE of the frame — every prompt below is written to
+    # put smooth, low-detail content there, because that is what a per-tile DC step needs in
+    # order to show. The three levers, from the measurements so far:
+    #   DARK      Weber contrast: the same ~1/255 offset is ~4x more visible at luma 32
+    #             than at luma 130. Most candidates sit dark on purpose.
+    #   FLAT      no texture to mask the step.
+    #   GRADIENT  a smooth ramp crossing the seam turns the step into a Mach band, which
+    #             the eye finds far more readily than a step in a uniform field.
+    # `overcast` is the deliberate CONTROL: bright and flat, where the same offset should be
+    # invisible. If a seam shows up there, the Weber explanation is wrong.
+    #
+    # filename points at nothing on purpose -- read_prompts returns (None, None) and the
+    # hardcoded prompt below is used. The negative is the owner's, held IDENTICAL across
+    # every candidate so the positive prompt is the only variable.
+    ImageSource(label=label, filename="__no_prompt_png__.png", positive=positive,
+                negative="cartoon, cgi, disproportionate body, jpeg compression, scribbles, "
+                         "AI generated, shredded cloth")
+    for label, positive in (
+        ("dawn-grad",
+         "Empty sky before sunrise, one smooth unbroken gradient from deep indigo at the top "
+         "to dim amber near the bottom, no clouds, no stars, no horizon, no objects"),
+        ("deep-water",
+         "Calm deep ocean seen from directly above at dusk, almost perfectly still, dark teal, "
+         "no waves, no foam, no horizon, no objects"),
+        ("fog",
+         "Thick grey fog filling the whole frame, featureless, very low contrast, soft even "
+         "light, nothing visible through it"),
+        ("studio-grey",
+         "Empty seamless dark grey studio backdrop lit softly from one side, smooth falloff "
+         "across the frame, no subject, no props, no floor line"),
+        ("black-rim",
+         "Woman in profile against a pure black background, single soft rim light along her "
+         "cheek, most of the frame is empty unlit black"),
+        ("overcast",
+         "Featureless bright overcast sky, flat even white light, no clouds, no sun, no "
+         "horizon, no objects"),
+        ("skin-macro",
+         "Extreme close-up of smooth bare shoulder skin, very shallow depth of field, almost "
+         "entirely out of focus, soft even light"),
+        ("dune-dusk",
+         "Single smooth sand dune at dusk, one soft curved shadow gradient across it, fine "
+         "unbroken sand, no footprints, no vegetation"),
+        ("moon-snow",
+         "Untouched snow field under moonlight, smooth blue-grey, no footprints, no trees, "
+         "no horizon line, no objects"),
+        ("bokeh-night",
+         "Night scene thrown far out of focus, large soft dark bokeh discs, no sharp subject "
+         "anywhere in frame"),
+    )
 ]
 
 RUNS = [
@@ -214,39 +266,51 @@ class StageClock:
         print("[time]    {:<14} {:7.1f}s".format("TOTAL", sum(s for _, s in self.entries)))
 
 
-def patch_broken_encode_tiled():
-    """Make ComfyUI's VAE.encode_tiled_ actually run. Upstream bug, comfy/sd.py.
+def forbid_vae_fallback():
+    """Turn ComfyUI's OOM tiled-VAE fallback into a hard failure for the duration of a run.
 
-    It builds `samples` from tiled_scale (an inference-mode tensor) and then does
-    `samples += tiled_scale(...)`, which raises "Inplace update to inference tensor outside
-    InferenceMode". decode_tiled_ sums out-of-place and so survives — which is why only the
-    ENCODE fallback ever kills a run.
+    The fallback is a measurement contaminant, not a feature. A tiled decode splits the tile
+    into sub-tiles and blends them, and its GroupNorm statistics then differ per sub-tile, so
+    it adds its OWN per-tile DC drift on top of the effect under test: measured on the same
+    images, whole decode gives seam steps of 0.03-0.74/255 while decode_tiled gives up to
+    6.05/255 — 4-10x larger than the signal.
 
-    We need the fallback to work, not to avoid it. Measured on this card: the VAE round trip
-    at 1216x1600 reaches ~21 GiB of live allocation against 24 GB total, so ComfyUI takes the
-    tiled path here — and takes it in the desktop app too, at the same tile size on the same
-    GPU. Suppressing it would make the A/B measure something the production pipeline never
-    does. Rewrites the three accumulations out-of-place, changing nothing else.
+    Production does not take this path. The desktop app's log shows 8 VAE operations with
+    neither of comfy/sd.py's warnings ("Ran out of memory when regular VAE decoding/encoding")
+    on a 2x2 grid at 1216x1600 crops. An earlier note here claimed the app did take it; that
+    was measured against ComfyUI 0.19.5 through a harness that also lacked inference_mode,
+    and both causes are gone (see render()'s note and ab_env's CANDIDATE_ROOTS).
+
+    So: raise instead of repair. A fallback now stops the run with a diagnosis rather than
+    silently poisoning an arm. This also retires the old encode_tiled_ monkeypatch, which
+    existed only to make a path work that must never execute.
     """
     import comfy.sd
-    import comfy.utils
 
-    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap)
-        steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x // 2, tile_y * 2, overlap)
-        steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x * 2, tile_y // 2, overlap)
-        pbar = comfy.utils.ProgressBar(steps)
+    def refuse(name):
+        def guard(self, *args, **kwargs):
+            raise RuntimeError(
+                "VAE.{} was entered: ComfyUI fell back to tiled VAE because the regular path "
+                "ran out of memory. Tiled VAE adds its own per-tile DC drift (up to 6/255 vs "
+                "0.7/255 for whole decode), so this run would not measure what it claims. "
+                "Free VRAM (render one arm per process with --only) and retry.".format(name))
+        return guard
 
-        encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())  # noqa: E731
-        common = dict(upscale_amount=(1 / self.downscale_ratio), out_channels=self.latent_channels,
-                      output_device=self.output_device, pbar=pbar)
-        samples = comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap, **common)
-        samples = samples + comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x * 2, tile_y // 2, overlap, **common)
-        samples = samples + comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x // 2, tile_y * 2, overlap, **common)
-        return samples / 3.0
-
-    comfy.sd.VAE.encode_tiled_ = encode_tiled_
-    print("[env]     patched VAE.encode_tiled_ (upstream inplace-on-inference-tensor bug)")
+    # These are the six leaf tiled methods in comfy/sd.py; the public decode_tiled/
+    # encode_tiled and both OOM fallbacks funnel into them. Missing names are FATAL rather
+    # than skipped: a comfy upgrade that renames one would otherwise leave the guard a
+    # silent no-op while still printing that it was armed, which is worse than no guard.
+    required = ("decode_tiled_", "encode_tiled_", "decode_tiled_1d", "encode_tiled_1d",
+                "decode_tiled_3d", "encode_tiled_3d")
+    missing = [name for name in required if not hasattr(comfy.sd.VAE, name)]
+    if missing:
+        raise SystemExit(
+            "forbid_vae_fallback cannot cover {}: comfy.sd.VAE has no such attribute. "
+            "ComfyUI's VAE API changed; re-check the tiled entry points before trusting a "
+            "measurement from this harness.".format(", ".join(missing)))
+    for name in required:
+        setattr(comfy.sd.VAE, name, refuse(name))
+    print("[env]     tiled-VAE fallback armed to raise on {} entry points".format(len(required)))
 
 
 # ------------------------------------------------------------------ stages
@@ -413,10 +477,9 @@ def render(image, run, pixels, conds, empty, model, vae, settings):
 
     # inference_mode mirrors ComfyUI (execution.py wraps every prompt in it) and is not
     # cosmetic: without it autograd retains each op's inputs for a backward graph that is
-    # never used, which is why the VAE round trip measured ~21 GiB here and is comfortable
-    # in the desktop app at the identical tile size. It also makes the upstream
-    # encode_tiled_ bug moot, since in-place on an inference tensor is legal INSIDE
-    # inference mode — that patch stays as a belt-and-braces guard.
+    # never used, which is why the VAE round trip once measured ~21 GiB here and is
+    # comfortable in the desktop app at the identical tile size. With it, the regular decode
+    # path fits and forbid_vae_fallback() never fires.
     with ab_models.VramProbe() as probe, torch.inference_mode():
         result = sampling.refine_image(
             pixels, guider, sampler, sigmas, vae, noise,
@@ -543,7 +606,7 @@ def main(argv=None):
     root, note = ab_env.bootstrap()
     version = ab_env.version(root)
     print("[env]     ComfyUI {} at {}  ({})".format(version, root, note))
-    patch_broken_encode_tiled()
+    forbid_vae_fallback()
     print("[env]     torch {}  cuda {}  device {}".format(
         torch.__version__, torch.version.cuda,
         torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"))

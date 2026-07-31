@@ -140,8 +140,8 @@ def feather_alpha(paste_rect, core, overlap, kept_top, kept_left, plateau=FEATHE
     # plateau/k. plateau=0, k=1 reproduces the original linear-ramp feather exactly.
     #
     # disp_top ([w]) / disp_left ([h]) optionally slide the transition along each seam (the
-    # `warp` and `min_error` seam modes) so it stops reading as a straight line; None keeps
-    # the straight 1-D ramp, bit-for-bit. A displaced side becomes a 2-D field, but the
+    # baked-in min_error routing) so it stops reading as a straight line; None keeps the
+    # straight 1-D ramp, bit-for-bit. A displaced side becomes a 2-D field, but the
     # result is still the product of a vertical and a horizontal factor, so the corner stays
     # the product of the two seams' curves. CRITICAL: the ramp is only ever written into the
     # band slice, so every core row/column stays exactly 1.0 under any displacement — the
@@ -350,6 +350,106 @@ def seam_displacements(tile, sub, region):
     return disp_top, disp_left
 
 
+# Per-tile DC match, always on (seam-placement-cannot-fix-tile-dc). Two tiles that diffused
+# the SAME raw band land at slightly different DC levels, and that step spans the whole tile,
+# so no feather placement can move it. Measured contributions: 0.03-0.74/255 from VAE crop
+# framing alone (encode+decode of one strip inside two different crops, no sampler involved),
+# plus a larger diffusion-framing term.
+#
+# The overlap band is the only place two tiles have refined the SAME raw pixels, so content
+# cancels there exactly and what is left is pure tile-to-tile disagreement. Measuring a
+# tile's core against the raw source instead does NOT work; it was built as a control arm and
+# refuted. That difference is dominated by content (a detailed tile round-trips with a
+# different bias than a flat one): VAE-only, on a face, the core-referenced estimate differed
+# between tiles by 0.9-1.9/255 where the tiles actually agreed to within 0.27/255, so a
+# correction built on it injects seam error rather than removing it.
+#
+# The reduction is the MEDIAN, picked over the mean in a blind flip-comparison. Not on shade —
+# there the two are indistinguishable (0.20 vs 0.23/255 on the cleanest case) — but on SEAM
+# ROUTING: the offset is subtracted before the min-error surface is built, and subtracting the
+# median leaves that surface describing texture instead of a constant pedestal, so the DP
+# discriminates between paths instead of tie-breaking on noise.
+#
+# The correction is additive and per-channel: the offset is partly chroma (per-channel
+# peak-to-peak R 1.18 / G 1.25 / B 1.64 on a night sky, with differing signs), and the
+# magnitude does not scale with luminance the way a multiplicative gain would.
+
+# Safety rail only. Every measurement so far is ~1/255; a correction near this bound means
+# the estimate is pathological (a decode failure, a mismatched neighbor) and clamping keeps
+# it from painting a visible block, rather than being a tuning knob.
+DC_MATCH_CLAMP = 4.0 / 255.0
+
+# Floor on how many band samples the median may be taken over. It only ever binds on the mask
+# path, where the band is gated to the masked region and can shrink to a sliver: the median's
+# standard error is ~1.25*sigma/sqrt(N), and against locally large texture disagreement a
+# handful of pixels can leave it sitting on an outlier — which would then shift a WHOLE tile.
+# Below the floor the tile takes no correction at all, the safe direction; DC_MATCH_CLAMP is
+# the backstop above it. The no-mask path never reaches this: its bands are ~36k samples.
+DC_MATCH_MIN_SAMPLES = 256
+
+
+def _band_samples(diff, keep, channels):
+    # One band's [B,h,w,C] difference flattened to [N,C]. `keep` is that band's [B,h,w] binary
+    # region gate, or None to take every pixel.
+    if keep is None:
+        return diff.reshape(-1, channels)
+    return diff[keep > 0]
+
+
+def seam_dc_offset(tile, sub, region, region_mask=None):
+    # Per-channel additive offset that lands this tile's DC on its ALREADY-PLACED
+    # neighbors', measured over the shared overlap band(s). Returns [C], or None when the
+    # tile has no processed neighbor (the first tile, which therefore sets the gauge), when
+    # there is no overlap band at all (context_overlap=0 — a silent no-op, not an error), or
+    # when too few samples survive the region gate.
+    #
+    # sub and region both cover paste_rect. On a kept side its first `band` rows/columns
+    # hold two INDEPENDENT refinements of the same raw pixels — this tile's in `sub`, the
+    # neighbor's in `region` — which is what makes the difference content-free. These are
+    # the same slices seam_displacements reduces as a squared error.
+    #
+    # region_mask is the paste_rect slice of the binary region mask at PIXEL resolution on the
+    # mask path, None otherwise. Where it is given, only band pixels inside the region count:
+    # those are the only ones both tiles actually diffused. Band pixels outside it are frozen
+    # (denoise 0) and are discarded at composite time, so pooling them would derive the offset
+    # partly from VAE crop-framing disagreement on pixels the output never uses and then apply
+    # it to the foreground that it does.
+    paste, core = tile.paste_rect, tile.core
+    top_band = core.y0 - paste.y0
+    left_band = core.x0 - paste.x0
+    take_top = tile.kept_top and top_band > 0
+    take_left = tile.kept_left and left_band > 0
+    channels = sub.shape[-1]
+    samples = []
+
+    # The two bands are made DISJOINT — the left band starts below the top band — so the
+    # band x band corner belongs to exactly one of them and is counted exactly once. Pooling
+    # the samples before reducing (rather than combining two per-band medians) is what keeps
+    # that true; under a median it also means the LARGER band's value wins outright when the
+    # two neighbors disagree, which is the wanted behaviour — the wider shared edge is the
+    # better-supported measurement, and an edge crossing the narrower seam cannot drag it.
+    if take_top:
+        samples.append(_band_samples(
+            sub[:, :top_band, :, :] - region[:, :top_band, :, :],
+            None if region_mask is None else region_mask[:, :top_band, :], channels))
+    if take_left:
+        y0 = top_band if take_top else 0
+        samples.append(_band_samples(
+            sub[:, y0:, :left_band, :] - region[:, y0:, :left_band, :],
+            None if region_mask is None else region_mask[:, y0:, :left_band], channels))
+    if not samples:
+        return None
+
+    flat = torch.cat(samples, dim=0).float()
+    if flat.shape[0] < DC_MATCH_MIN_SAMPLES:
+        return None
+    # The median is robust to a high-contrast edge crossing the band, where the two
+    # refinements genuinely disagree by a lot over a few pixels — that is texture
+    # disagreement, not a DC offset, and a mean lets it drag the whole tile.
+    offset = flat.median(dim=0).values
+    return offset.clamp(-DC_MATCH_CLAMP, DC_MATCH_CLAMP).to(sub.dtype)
+
+
 def _debug_dir():
     # Opt-in seam debug. When the CATR_DEBUG_DIR env var is set, _refine_tiles writes the
     # per-tile intermediates (decoded crop, the raw band it encoded, the feather alpha, and
@@ -379,25 +479,32 @@ def _dump_png(path, tensor):
         Image.fromarray(arr, mode="L").save(path)
 
 
-def _manifest_line(tile_idx, tile):
+def _manifest_line(tile_idx, tile, dc_offset=None):
     # One human-readable row per tile for the seam-debug manifest: the geometry needed to
     # line the dumped PNGs up in canvas space (core is the hard-owned region; paste is the
     # feathered top/left band; crop is the full sampled extent incl. the frozen anchor ring).
+    # dc_offset is the applied per-channel DC correction — the number the DC match exists to
+    # produce, and it is invisible in the dumped PNGs (which hold the UNcorrected decode), so
+    # it has to be recorded here or it cannot be checked at all.
     def rc(r):
         return "({},{})-({},{})".format(r.x0, r.y0, r.x1, r.y1)
 
-    return "t{:02d} r{}c{} cls={} kept_top={} kept_left={} core={} paste={} crop={}".format(
+    dc = "" if dc_offset is None else " dc=[{}]".format(
+        ",".join("{:+.6f}".format(v) for v in dc_offset.tolist()))
+    return "t{:02d} r{}c{} cls={} kept_top={} kept_left={} core={} paste={} crop={}{}".format(
         tile_idx, tile.row, tile.col, tile.cls, tile.kept_top, tile.kept_left,
-        rc(tile.core), rc(tile.paste_rect), rc(tile.crop_rect),
+        rc(tile.core), rc(tile.paste_rect), rc(tile.crop_rect), dc,
     )
 
 
 def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
-    # raster order from a live canvas → composite by a directional feather → crop back.
+    # raster order from a live canvas → DC-match onto the already-placed neighbors →
+    # composite by a directional feather → crop back.
     # A 1x1 grid (or overlap=ctx=0) reproduces the feature-2 whole-image path bit for bit.
     # region_pixel (optional [B,H,W] binary float at input pixel size) gates each tile's
-    # denoise_mask to the masked region so only it diffuses; the background stays frozen.
+    # denoise_mask to the masked region so only it diffuses; the background stays frozen,
+    # and it gates the DC measurement to the same region (see seam_dc_offset).
     import comfy.model_management
 
     # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
@@ -423,6 +530,10 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # (NOT avg+threshold) so every pixel with region==1 lands in a DIFFUSED latent cell —
     # else a subject-edge pixel would be frozen yet pasted. Over-cover is harmless: extra
     # diffused cells fall outside the mask and are discarded by the AA composite.
+    # region_padded (the PIXEL-resolution gate) is kept as well, because the DC measurement
+    # has to be gated at pixel resolution: region_latent over-covers by up to 8px, and those
+    # extra pixels are exactly the frozen ones that must not enter the estimate.
+    region_padded = None
     region_latent = None
     if region_pixel is not None:
         region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
@@ -533,8 +644,17 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             paste = tile.paste_rect
             sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
             region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
-            # Seam-mode displacement: straight (None), a coherent-noise meander, or the
-            # minimum-error cut. Computed from sub/region, so it must follow both.
+            # DC match, BEFORE the displacement and the composite. Before the composite
+            # because a per-tile constant applied afterwards would re-introduce a hard step
+            # at the tile boundary and undo the feather; doing it here means feather_alpha
+            # cross-dissolves two already-matched tiles and needs no new machinery. Before
+            # the displacement because removing a constant offset leaves the error surface
+            # describing TEXTURE disagreement rather than being dominated by that constant,
+            # which is what the routed cut should follow.
+            region_mask = None if region_padded is None else region_padded[:, paste.y0:paste.y1, paste.x0:paste.x1]
+            dc_offset = seam_dc_offset(tile, sub, region, region_mask)
+            if dc_offset is not None:
+                sub = sub - dc_offset           # a copy; `decoded` and the canvas are untouched
             disp_top, disp_left = seam_displacements(tile, sub, region)
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
             if debug_dir is not None:
@@ -546,7 +666,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
             if debug_dir is not None:
                 _save(tag + "_region_after.png", canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :])
-                debug_manifest.append(_manifest_line(tile_idx, tile))
+                debug_manifest.append(_manifest_line(tile_idx, tile, dc_offset))
         else:
             if debug_dir is not None:
                 _save("t{:02d}_r{}c{}_decoded.png".format(tile_idx, tile.row, tile.col), decoded)
@@ -567,9 +687,11 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # crop with every tile's denoise_mask gated to the masked region → composite the
     # refined crop back through a 1px anti-aliased edge. The mask=0 background survives from
     # the ORIGINAL pixels (never the VAE-decoded crop), so it is never re-diffused.
-    # The minimum-error routing shapes the inter-tile directional feather only; it never
-    # touches the mask-boundary composite, which stays a hard binary gate plus a 1px
-    # anti-alias (mask-boundary-conditioning-not-feather).
+    # The minimum-error routing and the per-tile DC match shape the inter-TILE directional
+    # feather only; neither touches the mask boundary, which stays a hard binary gate plus a
+    # 1px anti-alias (mask-boundary-conditioning-not-feather). The DC measurement is gated to
+    # the masked region for the same reason — it is a tile-to-tile correction, and the
+    # background outside the region is never shaded at all.
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         return image.clone()

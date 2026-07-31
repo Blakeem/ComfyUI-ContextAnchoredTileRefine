@@ -37,6 +37,10 @@ Where the handover sits comes from the **minimum error boundary cut** in Efros a
 
 Image quilting cuts along the path and pastes. Here the path pulls the feather's midpoint toward it instead, so the handover bends around image content rather than running dead straight. A straight boundary is easy to spot even when it is faint. One that follows detail is not.
 
+Tiles diffused separately also land at slightly different brightness and color levels, around 1/255. That step covers a whole tile, so no choice of where to hand over can move it. Stitching pipelines fix this with an **exposure compensation** stage between finding the seam and blending it, as in Brown and Lowe, *Automatic Panoramic Image Stitching using Invariant Features*, IJCV 2007. Theirs corrects a multiplicative gain. Here it is additive and per channel, because the measured offset does not scale with brightness and is partly color.
+
+The shared band is the only place two tiles have refined the same raw pixels, so the difference between them there carries no content, only the disagreement. The node takes the median of that difference per channel and subtracts it before compositing, putting the tile on its neighbor's level. The first tile has no processed neighbor, so it sets the level. Median rather than mean matters because the offset comes off before the error surface above is built. A mean is dragged by the few pixels where the two results genuinely disagree, leaving a constant pedestal that makes every path cost about the same. The median removes the typical disagreement instead, so what is left describes texture and the cut has something to follow. Under a mask, only band pixels inside the masked region count, since the rest were never diffused.
+
 Open the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html) to preview the tile layout for any image size and settings.
 
 You can see how I use it in my [personal ComfyUI workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json).
