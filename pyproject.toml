@@ -1,7 +1,7 @@
 [project]
 name = "contextanchoredtilerefine"
-description = "Seamless tiled refinement for upscaled images. Refine an image tile by tile with no visible seams, or refine only a masked region of a large image without processing the rest. Each tile is conditioned on its already-refined neighbors held as frozen context. Works with any guider, including Perp-Neg."
-version = "1.2.0"
+description = "Seamless tiled refinement for upscaled images. Refine an image tile by tile with no visible seams, or refine only a masked region of a large image without processing the rest. Each tile is conditioned on its already-refined neighbors held as frozen context. Works with any guider, including NAG (Normalized Attention Guidance)."
+version = "1.2.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []

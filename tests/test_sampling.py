@@ -214,3 +214,59 @@ def test_sample_latent_default_callback_uses_prepare_callback(comfy_stubs):
     assert guider.call["callback"] is comfy_stubs["callback"]
     assert comfy_stubs["callback_calls"] == [(step, 4) for step in range(4)]
     assert out.device == torch.device("cpu")
+
+
+def test_sample_latent_normalizes_denoise_mask(comfy_stubs):
+    # sample_latent hands the guider the PREPARED mask form — [B,1,h,w] float32 on the
+    # guider's load device — so a guider whose copied sample() predates core moving
+    # prepare_mask out of outer_sample never receives a raw CPU [h,w] mask.
+    guider, latent = FakeGuider(), torch.zeros(1, 4, 4, 6)
+    mask2d = torch.rand(4, 6) > 0.5   # bool input pins the float32 cast as a real conversion
+
+    sampling.sample_latent(guider, object(), SIGMAS, torch.zeros_like(latent), 7, latent,
+                           denoise_mask=mask2d, callback=lambda *a: None)
+
+    dm = guider.call["denoise_mask"]
+    assert dm.shape == (1, 1, 4, 6)
+    assert dm.dtype == torch.float32
+    assert torch.equal(dm[0, 0], mask2d.to(torch.float32))
+
+
+def test_sample_latent_mask_lands_on_guider_load_device(comfy_stubs):
+    # The device is READ FROM THE GUIDER, not assumed: a meta-device patcher must
+    # receive a meta mask. (The default stub device is cpu, where a hardcoded
+    # .to("cpu") would pass by accident; meta pins the load_device read.)
+    guider, latent = FakeGuider(), torch.zeros(1, 4, 4, 6)
+    guider.model_patcher.load_device = torch.device("meta")
+
+    sampling.sample_latent(guider, object(), SIGMAS, torch.zeros_like(latent), 7, latent,
+                           denoise_mask=torch.ones(4, 6), callback=lambda *a: None)
+
+    dm = guider.call["denoise_mask"]
+    assert dm.device.type == "meta"
+    assert dm.shape == (1, 1, 4, 6)
+
+
+def test_sample_latent_normalizes_batched_denoise_mask(comfy_stubs):
+    # [B,h,w] -> [B,1,h,w]: per-batch rows preserved bit for bit, never pooled.
+    guider, latent = FakeGuider(), torch.zeros(2, 4, 4, 6)
+    mask = torch.zeros(2, 4, 6)
+    mask[0, :2] = 1.0
+    mask[1, 2:] = 1.0
+
+    sampling.sample_latent(guider, object(), SIGMAS, torch.zeros_like(latent), 7, latent,
+                           denoise_mask=mask, callback=lambda *a: None)
+
+    dm = guider.call["denoise_mask"]
+    assert dm.shape == (2, 1, 4, 6)
+    assert torch.equal(dm[:, 0], mask)
+
+
+def test_sample_latent_none_denoise_mask_passthrough(comfy_stubs):
+    # No mask -> None reaches the guider unchanged (no tensor is fabricated).
+    guider, latent = FakeGuider(), torch.zeros(1, 4, 4, 6)
+
+    sampling.sample_latent(guider, object(), SIGMAS, torch.zeros_like(latent), 7, latent,
+                           callback=lambda *a: None)
+
+    assert guider.call["denoise_mask"] is None

@@ -45,7 +45,10 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   (a subprocess test pins this).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
-  step counts.
+  step counts. `sample_latent` hands it over pre-normalized to the canonical [B,1,h,w] float32
+  form on the guider's load device (the fixed point of core's `prepare_mask`) — a value no-op
+  for core guiders, and it shields guider packs whose copied `sample()` lacks core's mask prep
+  from ever seeing a raw CPU mask.
 - Curated ComfyUI API references: `docs/reference/INDEX.md`. Tile-layout playground:
   `docs/tile-simulator.html`, a self-testing mirror of `grid.py`.
 

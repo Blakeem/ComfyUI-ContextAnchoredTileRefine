@@ -233,16 +233,31 @@ def _path_displacement(err, band, plateau, k):
 
 
 def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None):
-    # The per-tile reuse seam. Mirrors SamplerCustomAdvanced.sample with two deliberate
+    # The per-tile reuse seam. Mirrors SamplerCustomAdvanced.sample with three deliberate
     # deviations: no fix_empty_latent_channels (the latent always comes from a real
-    # vae.encode) and no x0_output dict (the denoised output is unused; previews work
-    # without it). denoise_mask/callback are injectable for the later tiling feature.
+    # vae.encode), no x0_output dict (the denoised output is unused; previews work
+    # without it), and the denoise mask is handed over pre-normalized (below).
+    # denoise_mask/callback are injectable for the later tiling feature.
     import comfy.model_management
     import comfy.utils
     import latent_preview
 
     if callback is None:
         callback = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1)
+    if denoise_mask is not None:
+        # Normalize to the canonical broadcastable form — [B,1,h,w] float32 on the
+        # guider's load device — the FIXED POINT of comfy.sampler_helpers.prepare_mask
+        # (whose full output is the channel-expanded [B,C,h,w]). A well-behaved guider
+        # re-runs prepare_mask over this form and gets value-identical results; a guider
+        # pack whose copied sample() predates core moving that prep out of outer_sample
+        # would otherwise receive a CPU tensor and crash against a CUDA latent in
+        # KSamplerX0Inpaint. [B,1,h,w] — never the channel-expanded [B,C,h,w] — is what
+        # survives re-preparation at every batch size: prepare_mask flattens leading
+        # dims to (-1,1,h,w) before re-expanding, which batch-scrambles a
+        # channel-expanded mask at B>1. Spatial size always matches the tile latent by
+        # construction, so this is a pure view plus a device/dtype move that no-ops on
+        # the CPU path — binary values untouched.
+        denoise_mask = denoise_mask.reshape((-1, 1) + denoise_mask.shape[-2:]).to(device=guider.model_patcher.load_device, dtype=torch.float32)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
     samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())

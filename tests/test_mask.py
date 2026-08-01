@@ -104,8 +104,8 @@ def test_region_gate_is_grad_times_region_latent(comfy_stubs):
         grad = sampling.tile_gradient(crop, tile.overlap_inner_rect, scale=8)
         reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
         dm = call["denoise_mask"]
-        assert dm.shape == (1, crop.y1 // 8 - crop.y0 // 8, crop.x1 // 8 - crop.x0 // 8)
-        assert torch.equal(dm, grad * reg)
+        assert dm.shape == (1, 1, crop.y1 // 8 - crop.y0 // 8, crop.x1 // 8 - crop.x0 // 8)
+        assert torch.equal(dm[:, 0], grad * reg)
         assert ((dm == 0.0) | (dm == 1.0)).all()   # strictly binary
 
 
@@ -123,10 +123,10 @@ def test_n1_masked_tile_denoise_mask_is_region_latent(comfy_stubs):
     assert dm is not None
     sub_mask = (mask >= 0.5)[:, 8:32, 8:32].to(image.dtype)
     region_latent = (torch.nn.functional.max_pool2d(sub_mask[:, None], 8) > 0).float()[:, 0]
-    assert torch.equal(dm, region_latent)
+    assert torch.equal(dm[:, 0], region_latent)
     expected = torch.zeros(1, 3, 3)
     expected[:, 1, 1] = 1.0
-    assert torch.equal(dm, expected)
+    assert torch.equal(dm[:, 0], expected)
 
 
 def test_masked_run_covers_mid_cell_subject_edge(comfy_stubs):
@@ -141,13 +141,13 @@ def test_masked_run_covers_mid_cell_subject_edge(comfy_stubs):
 
     assert len(guider.calls) == 1
     dm = guider.calls[0]["denoise_mask"]   # crop == full 32x32 -> region_latent [1,4,4]
-    assert dm.shape == (1, 4, 4)
+    assert dm.shape == (1, 1, 4, 4)
     for r in range(12, 20):
         for c in range(12, 20):
-            assert dm[0, r // 8, c // 8] == 1.0
+            assert dm[0, 0, r // 8, c // 8] == 1.0
     expected = torch.zeros(1, 4, 4)
     expected[:, 1:3, 1:3] = 1.0
-    assert torch.equal(dm, expected)
+    assert torch.equal(dm[:, 0], expected)
 
 
 # ---- AA composite (bitwise) -----------------------------------------------

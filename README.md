@@ -51,7 +51,7 @@ With a `mask`, the node crops to the masked region plus a `context_anchor` borde
 
 ## Guider and ControlNet
 
-The `guider` input lets you use Perp-Neg Guider, or any other guider. The tradeoff is that the guider's conditioning covers the whole image and is not re-cropped per tile, so ControlNet is not supported.
+The `guider` input lets you use NAG (Normalized Attention Guidance), or any other guider. The tradeoff is that the guider's conditioning covers the whole image and is not re-cropped per tile, so ControlNet is not supported.
 
 ## License
 
