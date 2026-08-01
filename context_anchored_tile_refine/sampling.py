@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from . import grid
+from . import conds, grid
 
 # How a seam is hidden is not configurable, by design: the node exposes only the geometry
 # that genuinely depends on the image (the tile caps, context_anchor, context_overlap) and
@@ -512,7 +512,7 @@ def _manifest_line(tile_idx, tile, dc_offset=None):
     )
 
 
-def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None):
+def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
     # composite by a directional feather → crop back.
@@ -520,6 +520,8 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # region_pixel (optional [B,H,W] binary float at input pixel size) gates each tile's
     # denoise_mask to the masked region so only it diffuses; the background stays frozen,
     # and it gates the DC measurement to the same region (see seam_dc_offset).
+    # hint_canvas (optional) is refine_image's prepared ControlNet hint map, already in THIS
+    # call's pixel space; None — the no-ControlNet case — leaves every step below untouched.
     import comfy.model_management
 
     # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
@@ -539,6 +541,11 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     pixels = image[..., :3]
     padded, (height, width) = pad_image_to_multiple(pixels)
     batch, canvas_h, canvas_w = padded.shape[0], padded.shape[1], padded.shape[2]
+
+    # Ride the hints onto the same padded canvas as the pixels — same reflect pad, same
+    # amounts — so a tile's crop_rect indexes hint and canvas identically.
+    if hint_canvas is not None:
+        hint_canvas = conds.pad_hint_canvas(hint_canvas, (height, width), (canvas_h, canvas_w))
 
     # Region gate at latent resolution. Pad the pixel mask to the /8 canvas with constant
     # 0 (the padded strip is always cropped away), then cover-downsample by 8. max_pool2d
@@ -635,7 +642,19 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
             grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else 1.0
             denoise_mask = grad * reg
-        samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
+        # Per-tile ControlNet conds. The swapped map's control chains are fresh copies whose
+        # hints are this tile's crop_rect slice, so core's rescale is an identity and the hint
+        # lands aligned; CFGGuider.sample() re-copies original_conds on every call, so the swap
+        # takes effect per tile. The pristine map — the SAME object the caller handed in — goes
+        # back in `finally`, so an interrupt or a sampler raise cannot leave the guider swapped.
+        if hint_canvas is not None:
+            pristine_conds = guider.original_conds
+            guider.original_conds = conds.crop_tile_conds(pristine_conds, hint_canvas, crop)
+        try:
+            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
+        finally:
+            if hint_canvas is not None:
+                guider.original_conds = pristine_conds
         decoded = vae.decode(samples)
         if expanded:
             # Directional feather (docs/CLAUDE.md prime directive 2): write paste_rect
@@ -710,8 +729,16 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         return image.clone()
+    # ControlNet prep happens HERE because this is the last place the FULL input size is in
+    # hand: the hints are validated against it, and on the mask path they take the same bbox
+    # slice the image does. _refine_tiles pads them and cuts them per tile. Without a control
+    # object in the conds this is a single dict walk and hint_canvas stays None, leaving every
+    # path below byte-identical to a run without the feature.
+    original_conds = getattr(guider, "original_conds", None)
+    control_active = conds.has_spatial_conds(original_conds)
     if mask is None:
-        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None)
+        hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
+        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas)
 
     # Region-mask path. Harden a soft input at 0.5 — a fractional denoise mask would leave
     # the under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
@@ -724,7 +751,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     y0, y1, x0, x1 = _expand_snap_clamp(bbox, context_anchor, height, width)
     sub_image = image[:, y0:y1, x0:x1, :]
     sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask)
+    hint_canvas = conds.prepare_hint_canvas(original_conds, (height, width), (y0, y1, x0, x1)) if control_active else None
+    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas)
     # Composite the refined crop back through the anti-aliased mask edge. Outside the crop,
     # and wherever aa == 0 inside it, the output is the byte-identical original image.
     # Narrow to RGB: _refine_tiles decodes a 3-channel refined_sub (as the no-mask path does,

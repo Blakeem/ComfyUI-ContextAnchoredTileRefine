@@ -65,6 +65,24 @@ def test_sampling_module_never_imports_comfy():
     assert result.returncode == 0, result.stderr
 
 
+def test_conds_module_never_imports_comfy():
+    # conds.py duck-types the control objects precisely so it needs no comfy import; a
+    # module-scope one would break the stub-based pure suite the same way sampling.py's would.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.conds\n"
+        "assert 'comfy' not in sys.modules, 'conds.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'conds.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_grid_module_never_imports_comfy():
     # grid.py must stay pure stdlib — not even torch.
     code = (
