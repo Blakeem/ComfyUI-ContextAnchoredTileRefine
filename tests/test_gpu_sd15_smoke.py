@@ -57,8 +57,12 @@ def test_sd15_whole_image_refine(comfy_env):
         "context_anchor": 64,
         "context_overlap": 64,
     }
-    (out1,) = node.refine(**inputs)
-    (out2,) = node.refine(**inputs)
+    # The server executes prompts under torch.inference_mode() (execution.py); without it
+    # the VAE round-trips record autograd graphs — wasted VRAM and grad_fn-carrying outputs
+    # production never produces.
+    with torch.inference_mode():
+        (out1,) = node.refine(**inputs)
+        (out2,) = node.refine(**inputs)
 
     assert out1.shape == image.shape
     assert out1.dtype == torch.float32
@@ -108,8 +112,12 @@ def test_sd15_masked_refine(comfy_env):
         "context_overlap": 64,
         "mask": mask,
     }
-    (out1,) = node.refine(**inputs)
-    (out2,) = node.refine(**inputs)
+    # The server executes prompts under torch.inference_mode() (execution.py); without it
+    # the VAE round-trips record autograd graphs — wasted VRAM and grad_fn-carrying outputs
+    # production never produces.
+    with torch.inference_mode():
+        (out1,) = node.refine(**inputs)
+        (out2,) = node.refine(**inputs)
 
     assert out1.shape == image.shape
     assert out1.dtype == torch.float32
@@ -164,8 +172,12 @@ def test_sd15_grid_refine(comfy_env):
         "context_anchor": 32,
         "context_overlap": 32,
     }
-    (out1,) = node.refine(**inputs)
-    (out2,) = node.refine(**inputs)
+    # The server executes prompts under torch.inference_mode() (execution.py); without it
+    # the VAE round-trips record autograd graphs — wasted VRAM and grad_fn-carrying outputs
+    # production never produces.
+    with torch.inference_mode():
+        (out1,) = node.refine(**inputs)
+        (out2,) = node.refine(**inputs)
 
     assert out1.shape == image.shape
     assert out1.dtype == torch.float32

@@ -319,6 +319,47 @@ def test_routing_sees_the_corrected_tile_not_the_raw_decode(comfy_stubs, monkeyp
     assert max(abs(v) for v in seen) > 1e-3, seen
 
 
+def test_correction_clamps_to_gamut_on_in_range_decodes(comfy_stubs, monkeypatch):
+    # A standard VAE clamps its decode to [0,1] in process_output, so the node's IMAGE
+    # output must stay inside that gamut too. A drift that varies WITHIN the tile makes the
+    # band-measured offset mis-model the undrifted half by the full drift — the real-world
+    # mechanism that would write 0.0-minus-offset (negative) pixels into the output. Black
+    # input + zero noise keeps every decode in gamut, so the clamp path is the one under
+    # test; the spy proves nonzero offsets really fired (without them min >= 0 would hold
+    # vacuously). The pass-through half of the contract — out-of-gamut decodes are corrected
+    # WITHOUT clamping — is pinned by test_band_match_removes_an_injected_per_tile_drift,
+    # whose fake decode values run far outside [0,1] and whose expected values are exact.
+    class TopHeavyDriftGuider(GridGuider):
+        def sample(self, noise, latent_image, *args, **kwargs):
+            samples = super().sample(noise, latent_image, *args, **kwargs)
+            drift = torch.zeros_like(samples)
+            drift[:, :, :samples.shape[2] // 2, :] = 0.004
+            return samples + drift
+
+    class ZeroNoise(GridNoise):
+        def generate_noise(self, input_latent):
+            self.calls.append(input_latent)
+            return torch.zeros_like(input_latent["samples"])
+
+    fired = []
+    real = sampling.seam_dc_offset
+
+    def spy(tile, sub, region, region_mask=None):
+        offset = real(tile, sub, region, region_mask)
+        if offset is not None:
+            fired.append(float(offset.abs().max()))
+        return offset
+
+    monkeypatch.setattr(sampling, "seam_dc_offset", spy)
+    image = torch.zeros(1, 80, 80, 3)
+    out = sampling.refine_image(image, TopHeavyDriftGuider(), object(), SIGMAS, GridVAE(), ZeroNoise(),
+                                max_tile_width=E2E["cap"], max_tile_height=E2E["cap"],
+                                context_anchor=E2E["ctx"], context_overlap=E2E["overlap"])
+
+    assert fired and max(fired) > 0.003, fired
+    assert float(out.min()) >= 0.0 and float(out.max()) <= 1.0
+
+
 def test_zero_overlap_runs_as_a_silent_no_op(comfy_stubs, monkeypatch):
     # No shared band anywhere in the grid, so nothing is measurable. The run must complete
     # and land byte-for-byte on the uncorrected arm rather than raising. Under DRIFT so the

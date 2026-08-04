@@ -716,7 +716,19 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             region_mask = None if region_padded is None else region_padded[:, paste.y0:paste.y1, paste.x0:paste.x1]
             dc_offset = seam_dc_offset(tile, sub, region, region_mask)
             if dc_offset is not None:
-                sub = sub - dc_offset           # a copy; `decoded` and the canvas are untouched
+                # `sub - dc_offset` is a copy; `decoded` and the canvas are untouched. The
+                # correction must never push a pixel OUT of the displayable gamut: standard
+                # VAEs clamp their decode to [0,1] in process_output, and subtracting the
+                # offset from a pixel already at a rail (0.0 minus a positive offset) would
+                # leak past that contract into the node's IMAGE output. The clamp is gated on
+                # the pixel having been in gamut BEFORE correction, because clamping is not
+                # free: a VAE whose process_output is the identity (core has several) emits
+                # out-of-range values legitimately, and flattening those would be a lossy op
+                # on the tile. Doing this before seam_displacements keeps the error surface
+                # describing the values the composite actually writes.
+                corrected = sub - dc_offset
+                in_gamut = (sub >= 0.0) & (sub <= 1.0)
+                sub = torch.where(in_gamut, corrected.clamp(0.0, 1.0), corrected)
             disp_top, disp_left = seam_displacements(tile, sub, region)
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
             if debug_dir is not None:
