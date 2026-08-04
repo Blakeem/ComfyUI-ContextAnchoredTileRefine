@@ -43,7 +43,7 @@ The shared band is the only place both tiles have refined the same raw pixels, s
 
 Open the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html) to preview the tile layout for any image size and settings.
 
-You can see how I use it in my [personal ComfyUI workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json).
+You can see how I use it in my [personal ComfyUI workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json), or with Krea 2 in the [Krea 2 workflow](Krea%202.json).
 
 ## Masked refine
 
@@ -51,7 +51,11 @@ With a `mask`, the node crops to the masked region plus a `context_anchor` borde
 
 ## Guider and ControlNet
 
-The `guider` input lets you use NAG (Normalized Attention Guidance), or any other guider. The tradeoff is that the guider's conditioning covers the whole image and is not re-cropped per tile, so ControlNet is not supported.
+The `guider` input lets you use NAG (Normalized Attention Guidance), or any other guider. ControlNet is supported: the node re-crops the control hint to each tile, so depth, canny, or pose guidance lands on the right pixels tile by tile. Build the hint at the same size as the image you feed the node. Conditioning without a per-tile meaning (GLIGEN, area masks, reference latents) passes through unchanged.
+
+## Model support
+
+Any model that samples through a GUIDER works, including models whose VAE uses video-style 5-D latents — Krea 2 with the Qwen image VAE, for example. Tiles are encoded, sampled, and decoded in the VAE's native latent layout.
 
 ## License
 

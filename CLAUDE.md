@@ -43,12 +43,24 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   and composites back through a 1px anti-aliased edge, leaving everything outside byte-identical.
   **torch-only at module scope**; `comfy` / `latent_preview` are imported lazily inside functions
   (a subprocess test pins this).
+- `context_anchored_tile_refine/conds.py`: per-tile ControlNet support. `refine_image` validates
+  every control hint against the full input size (hard error on mismatch) and bbox-slices it on
+  the mask path; `_refine_tiles` pads the hints like the canvas and, per tile, swaps
+  `guider.original_conds` for fresh control-chain copies carrying the tile's `crop_rect` slice
+  (exact-size crop = core's hint rescale is an identity), restoring the pristine map in
+  `try/finally`. Control objects are duck-typed (`copy()` / attributes) — **torch-only at module
+  scope, comfy never imported at all** (same subprocess test pins it). Without a `control` cond
+  the guard keeps the pipeline byte-identical. `gligen`/`area`/`mask`/`reference_latents` pass
+  through untouched by design (unresolved mask-path coordinate semantics; cropping
+  `reference_latents` would regress Kontext-style workflows).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
-  step counts. `sample_latent` hands it over pre-normalized to the canonical [B,1,h,w] float32
-  form on the guider's load device (the fixed point of core's `prepare_mask`) — a value no-op
-  for core guiders, and it shields guider packs whose copied `sample()` lacks core's mask prep
-  from ever seeing a raw CPU mask.
+  step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on
+  the guider's load device — [B,1,h,w] for a 4-D latent, [B,1,1,h,w] for a 5-D video-family
+  latent (the fixed points of core's `prepare_mask`) — a value no-op for core guiders, and it
+  shields guider packs whose copied `sample()` lacks core's mask prep from ever seeing a raw
+  CPU mask. Noise is drawn from a dummy mirroring `vae.encode`'s latent layout (`latent_dim` 3
+  → 5-D), and `_refine_tiles` fails fast if a tile's encoded latent and noise slice disagree.
 - Curated ComfyUI API references: `docs/reference/INDEX.md`. Tile-layout playground:
   `docs/tile-simulator.html`, a self-testing mirror of `grid.py`.
 
@@ -73,6 +85,7 @@ published archive.
 ## Conventions
 
 - Match ComfyUI core naming and comment style; comment only non-obvious constraints.
-- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` module scopes comfy-free (lazy imports).
+- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` / `conds.py` module scopes comfy-free
+  (lazy imports; `conds.py` never imports comfy anywhere — control objects are duck-typed).
 - Prefer views over copies and slice noise rather than redrawing it, but only after the prime
   directives above are satisfied.
