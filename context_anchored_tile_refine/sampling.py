@@ -245,19 +245,23 @@ def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, d
     if callback is None:
         callback = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1)
     if denoise_mask is not None:
-        # Normalize to the canonical broadcastable form — [B,1,h,w] float32 on the
-        # guider's load device — the FIXED POINT of comfy.sampler_helpers.prepare_mask
-        # (whose full output is the channel-expanded [B,C,h,w]). A well-behaved guider
-        # re-runs prepare_mask over this form and gets value-identical results; a guider
+        # Normalize to the canonical broadcastable form — [B,1,h,w] for a 4-D latent,
+        # [B,1,1,h,w] for a 5-D video-family latent — float32 on the guider's load
+        # device: the FIXED POINT of comfy.sampler_helpers.prepare_mask (whose full
+        # output is the channel-expanded mask). A well-behaved guider re-runs
+        # prepare_mask over this form and gets value-identical results; a guider
         # pack whose copied sample() predates core moving that prep out of outer_sample
         # would otherwise receive a CPU tensor and crash against a CUDA latent in
-        # KSamplerX0Inpaint. [B,1,h,w] — never the channel-expanded [B,C,h,w] — is what
-        # survives re-preparation at every batch size: prepare_mask flattens leading
-        # dims to (-1,1,h,w) before re-expanding, which batch-scrambles a
-        # channel-expanded mask at B>1. Spatial size always matches the tile latent by
-        # construction, so this is a pure view plus a device/dtype move that no-ops on
-        # the CPU path — binary values untouched.
-        denoise_mask = denoise_mask.reshape((-1, 1) + denoise_mask.shape[-2:]).to(device=guider.model_patcher.load_device, dtype=torch.float32)
+        # KSamplerX0Inpaint. The single channel — never the channel-expanded form — is
+        # what survives re-preparation at every batch size: prepare_mask flattens
+        # leading dims to (-1,1,h,w) before re-expanding, which batch-scrambles a
+        # channel-expanded mask at B>1. The mask's ndim must match the latent's for the
+        # same reason: reshape_mask folds any sub-5-D mask headed for a 5-D latent to
+        # (1,1,-1,h,w), pooling the batch into the temporal axis at B>1. Spatial size
+        # always matches the tile latent by construction, so this is a pure view plus a
+        # device/dtype move that no-ops on the CPU path — binary values untouched.
+        mask_shape = (-1, 1) + (1,) * (latent_samples.ndim - 4) + denoise_mask.shape[-2:]
+        denoise_mask = denoise_mask.reshape(mask_shape).to(device=guider.model_patcher.load_device, dtype=torch.float32)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
     samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())
@@ -570,7 +574,13 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # so overlapping crop regions of fade-expanded tiles agree on noise. prepare_noise
     # reads only size/dtype/layout, so the zeros dummy (encode outputs float32) keeps
     # a 1x1 grid bit-identical to the whole-image {"samples": latent} draw.
-    dummy = torch.zeros((batch, vae.latent_channels, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
+    # The dummy mirrors vae.encode's latent layout exactly: a video-family VAE
+    # (latent_dim 3 — Wan/Qwen-Image, used by e.g. Krea 2) encodes an image batch to a
+    # 5-D [B,C,1,h,w] latent, and a 4-D draw against that 5-D tile latent would
+    # broadcast the sampler's sigma*noise + latent mix into a fake C-frame temporal
+    # axis, which temporal models then fold into the batch (a batch-mismatch crash).
+    latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
+    dummy = torch.zeros((batch, vae.latent_channels) + latent_time + (canvas_h // 8, canvas_w // 8), dtype=torch.float32)
     canvas_noise = noise.generate_noise({"samples": dummy})
 
 
@@ -623,8 +633,19 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             # for-byte). Kept exactly as before to preserve the whole-image path.
             tile_latent = vae.encode(canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :])
         # .contiguous() because downstream sampler code may .view() the slice; a 1x1
-        # grid slices the full tensor, so it returns self unchanged.
-        tile_noise = canvas_noise[:, :, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8].contiguous()
+        # grid slices the full tensor, so it returns self unchanged. The ellipsis
+        # slices the trailing spatial dims of both the 4-D and the 5-D noise layout.
+        tile_noise = canvas_noise[..., crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8].contiguous()
+        # Fail fast on any encode/noise layout divergence — a video VAE folding an
+        # image batch into frames (B>1 through Wan-family), or a spatial compression
+        # the /8 grid math does not model. A mismatch here would otherwise broadcast
+        # into a cryptic shape error deep inside the sampler or the model.
+        if tile_latent.shape != tile_noise.shape:
+            raise RuntimeError(
+                "VAE encoded a {}x{} px tile to latent shape {}, but the tile's noise slice is {}. "
+                "This VAE's latent layout is not supported (e.g. a video VAE folding an image batch "
+                "into frames, or a non-8x spatial compression).".format(
+                    crop.x1 - crop.x0, crop.y1 - crop.y0, tuple(tile_latent.shape), tuple(tile_noise.shape)))
         # Binary latent denoise_mask: full-strength denoise over core+overlap
         # (== tile.overlap_inner_rect), frozen only through the context_anchor ring.
         # Passing overlap_inner_rect as the "core" arg makes tile_gradient return its
@@ -656,6 +677,13 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             if hint_canvas is not None:
                 guider.original_conds = pristine_conds
         decoded = vae.decode(samples)
+        # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]; fold T into the
+        # batch exactly as core's VAEDecode node does. T is 1 by construction here
+        # (the fail-fast noise/latent check above pins one latent row per image), so
+        # this is a pure view and the composite below sees the same [B,H,W,C] contract
+        # as a 2-D VAE's output.
+        if decoded.ndim == 5:
+            decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
         if expanded:
             # Directional feather (docs/CLAUDE.md prime directive 2): write paste_rect
             # — the core plus the context_overlap band ONLY on sides bordering an

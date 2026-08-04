@@ -270,3 +270,88 @@ def test_sample_latent_none_denoise_mask_passthrough(comfy_stubs):
                            callback=lambda *a: None)
 
     assert guider.call["denoise_mask"] is None
+
+
+class FakeVideoVAE:
+    # Wan/Qwen-Image family stub: latent_dim 3, an image batch encodes to a 5-D
+    # [B,C,1,h,w] latent (comfy's VAE.encode unsqueezes a time axis of 1) and decode
+    # returns the 5-D [B,T,H,W,C] pixel layout of core's VAE.decode (movedim(1,-1)
+    # of [B,C,T,H,W]) — core's VAEDecode node, not VAE.decode, folds T into batch.
+    latent_dim = 3
+    latent_channels = 4
+
+    def __init__(self):
+        self.encoded = None
+
+    def encode(self, pixels):
+        batch, height, width, channels = pixels.shape
+        self.encoded = torch.zeros(batch, 4, 1, height // 8, width // 8)
+        return self.encoded
+
+    def decode(self, samples):
+        batch, _, time, height, width = samples.shape
+        return torch.full((batch, time, height * 8, width * 8, 3), 0.25)
+
+
+def test_video_vae_noise_matches_5d_latent(comfy_stubs):
+    # Krea 2 regression: a video-family VAE (latent_dim 3) encodes to [B,C,1,h,w]; the
+    # canvas noise draw must carry the same 5-D layout, or the sampler's
+    # sigma*noise + latent mix broadcasts a fake temporal axis.
+    guider, sampler, vae, noise = FakeGuider(), object(), FakeVideoVAE(), FakeNoise()
+    image = torch.rand(1, 96, 104, 3)
+
+    out = sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+    assert out.shape == (1, 96, 104, 3)
+    dummy = noise.calls[0]["samples"]
+    assert dummy.shape == (1, 4, 1, 12, 13)
+    assert guider.call["noise"].shape == guider.call["latent_image"].shape
+
+
+def test_video_vae_tiled_noise_and_mask_are_5d(comfy_stubs):
+    # Multi-tile on a 5-D latent: every tile's noise slice matches its latent, and the
+    # denoise mask reaches the guider in the 5-D canonical form [B,1,1,h,w].
+    guider, sampler, vae, noise = FakeGuider(), object(), FakeVideoVAE(), FakeNoise()
+    image = torch.rand(1, 96, 104, 3)
+
+    out = sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=96, max_tile_height=96, context_anchor=16, context_overlap=16)
+
+    assert out.shape == (1, 96, 104, 3)
+    assert guider.sample_calls > 1
+    for call in guider.calls:
+        assert call["latent_image"].ndim == 5
+        assert call["noise"].shape == call["latent_image"].shape
+        if call["denoise_mask"] is not None:
+            assert call["denoise_mask"].shape == (1, 1, 1) + call["latent_image"].shape[-2:]
+
+
+def test_sample_latent_normalizes_denoise_mask_for_5d_latent(comfy_stubs):
+    # 5-D latent -> [B,1,1,h,w]: a 4-D mask would hit core reshape_mask's
+    # (1,1,-1,h,w) fold, which pools the batch into the temporal axis at B>1.
+    guider, latent = FakeGuider(), torch.zeros(2, 4, 1, 4, 6)
+    mask = torch.zeros(2, 4, 6)
+    mask[0, :2] = 1.0
+    mask[1, 2:] = 1.0
+
+    sampling.sample_latent(guider, object(), SIGMAS, torch.zeros_like(latent), 7, latent,
+                           denoise_mask=mask, callback=lambda *a: None)
+
+    dm = guider.call["denoise_mask"]
+    assert dm.shape == (2, 1, 1, 4, 6)
+    assert torch.equal(dm[:, 0, 0], mask)
+
+
+def test_batch_folding_video_vae_fails_fast(comfy_stubs):
+    # A true video VAE folds an image batch into frames of ONE latent row; the node's
+    # batch-preserving pipeline cannot tile that, and it must say so instead of
+    # crashing downstream with a broadcast shape error.
+    class FoldingVideoVAE(FakeVideoVAE):
+        def encode(self, pixels):
+            _, height, width, _ = pixels.shape
+            return torch.zeros(1, 4, 1, height // 8, width // 8)
+
+    guider, sampler, vae, noise = FakeGuider(), object(), FoldingVideoVAE(), FakeNoise()
+    image = torch.rand(2, 96, 104, 3)
+
+    with pytest.raises(RuntimeError, match="latent layout is not supported"):
+        sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)

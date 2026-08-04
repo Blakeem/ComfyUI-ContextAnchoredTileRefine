@@ -55,10 +55,12 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   `reference_latents` would regress Kontext-style workflows).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
-  step counts. `sample_latent` hands it over pre-normalized to the canonical [B,1,h,w] float32
-  form on the guider's load device (the fixed point of core's `prepare_mask`) — a value no-op
-  for core guiders, and it shields guider packs whose copied `sample()` lacks core's mask prep
-  from ever seeing a raw CPU mask.
+  step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on
+  the guider's load device — [B,1,h,w] for a 4-D latent, [B,1,1,h,w] for a 5-D video-family
+  latent (the fixed points of core's `prepare_mask`) — a value no-op for core guiders, and it
+  shields guider packs whose copied `sample()` lacks core's mask prep from ever seeing a raw
+  CPU mask. Noise is drawn from a dummy mirroring `vae.encode`'s latent layout (`latent_dim` 3
+  → 5-D), and `_refine_tiles` fails fast if a tile's encoded latent and noise slice disagree.
 - Curated ComfyUI API references: `docs/reference/INDEX.md`. Tile-layout playground:
   `docs/tile-simulator.html`, a self-testing mirror of `grid.py`.
 
