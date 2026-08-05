@@ -31,8 +31,10 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
 
 ## Architecture (respect these invariants)
 
-- `context_anchored_tile_refine/node.py`: the V1 node (`INPUT_TYPES` / `VALIDATE_INPUTS` /
-  `refine`). Normalizes and validates the optional MASK. Comfy-free at module scope.
+- `context_anchored_tile_refine/node.py`: the V1 nodes (`INPUT_TYPES` / `VALIDATE_INPUTS` /
+  `refine`). `ContextAnchoredTileRefine` normalizes and validates the optional MASK;
+  `ContextAnchoredTileRefineVL` subclasses it (required CLIP, no mask, no prompt input) and
+  routes through `refine_image(vl_clip=...)`. Comfy-free at module scope.
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
   **Stdlib only**, no torch, no comfy.
@@ -53,6 +55,21 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   the guard keeps the pipeline byte-identical. `gligen`/`area`/`mask`/`reference_latents` pass
   through untouched by design (unresolved mask-path coordinate semantics; cropping
   `reference_latents` would regress Kontext-style workflows).
+- `context_anchored_tile_refine/vl.py`: the VL node's conditioning. The whole padded canvas is
+  area-resampled ONCE to `GLOBAL_SLICE_BUDGET` (/32-snapped so the merged-patch grid is exact)
+  and encoded through the CLIP's vision path with NO text (Krea 2's own template, explicit —
+  the default image template would survive the strip and shift the layout). Each tile's
+  positive becomes its row slice of that encode: `[0]=vision_start, [1..N]=grid rows (raster),
+  [N+1]=vision_end, tail]`, cells intersecting the tile's `crop_rect` (boundary cells shared by
+  both neighbors — the row-space overlap band). A/B-settled (AB26-AB36): vision rows are
+  positionally exact and demand-free, one shared encode keeps the cross-tile story coherent,
+  and ANY text (user prompt, generated style, captions) re-admits phantom objects in proportion
+  to its volume — hence no prompt input at all. Fail-fast guards: non-VL CLIP (tokenizer
+  rejects images / no image token), encoder seq-length vs token-derived layout. The per-tile
+  positive swap composes with the ControlNet swap in the same pristine-map try/finally; the
+  guider must keep `positive` in `original_conds` (CFGGuider convention). Mask + VL is
+  rejected (unresolved region/vision-grid coordinate semantics). **torch-only at module
+  scope**, comfy lazy (subprocess test pins it).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on
@@ -85,7 +102,8 @@ published archive.
 ## Conventions
 
 - Match ComfyUI core naming and comment style; comment only non-obvious constraints.
-- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` / `conds.py` module scopes comfy-free
-  (lazy imports; `conds.py` never imports comfy anywhere — control objects are duck-typed).
+- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` / `conds.py` / `vl.py` module scopes
+  comfy-free (lazy imports; `conds.py` never imports comfy anywhere — control objects are
+  duck-typed, and `vl.py` duck-types the CLIP the same way).
 - Prefer views over copies and slice noise rather than redrawing it, but only after the prime
   directives above are satisfied.

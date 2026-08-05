@@ -1,6 +1,6 @@
 # Context-Anchored Tile Refine
 
-A single ComfyUI node for tiled upscaling, and for refining a masked area of a large image without processing the rest. It refines an already-upscaled image tile by tile with no visible seams. Upscale the image however you like first, then feed it in.
+ComfyUI nodes for tiled upscaling, and for refining a masked area of a large image without processing the rest. The base node refines an already-upscaled image tile by tile with no visible seams. Upscale the image however you like first, then feed it in. A second node, [Context-Anchored Tile Refine (VL)](#the-vl-node), replaces the prompt entirely with vision conditioning for models with a vision-language text encoder (Krea 2).
 
 ## Node inputs
 
@@ -53,9 +53,17 @@ With a `mask`, the node crops to the masked region plus a `context_anchor` borde
 
 The `guider` input lets you use NAG (Normalized Attention Guidance), or any other guider. ControlNet is supported: the node re-crops the control hint to each tile, so depth, canny, or pose guidance lands on the right pixels tile by tile. Build the hint at the same size as the image you feed the node. Conditioning without a per-tile meaning (GLIGEN, area masks, reference latents) passes through unchanged.
 
+## The VL node
+
+Tiled refining has a classic failure: the prompt describes the whole image, but each tile only holds part of it, so strongly prompt-adherent models re-create prompt objects inside tiles that shouldn't contain them — a moon in the sky reappears in every tile. Lowering denoise hides it but gives up refinement.
+
+**Context-Anchored Tile Refine (VL)** solves this for models whose text encoder is a vision-language model (Krea 2). It takes the workflow's CLIP as a required input and needs **no positive prompt at all**: the whole image is encoded once through the encoder's vision path, and each tile's positive conditioning becomes the slice of that encode covering the tile — a positionally exact description of what the tile actually holds, informed by the whole image. Tiles neither re-instantiate prompt objects nor drift apart in tone, gaze, or palette across seams, even at high denoise. The guider's positive prompt is ignored; the negative still applies.
+
+Inputs are the base node's minus `mask`, plus `clip`. Wire the same CLIP the workflow loads for the model. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error — use the base node for those models.
+
 ## Model support
 
-Any model that samples through a GUIDER works, including models whose VAE uses video-style 5-D latents — Krea 2 with the Qwen image VAE, for example. Tiles are encoded, sampled, and decoded in the VAE's native latent layout.
+Any model that samples through a GUIDER works with the base node, including models whose VAE uses video-style 5-D latents — Krea 2 with the Qwen image VAE, for example. Tiles are encoded, sampled, and decoded in the VAE's native latent layout. The VL node additionally needs a vision-language text encoder and is verified with Krea 2.
 
 ## License
 

@@ -1,4 +1,4 @@
-from context_anchored_tile_refine.node import ContextAnchoredTileRefine
+from context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileRefineVL
 
 REQUIRED_ORDER = [
     "image",
@@ -125,3 +125,38 @@ def test_validate_inputs_rejects_below_min():
     result = ContextAnchoredTileRefine.VALIDATE_INPUTS(max_tile_width=128)
     assert isinstance(result, str)
     assert "max_tile_width" in result
+
+
+def test_vl_required_order_is_base_plus_clip():
+    input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    assert list(input_types["required"]) == REQUIRED_ORDER + ["clip"]
+    assert input_types["required"]["clip"][0] == "CLIP"
+
+
+def test_vl_has_no_optional_inputs():
+    # No mask: the region/vision-grid coordinate semantics are unresolved by design.
+    input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    assert "optional" not in input_types
+
+
+def test_vl_every_input_has_a_tooltip():
+    input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    for name, definition in input_types["required"].items():
+        tooltip = definition[1].get("tooltip")
+        assert isinstance(tooltip, str) and tooltip, name
+
+
+def test_vl_node_class_attributes():
+    assert ContextAnchoredTileRefineVL.RETURN_TYPES == ("IMAGE",)
+    assert ContextAnchoredTileRefineVL.FUNCTION == "refine"
+    assert callable(ContextAnchoredTileRefineVL.refine)
+    assert ContextAnchoredTileRefineVL.CATEGORY == "sampling/custom_sampling"
+
+
+def test_vl_input_types_does_not_leak_into_base():
+    # The subclass edits the dict the base INPUT_TYPES call returned; a cached/shared
+    # dict would silently grow 'clip' and lose 'mask' on the base node.
+    ContextAnchoredTileRefineVL.INPUT_TYPES()
+    base = ContextAnchoredTileRefine.INPUT_TYPES()
+    assert list(base["required"]) == REQUIRED_ORDER
+    assert list(base["optional"]) == ["mask"]

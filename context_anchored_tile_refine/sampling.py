@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from . import conds, grid
+from . import conds, grid, vl
 
 # How a seam is hidden is not configurable, by design: the node exposes only the geometry
 # that genuinely depends on the image (the tile caps, context_anchor, context_overlap) and
@@ -516,7 +516,7 @@ def _manifest_line(tile_idx, tile, dc_offset=None):
     )
 
 
-def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None):
+def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
     # composite by a directional feather → crop back.
@@ -526,6 +526,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # and it gates the DC measurement to the same region (see seam_dc_offset).
     # hint_canvas (optional) is refine_image's prepared ControlNet hint map, already in THIS
     # call's pixel space; None — the no-ControlNet case — leaves every step below untouched.
+    # vl_clip (optional) is the VL node's vision-language CLIP: each tile's positive is
+    # swapped for its slice of ONE whole-canvas vision encode (see vl.py); None — the base
+    # node — likewise leaves every step below untouched.
     import comfy.model_management
 
     # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
@@ -597,6 +600,13 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # refinements of the same raw band, never a serial re-diffusion of a neighbor's
     # already-decoded output (see the encode site for the full argument).
     source = padded
+    # VL pre-pass: ONE vision encode of the padded canvas, sliced per tile in the loop.
+    # Runs before the first tile so the text encoder is resident exactly once, before
+    # the diffusion model loads. The tiles' crop_rects index the padded canvas, so the
+    # rect -> vision-cell mapping inside build_global_slices needs no offset.
+    tile_positives = None
+    if vl_clip is not None:
+        tile_positives = vl.build_global_slices(vl_clip, source, layout.tiles)
     for tile_idx, tile in enumerate(layout.tiles):
         comfy.model_management.throw_exception_if_processing_interrupted()
         crop = tile.crop_rect
@@ -663,18 +673,27 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
             grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else 1.0
             denoise_mask = grad * reg
-        # Per-tile ControlNet conds. The swapped map's control chains are fresh copies whose
-        # hints are this tile's crop_rect slice, so core's rescale is an identity and the hint
-        # lands aligned; CFGGuider.sample() re-copies original_conds on every call, so the swap
-        # takes effect per tile. The pristine map — the SAME object the caller handed in — goes
-        # back in `finally`, so an interrupt or a sampler raise cannot leave the guider swapped.
-        if hint_canvas is not None:
+        # Per-tile conds swap. ControlNet: the swapped map's control chains are fresh copies
+        # whose hints are this tile's crop_rect slice, so core's rescale is an identity and
+        # the hint lands aligned. VL: the positive is replaced outright by this tile's slice
+        # of the whole-canvas vision encode (the negative passes through untouched).
+        # CFGGuider.sample() re-copies original_conds on every call, so the swap takes effect
+        # per tile. The pristine map — the SAME object the caller handed in — goes back in
+        # `finally`, so an interrupt or a sampler raise cannot leave the guider swapped.
+        pristine_conds = None
+        if hint_canvas is not None or tile_positives is not None:
             pristine_conds = guider.original_conds
-            guider.original_conds = conds.crop_tile_conds(pristine_conds, hint_canvas, crop)
+            swapped_conds = pristine_conds
+            if hint_canvas is not None:
+                swapped_conds = conds.crop_tile_conds(swapped_conds, hint_canvas, crop)
+            if tile_positives is not None:
+                swapped_conds = dict(swapped_conds)
+                swapped_conds["positive"] = tile_positives[tile_idx]
+            guider.original_conds = swapped_conds
         try:
             samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
         finally:
-            if hint_canvas is not None:
+            if pristine_conds is not None:
                 guider.original_conds = pristine_conds
         decoded = vae.decode(samples)
         # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]; fold T into the
@@ -754,7 +773,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     return crop_image_to(canvas, height, width)
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None):
     # Entry point. Without a mask this is the whole-image / multi-tile refine, byte-for-
     # byte the extracted _refine_tiles body. With a mask: harden (>=0.5) → union bbox over
     # the batch → crop to bbox + context_anchor (frozen-background halo) → tile-refine the
@@ -776,9 +795,21 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # path below byte-identical to a run without the feature.
     original_conds = getattr(guider, "original_conds", None)
     control_active = conds.has_spatial_conds(original_conds)
+    if vl_clip is not None:
+        # The per-tile positive swap needs the CFGGuider conds convention; anything else
+        # would silently sample with the swap never taking effect.
+        if not isinstance(original_conds, dict) or "positive" not in original_conds:
+            raise ValueError(
+                "VL refine needs a guider that keeps 'positive' in original_conds "
+                "(the CFGGuider convention); got {}".format(
+                    sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__))
+        if mask is not None:
+            # The region/vision-grid coordinate semantics for a masked VL refine are
+            # unresolved; a half-right mapping would misplace every slice.
+            raise ValueError("VL refine does not support a region mask")
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
-        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas)
+        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, vl_clip=vl_clip)
 
     # Region-mask path. Harden a soft input at 0.5 — a fractional denoise mask would leave
     # the under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
