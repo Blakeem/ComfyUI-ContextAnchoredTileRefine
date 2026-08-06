@@ -18,12 +18,28 @@ def test_loads_via_comfyui_directory_mechanism():
         spec.loader.exec_module(module)
 
         node_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
+        vl_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
+        upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
         assert isinstance(node_class, type)
-        assert module.NODE_CLASS_MAPPINGS == {"ContextAnchoredTileRefine": node_class}
+        assert isinstance(vl_class, type)
+        assert isinstance(upscale_class, type)
+        assert module.NODE_CLASS_MAPPINGS == {
+            "ContextAnchoredTileRefine": node_class,
+            "ContextAnchoredTileRefineVL": vl_class,
+            "ContextAnchoredTileUpscaleVL": upscale_class,
+        }
         assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefine"]
             == "Context-Anchored Tile Refine"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefineVL"]
+            == "Context-Anchored Tile Refine (VL)"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
+            == "Context-Anchored Tile Upscale (VL)"
         )
         assert "NODE_CLASS_MAPPINGS" in module.__all__
         assert "NODE_DISPLAY_NAME_MAPPINGS" in module.__all__
@@ -73,6 +89,42 @@ def test_conds_module_never_imports_comfy():
         "import context_anchored_tile_refine.conds\n"
         "assert 'comfy' not in sys.modules, 'conds.py imported comfy at module scope'\n"
         "assert 'latent_preview' not in sys.modules, 'conds.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_vl_module_never_imports_comfy():
+    # vl.py holds the same lazy-import contract as sampling.py: torch at module scope,
+    # comfy only inside functions.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.vl\n"
+        "assert 'comfy' not in sys.modules, 'vl.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'vl.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_upscale_module_never_imports_comfy():
+    # upscale.py holds the same lazy-import contract as sampling.py / vl.py: torch at
+    # module scope, comfy only inside functions.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.upscale\n"
+        "assert 'comfy' not in sys.modules, 'upscale.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'upscale.py imported latent_preview at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

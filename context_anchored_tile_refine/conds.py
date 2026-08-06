@@ -112,6 +112,28 @@ def crop_tile_conds(original_conds, hint_canvas, crop_rect):
     return cropped_conds
 
 
+def strip_control(original_conds):
+    # The VL path's transform: a NEW conds map with the `control` key dropped from every cond
+    # dict, so no control chain reaches the sampler on either branch. Clearing `control_active`
+    # only skips the CROP — core still reads `control` off each cond (`comfy/samplers.py:96`)
+    # and `get_control` rebuilds the working hint from `cond_hint_original` whenever it
+    # disagrees with the latent (`comfy/controlnet.py:234-244`), so a control left on the
+    # negative would steer the uncond branch alone against a center-cropped, squashed copy of
+    # the caller's FULL-image hint. Nothing the caller owns is mutated: cond dicts are rebuilt,
+    # never edited in place. Returns the input map unchanged when nothing carries control.
+    if not has_spatial_conds(original_conds):
+        return original_conds
+    stripped_conds = {}
+
+    for key, cond_list in original_conds.items():
+        stripped_conds[key] = [
+            {name: value for name, value in cond.items() if name != "control"}
+            if "control" in cond else cond
+            for cond in cond_list
+        ]
+    return stripped_conds
+
+
 def _iter_controls(original_conds):
     # Every control object reachable from the conds, chain links included. Objects repeat (the
     # positive and negative dicts share one `c_net`, `nodes.py:948-956`); callers memoize.

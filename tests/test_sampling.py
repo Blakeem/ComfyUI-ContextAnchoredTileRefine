@@ -341,16 +341,72 @@ def test_sample_latent_normalizes_denoise_mask_for_5d_latent(comfy_stubs):
     assert torch.equal(dm[:, 0, 0], mask)
 
 
-def test_batch_folding_video_vae_fails_fast(comfy_stubs):
-    # A true video VAE folds an image batch into frames of ONE latent row; the node's
-    # batch-preserving pipeline cannot tile that, and it must say so instead of
+class FoldingVideoVAE(FakeVideoVAE):
+    # What core's VAE.encode really does for the Wan family (comfy/sd.py): a 4-D image batch
+    # is reshaped to [1,C,B,H,W], so the images become FRAMES of one clip and temporal
+    # compression merges them into ONE latent row. A single-row input comes back as the
+    # [1,C,1,h,w] every single-image run already sees.
+    def __init__(self):
+        super().__init__()
+        self.encode_calls = []
+
+    def encode(self, pixels):
+        self.encode_calls.append(pixels.shape[0])
+        _, height, width, _ = pixels.shape
+        return torch.zeros(1, 4, 1, height // 8, width // 8)
+
+
+def test_encode_pixels_splits_a_batch_for_a_video_vae():
+    # The helper's whole job: one encode per image, concatenated back to the [B,C,1,h,w]
+    # layout the noise dummy mirrors -- instead of one folded [1,C,1,h,w] row.
+    vae = FoldingVideoVAE()
+
+    latent = sampling.encode_pixels(vae, torch.rand(3, 32, 24, 3))
+
+    assert vae.encode_calls == [1, 1, 1]
+    assert latent.shape == (3, 4, 1, 4, 3)
+
+
+def test_encode_pixels_passes_a_4d_vae_through_in_one_call():
+    # B=1 and every 4-D VAE must take the single unchanged vae.encode call: that is what
+    # keeps the byte-for-byte pinned no-mask path byte-for-byte.
+    vae = FakeVAE()
+
+    latent = sampling.encode_pixels(vae, torch.rand(2, 32, 24, 3))
+
+    assert vae.encode_calls == 1
+    assert latent.shape == (2, 4, 4, 3)
+    assert sampling.encode_pixels(FoldingVideoVAE(), torch.rand(1, 32, 24, 3)).shape == (1, 4, 1, 4, 3)
+
+
+def test_batch_through_a_folding_video_vae_tiles_row_by_row(comfy_stubs):
+    # Owner-reported live defect: a 2-image batch through a Wan-family VAE died on the
+    # encode/noise fail-fast, because the VAE folded both images into one latent row.
+    # Encoding row by row keeps every image on its own row, so the batch tiles.
+    guider, sampler, vae, noise = FakeGuider(), object(), FoldingVideoVAE(), FakeNoise()
+    image = torch.rand(2, 96, 104, 3)
+
+    out = sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=64, max_tile_height=64, context_anchor=0, context_overlap=16)
+
+    assert out.shape == (2, 96, 104, 3)
+    assert guider.sample_calls > 1
+    for call in guider.calls:
+        assert call["latent_image"].ndim == 5
+        assert (call["latent_image"].shape[0], call["latent_image"].shape[2]) == (2, 1)
+        assert call["noise"].shape == call["latent_image"].shape
+    assert vae.encode_calls == [1] * (2 * guider.sample_calls)
+
+
+def test_batch_folding_non_video_vae_fails_fast(comfy_stubs):
+    # The encode/noise guard stays the net for the layouts encode_pixels does NOT handle:
+    # a 4-D VAE that folds an image batch is still untileable, and must say so instead of
     # crashing downstream with a broadcast shape error.
-    class FoldingVideoVAE(FakeVideoVAE):
+    class FoldingImageVAE(FakeVAE):
         def encode(self, pixels):
             _, height, width, _ = pixels.shape
-            return torch.zeros(1, 4, 1, height // 8, width // 8)
+            return torch.zeros(1, 4, height // 8, width // 8)
 
-    guider, sampler, vae, noise = FakeGuider(), object(), FoldingVideoVAE(), FakeNoise()
+    guider, sampler, vae, noise = FakeGuider(), object(), FoldingImageVAE(), FakeNoise()
     image = torch.rand(2, 96, 104, 3)
 
     with pytest.raises(RuntimeError, match="latent layout is not supported"):

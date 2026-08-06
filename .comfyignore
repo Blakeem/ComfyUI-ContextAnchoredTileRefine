@@ -5,3 +5,4 @@ tests-AB/
 conftest.py
 .github/
 .comfyignore
+samples/

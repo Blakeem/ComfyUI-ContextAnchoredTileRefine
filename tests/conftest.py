@@ -1,9 +1,11 @@
 # Root-resolution order (env var first), error-message style, and the comfy/utils.py
 # vs utils/ shadowing hazard are credited to ComfyUI_UltimateSDUpscaleGuider/test/conftest.py.
 import importlib.util
+import math
 import os
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,16 @@ def comfy_stubs(monkeypatch):
         "get_previewer_args": None,
         "previewer": None,  # tests may set a stub before calling refine_image
         "interrupt_calls": 0,
+        "common_upscale_calls": [],
+        "tiled_scale_calls": [],
+        "load_models_gpu_calls": [],
+        "free_memory_calls": [],
+        "raise_non_oom_calls": [],
+        "calculate_sigmas_calls": [],
+        "sampler_object_calls": [],
+        "prepare_noise_calls": [],
+        "convert_cond_calls": [],
+        "guiders": [],
     }
 
     comfy_module = types.ModuleType("comfy")
@@ -108,8 +120,65 @@ def comfy_stubs(monkeypatch):
 
     utils_module.ProgressBar = RecordingProgressBar
 
+    def common_upscale(samples, width, height, upscale_method, crop):
+        # Recording fake: shape/method/crop are what the callers are pinned on, and the
+        # zeros return is deliberately NOT the input, so "did it resize?" is decidable.
+        recorded["common_upscale_calls"].append(
+            (tuple(samples.shape), width, height, upscale_method, crop)
+        )
+        return torch.zeros(
+            (samples.shape[0], samples.shape[1], height, width),
+            dtype=samples.dtype,
+            device=samples.device,
+        )
+
+    utils_module.common_upscale = common_upscale
+
+    def get_tiled_scale_steps(width, height, tile_x, tile_y, overlap):
+        # comfy.utils.get_tiled_scale_steps verbatim, so a halved tile really does change
+        # the ProgressBar total the caller derives from it.
+        rows = 1 if height <= tile_y else math.ceil((height - overlap) / (tile_y - overlap))
+        cols = 1 if width <= tile_x else math.ceil((width - overlap) / (tile_x - overlap))
+        return rows * cols
+
+    utils_module.get_tiled_scale_steps = get_tiled_scale_steps
+
+    def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap=8, upscale_amount=4, output_device="cpu", pbar=None, **kwargs):
+        # Records the tile geometry (the value the OOM retry halves) and runs `function`
+        # over the whole tensor in one go — no tiling — so a fake model's output IS the
+        # upscale and a fake model raising drives the caller's OOM path.
+        recorded["tiled_scale_calls"].append(
+            {"tile_x": tile_x, "tile_y": tile_y, "overlap": overlap, "upscale_amount": upscale_amount}
+        )
+        return function(samples).to(output_device)
+
+    utils_module.tiled_scale = tiled_scale
+
     model_management_module = types.ModuleType("comfy.model_management")
     model_management_module.intermediate_device = lambda: torch.device("cpu")
+    model_management_module.intermediate_dtype = lambda: torch.float32
+    model_management_module.get_torch_device = lambda: torch.device("cpu")
+
+    def free_memory(memory_required, device):
+        recorded["free_memory_calls"].append((memory_required, device))
+
+    model_management_module.free_memory = free_memory
+
+    def load_models_gpu(models, memory_required=0):
+        recorded["load_models_gpu_calls"].append((list(models), memory_required))
+
+    model_management_module.load_models_gpu = load_models_gpu
+
+    def raise_non_oom(error):
+        # comfy.model_management.raise_non_oom's contract: anything that is not an
+        # out-of-memory condition propagates instead of triggering a retry. The real one
+        # tests exception types the stub environment has no way to raise, so the stub keys
+        # off the message instead.
+        recorded["raise_non_oom_calls"].append(error)
+        if "out of memory" not in str(error).lower():
+            raise error
+
+    model_management_module.raise_non_oom = raise_non_oom
 
     def throw_exception_if_processing_interrupted():
         recorded["interrupt_calls"] += 1
@@ -117,9 +186,85 @@ def comfy_stubs(monkeypatch):
     model_management_module.throw_exception_if_processing_interrupted = (
         throw_exception_if_processing_interrupted
     )
+    samplers_module = types.ModuleType("comfy.samplers")
+
+    class StubKSampler:
+        # Only the two combo lists node.py's INPUT_TYPES reads. Short on purpose, but they
+        # must contain every default the node declares or the widget would be invalid.
+        SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "ddim"]
+        SCHEDULERS = ["normal", "karras", "simple", "sgm_uniform", "beta"]
+
+    samplers_module.KSampler = StubKSampler
+
+    def calculate_sigmas(model_sampling, scheduler_name, steps):
+        # Returns 0..steps so the caller's tail slice is readable as plain integers.
+        recorded["calculate_sigmas_calls"].append((model_sampling, scheduler_name, steps))
+        return torch.arange(steps + 1, dtype=torch.float32)
+
+    samplers_module.calculate_sigmas = calculate_sigmas
+
+    def sampler_object(name):
+        recorded["sampler_object_calls"].append(name)
+        return ("sampler_object", name)
+
+    samplers_module.sampler_object = sampler_object
+
+    class StubCFGGuider:
+        """comfy.samplers.CFGGuider's construction surface only: the conds land in
+        `original_conds` under 'positive'/'negative', which is the convention
+        sampling.refine_image's VL check and per-tile positive swap both rely on."""
+
+        def __init__(self, model_patcher):
+            self.model_patcher = model_patcher
+            self.model_options = {}
+            self.original_conds = {}
+            self.cfg = 1.0
+            recorded["guiders"].append(self)
+
+        def set_conds(self, positive, negative):
+            self.original_conds["positive"] = positive
+            self.original_conds["negative"] = negative
+
+        def set_cfg(self, cfg):
+            self.cfg = cfg
+
+    samplers_module.CFGGuider = StubCFGGuider
+
+    sampler_helpers_module = types.ModuleType("comfy.sampler_helpers")
+
+    def convert_cond(cond):
+        # comfy.sampler_helpers.convert_cond's body, minus nothing that matters here: the
+        # extras dict is COPIED, cross_attn comes from element 0, model_conds is ensured and
+        # every cond gets a fresh uuid. vl._convert calls this to turn each tile's sliced
+        # [tensor, extras] pair into the flat-dict cond core's samplers consume.
+        recorded["convert_cond_calls"].append(cond)
+        out = []
+        for c in cond:
+            temp = c[1].copy()
+            model_conds = temp.get("model_conds", {})
+            if c[0] is not None:
+                temp["cross_attn"] = c[0]
+            temp["model_conds"] = model_conds
+            temp["uuid"] = uuid.uuid4()
+            out.append(temp)
+        return out
+
+    sampler_helpers_module.convert_cond = convert_cond
+
+    sample_module = types.ModuleType("comfy.sample")
+
+    def prepare_noise(latent_image, seed, batch_inds=None):
+        recorded["prepare_noise_calls"].append((latent_image, seed, batch_inds))
+        return torch.zeros_like(latent_image)
+
+    sample_module.prepare_noise = prepare_noise
+
     # 'import comfy.utils' attribute-resolves through the hand-inserted parent module.
     comfy_module.utils = utils_module
     comfy_module.model_management = model_management_module
+    comfy_module.samplers = samplers_module
+    comfy_module.sample = sample_module
+    comfy_module.sampler_helpers = sampler_helpers_module
 
     latent_preview_module = types.ModuleType("latent_preview")
 
@@ -143,5 +288,8 @@ def comfy_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "comfy", comfy_module)
     monkeypatch.setitem(sys.modules, "comfy.utils", utils_module)
     monkeypatch.setitem(sys.modules, "comfy.model_management", model_management_module)
+    monkeypatch.setitem(sys.modules, "comfy.samplers", samplers_module)
+    monkeypatch.setitem(sys.modules, "comfy.sample", sample_module)
+    monkeypatch.setitem(sys.modules, "comfy.sampler_helpers", sampler_helpers_module)
     monkeypatch.setitem(sys.modules, "latent_preview", latent_preview_module)
     return recorded
