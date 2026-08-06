@@ -61,6 +61,18 @@ Tiled refining has a classic failure: the prompt describes the whole image, but 
 
 Inputs are the base node's minus `mask`, plus `clip`. Wire the same CLIP the workflow loads for the model. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error — use the base node for those models.
 
+### How it works: RoI token slicing
+
+The technique is **shared visual self-conditioning** — tiled refinement via RoI-sliced vision tokens from a single global encode. We have not found this exact combination published elsewhere; the pieces, individually, have established names:
+
+**Stage 1 — one global vision encode.** The whole image is area-resampled to the encoder's budget and run once through the vision tower of the model's own text encoder (Krea 2's Qwen3-VL). The output is a grid of *vision tokens*: one embedding per 32-pixel cell, each carrying what that cell holds and where it sits in the image.
+
+**Stage 2 — the tokens are the conditioning.** Those tokens are used directly as the positive conditioning, with no text at all. This is *visual self-conditioning*: the image being refined is its own prompt. It is also *zero-shot* — no adapter is trained, because a VLM-conditioned DiT was already trained to read vision tokens in its conditioning stream. This is the same idea as IP-Adapter's image prompting, but through the model's native multimodal interface instead of a bolted-on encoder and learned projection.
+
+**Stage 3 — RoI token slicing.** Each tile keeps the delimiter tokens plus only the grid cells its crop covers; partly-covered boundary cells go to both neighbors, the token-space analogue of the pixel overlap band. This is *RoI-based token selection* — RoIAlign from the detection literature, applied to a conditioning token grid instead of a detector feature map, cell-quantized instead of interpolated.
+
+Why this beats a prompt: a text prompt describes the whole image, so every tile inherits demands for objects it doesn't contain, and strongly prompt-adherent models re-create them. Vision tokens carry no demands — only what each cell actually holds. And because every tile slices the *same* global encode, tiles agree on the story: tone, palette, gaze, and structures that cross seams stay coherent even at high denoise. Tiled-upscale systems like MultiDiffusion or Ultimate SD Upscale hide seams in pixel or latent space while every tile shares one global text prompt; this node instead fixes the mismatch in conditioning space, giving each tile conditioning that is true for that tile.
+
 ## Model support
 
 Any model that samples through a GUIDER works with the base node, including models whose VAE uses video-style 5-D latents — Krea 2 with the Qwen image VAE, for example. Tiles are encoded, sampled, and decoded in the VAE's native latent layout. The VL node additionally needs a vision-language text encoder and is verified with Krea 2.
