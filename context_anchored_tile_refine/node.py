@@ -107,3 +107,73 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
             mask = _normalize_mask(mask, image)
         from . import sampling
         return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip),)
+
+
+class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
+    """Upscale + VL tile refine in one node: image in, refined image out.
+
+    Same engine as ContextAnchoredTileRefineVL, with the four custom-sampling inputs
+    (NOISE / SAMPLER / SIGMAS / GUIDER) built in-process from widgets by upscale.py, and
+    the whole-image upscale stage run first so no tile is ever resampled. No mask input
+    (use ContextAnchoredTileRefineVL for a region pass) and no positive prompt input —
+    the positive is a placeholder that every tile's vision slice replaces, so a prompt
+    here would only re-admit the phantom objects the VL path exists to remove. The
+    optional negative is the one text channel that still applies.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        import comfy.samplers
+
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "The image to upscale and then refine tile by tile."}),
+                "model": ("MODEL", {"tooltip": "The diffusion model used to denoise each tile."}),
+                "clip": ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole upscaled image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode."}),
+                "vae": ("VAE", {"tooltip": "The VAE used to encode each tile for sampling and decode the result."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Seed for the noise. Noise is drawn once for the whole image and sliced per tile, so a tile's noise does not change when the grid does."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m", "tooltip": "The sampler used to denoise each tile."}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform", "tooltip": "The sigma schedule used when sampling each tile."}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "Sampling steps per tile. As in BasicScheduler, the schedule is built for steps/denoise steps and only the last steps+1 sigmas are used."}),
+                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01, "tooltip": "Classifier-free guidance scale applied against the negative conditioning."}),
+                "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much of the schedule to run per tile: 1.0 rewrites the tile, lower values keep more of the upscaled pixels. 0.0 skips diffusion entirely and returns the upscale alone."}),
+                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Target scale for the whole-image upscale stage that runs before any tiling. The optional upscale_model runs first and this factor sets the final size; 1.0 with no model leaves the input pixels untouched."}),
+                "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
+                "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge then cropped away. Always additive: the ring outside a tile core is context_overlap + context_anchor. 32-256 is the useful range; 32 suits most scenes."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width (multi-tile runs only). Each tile is sampled oversized; on sides bordering an already-processed neighbor (top/left) this band is fully diffused and feathered into that neighbor (100% at the seam → 0% over the band); elsewhere it's context, then cropped. 32-256 is the useful range: DETAILED scenes need LESS (32 is invisible even when you know where the seam is), while a large smooth gradient (an open night sky) wants 128+. 0 = hard seams."}),
+            },
+            "optional": {
+                "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model run over the whole image before tiling. Its fixed integer scale rarely lands on upscale_by, so a single lanczos pass then takes the result to the exact target."}),
+                "negative": ("CONDITIONING", {"tooltip": "Optional negative conditioning. Left unconnected it is an empty encode of this node's CLIP, which is what cfg needs to be meaningful at all."}),
+            },
+        }
+
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, negative=None):
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        import comfy.samplers
+        from . import sampling, upscale
+
+        empty_cond = None
+        upscaled = None
+        guider = None
+        sigmas = None
+        sampler = None
+        noise = None
+
+        _validate_image(image)
+
+        # Everything that resamples happens here, on the whole image, before any tiling.
+        upscaled = upscale.prepare_upscaled(image, upscale_model, upscale_by)
+
+        # One empty encode serves as the positive placeholder (vl.py replaces every tile's
+        # positive with its slice of the whole-image vision encode) and, unless the optional
+        # input is connected, as the negative.
+        empty_cond = upscale.encode_empty(clip)
+        guider = upscale.build_guider(model, empty_cond, empty_cond if negative is None else negative, cfg)
+        sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
+        sampler = comfy.samplers.sampler_object(sampler_name)
+        noise = upscale.Noise_RandomNoise(seed)
+
+        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip),)

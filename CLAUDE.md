@@ -34,7 +34,12 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
 - `context_anchored_tile_refine/node.py`: the V1 nodes (`INPUT_TYPES` / `VALIDATE_INPUTS` /
   `refine`). `ContextAnchoredTileRefine` normalizes and validates the optional MASK;
   `ContextAnchoredTileRefineVL` subclasses it (required CLIP, no prompt input) and
-  routes through `refine_image(vl_clip=...)`. Comfy-free at module scope.
+  routes through `refine_image(vl_clip=...)`; `ContextAnchoredTileUpscaleVL` is the
+  all-in-one variant (widgets replace the NOISE/SAMPLER/SIGMAS/GUIDER inputs, optional
+  UPSCALE_MODEL + negative, no mask) — it runs `upscale.prepare_upscaled` on the whole
+  image, builds the sampling objects via `upscale.py`, and calls the same
+  `refine_image(vl_clip=...)`. Comfy-free at module scope (the combo lists come from a
+  lazy `import comfy.samplers` inside `INPUT_TYPES`).
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
   **Stdlib only**, no torch, no comfy.
@@ -71,6 +76,16 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   the FULL image is encoded and each region tile's rect is offset by the bbox origin
   (`slice_indices` offsets), so a masked refine stays globally informed. **torch-only at
   module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/upscale.py`: the all-in-one node's internals. Whole-image
+  upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
+  — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
+  exact `upscale_by` target; a same-size resize is skipped because core's lanczos is an 8-bit
+  PIL round trip, so it would be a quality loss, not a no-op) plus in-process builders
+  mirroring the core custom-sampling nodes (`Noise_RandomNoise`, `build_sigmas` ==
+  BasicScheduler incl. denoise<=0 -> empty sigmas -> refine returns the upscale untouched,
+  `build_guider` == core CFGGuider — required, its `original_conds` convention is what the VL
+  positive swap keys on — and `encode_empty` for the placeholder positive / default negative).
+  **torch-only at module scope**, comfy lazy (subprocess test pins it).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on
