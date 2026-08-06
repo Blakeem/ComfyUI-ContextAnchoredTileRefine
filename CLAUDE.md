@@ -33,7 +33,7 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
 
 - `context_anchored_tile_refine/node.py`: the V1 nodes (`INPUT_TYPES` / `VALIDATE_INPUTS` /
   `refine`). `ContextAnchoredTileRefine` normalizes and validates the optional MASK;
-  `ContextAnchoredTileRefineVL` subclasses it (required CLIP, no mask, no prompt input) and
+  `ContextAnchoredTileRefineVL` subclasses it (required CLIP, no prompt input) and
   routes through `refine_image(vl_clip=...)`. Comfy-free at module scope.
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
@@ -67,9 +67,10 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   to its volume — hence no prompt input at all. Fail-fast guards: non-VL CLIP (tokenizer
   rejects images / no image token), encoder seq-length vs token-derived layout. The per-tile
   positive swap composes with the ControlNet swap in the same pristine-map try/finally; the
-  guider must keep `positive` in `original_conds` (CFGGuider convention). Mask + VL is
-  rejected (unresolved region/vision-grid coordinate semantics). **torch-only at module
-  scope**, comfy lazy (subprocess test pins it).
+  guider must keep `positive` in `original_conds` (CFGGuider convention). On the mask path
+  the FULL image is encoded and each region tile's rect is offset by the bbox origin
+  (`slice_indices` offsets), so a masked refine stays globally informed. **torch-only at
+  module scope**, comfy lazy (subprocess test pins it).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on

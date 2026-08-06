@@ -516,7 +516,7 @@ def _manifest_line(tile_idx, tile, dc_offset=None):
     )
 
 
-def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None):
+def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None, vl_context=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
     # composite by a directional feather → crop back.
@@ -528,7 +528,10 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # call's pixel space; None — the no-ControlNet case — leaves every step below untouched.
     # vl_clip (optional) is the VL node's vision-language CLIP: each tile's positive is
     # swapped for its slice of ONE whole-canvas vision encode (see vl.py); None — the base
-    # node — likewise leaves every step below untouched.
+    # node — likewise leaves every step below untouched. vl_context (mask path only) is
+    # (full_image, bbox_x0, bbox_y0): the encode then reads the FULL image and each
+    # region tile's rect is offset into its frame, so a masked refine stays globally
+    # informed instead of only seeing its own crop.
     import comfy.model_management
 
     # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
@@ -600,13 +603,18 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # refinements of the same raw band, never a serial re-diffusion of a neighbor's
     # already-decoded output (see the encode site for the full argument).
     source = padded
-    # VL pre-pass: ONE vision encode of the padded canvas, sliced per tile in the loop.
-    # Runs before the first tile so the text encoder is resident exactly once, before
-    # the diffusion model loads. The tiles' crop_rects index the padded canvas, so the
-    # rect -> vision-cell mapping inside build_global_slices needs no offset.
+    # VL pre-pass: ONE vision encode, sliced per tile in the loop. Runs before the
+    # first tile so the text encoder is resident exactly once, before the diffusion
+    # model loads. Whole-image path: the tiles' crop_rects index the padded canvas,
+    # so the rect -> vision-cell mapping needs no offset. Mask path (vl_context): the
+    # FULL image is encoded and each region tile's rect is offset by the bbox origin.
     tile_positives = None
     if vl_clip is not None:
-        tile_positives = vl.build_global_slices(vl_clip, source, layout.tiles)
+        if vl_context is None:
+            tile_positives = vl.build_global_slices(vl_clip, source, layout.tiles)
+        else:
+            full_image, bbox_x0, bbox_y0 = vl_context
+            tile_positives = vl.build_global_slices(vl_clip, full_image, layout.tiles, offset_x=bbox_x0, offset_y=bbox_y0)
     for tile_idx, tile in enumerate(layout.tiles):
         comfy.model_management.throw_exception_if_processing_interrupted()
         crop = tile.crop_rect
@@ -803,10 +811,6 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
                 "VL refine needs a guider that keeps 'positive' in original_conds "
                 "(the CFGGuider convention); got {}".format(
                     sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__))
-        if mask is not None:
-            # The region/vision-grid coordinate semantics for a masked VL refine are
-            # unresolved; a half-right mapping would misplace every slice.
-            raise ValueError("VL refine does not support a region mask")
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, vl_clip=vl_clip)
@@ -823,7 +827,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     sub_image = image[:, y0:y1, x0:x1, :]
     sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
     hint_canvas = conds.prepare_hint_canvas(original_conds, (height, width), (y0, y1, x0, x1)) if control_active else None
-    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas)
+    vl_context = (image, x0, y0) if vl_clip is not None else None
+    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas, vl_clip=vl_clip, vl_context=vl_context)
     # Composite the refined crop back through the anti-aliased mask edge. Outside the crop,
     # and wherever aa == 0 inside it, the output is the byte-identical original image.
     # Narrow to RGB: _refine_tiles decodes a 3-channel refined_sub (as the no-mask path does,

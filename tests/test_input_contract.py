@@ -133,15 +133,17 @@ def test_vl_required_order_is_base_plus_clip():
     assert input_types["required"]["clip"][0] == "CLIP"
 
 
-def test_vl_has_no_optional_inputs():
-    # No mask: the region/vision-grid coordinate semantics are unresolved by design.
+def test_vl_optional_is_mask_only():
+    # The masked VL refine encodes the whole image and offsets the region's tiles
+    # into its frame (vl.py slice_indices offsets), so the mask input is supported.
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert "optional" not in input_types
+    assert list(input_types["optional"]) == ["mask"]
 
 
 def test_vl_every_input_has_a_tooltip():
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    for name, definition in input_types["required"].items():
+    all_inputs = {**input_types["required"], **input_types["optional"]}
+    for name, definition in all_inputs.items():
         tooltip = definition[1].get("tooltip")
         assert isinstance(tooltip, str) and tooltip, name
 

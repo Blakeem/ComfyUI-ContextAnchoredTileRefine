@@ -59,7 +59,9 @@ Tiled refining has a classic failure: the prompt describes the whole image, but 
 
 **Context-Anchored Tile Refine (VL)** solves this for models whose text encoder is a vision-language model (Krea 2). It takes the workflow's CLIP as a required input and needs **no positive prompt at all**: the whole image is encoded once through the encoder's vision path, and each tile's positive conditioning becomes the slice of that encode covering the tile — a positionally exact description of what the tile actually holds, informed by the whole image. Tiles neither re-instantiate prompt objects nor drift apart in tone, gaze, or palette across seams, even at high denoise. The guider's positive prompt is ignored; the negative still applies.
 
-Inputs are the base node's minus `mask`, plus `clip`. Wire the same CLIP the workflow loads for the model. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error — use the base node for those models.
+Inputs are the base node's plus `clip`. Wire the same CLIP the workflow loads for the model. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error — use the base node for those models.
+
+The `mask` works here too, and keeps the global view: the whole image is still encoded once, and the masked region's tiles slice their true place in that encode, so the region is refined aware of everything around it. That fits refining one subject with its own sampler settings, and upscale-inpainting: inpaint at low resolution, composite into the full-size image, then mask-refine the pasted region so it matches the surrounding resolution and grain.
 
 ### How it works: RoI token slicing
 

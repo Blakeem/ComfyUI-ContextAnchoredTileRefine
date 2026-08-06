@@ -46,6 +46,21 @@ def test_rows_are_in_raster_order_and_delimiters_bracket_them():
     assert rows == sorted(rows)
 
 
+def test_offset_places_region_tiles_in_the_full_canvas_frame():
+    # Mask path: a bbox-crop tile rect plus the bbox origin must land on exactly the
+    # cells the equivalent full-canvas rect selects.
+    shifted = vl.slice_indices(Rect(0, 0, 96, 64), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ, offset_x=96, offset_y=64)
+    direct = vl.slice_indices(Rect(96, 64, CANVAS_W, CANVAS_H), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ)
+    assert shifted == direct == [0, 5, 6, 7] + TAIL
+
+
+def test_offset_overreach_from_padding_clamps_to_the_grid():
+    # The region crop is padded to /8 before tiling, so a tile rect can overreach the
+    # full canvas by up to 7px; the cell range must clamp instead of indexing past it.
+    indices = vl.slice_indices(Rect(0, 0, 96 + 7, 64 + 7), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ, offset_x=96, offset_y=64)
+    assert indices == [0, 5, 6, 7] + TAIL
+
+
 # --- fake clip: build_global_slices end to end (comfy-free) -------------------------
 
 class FakeVLClip:

@@ -55,19 +55,21 @@ def resample_for_global(source):
     return resampled.movedim(1, -1)[:, :, :, :3], height, width
 
 
-def slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, expected_seq):
+def slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, expected_seq, offset_x=0, offset_y=0):
     # Pure index math (stdlib only, unit-tested without torch). The stripped encode's
     # layout is [0]=vision_start, [1..N]=grid rows in raster order, [N+1]=vision_end,
     # [N+2..]=template tail; raster order is pinned by core's patchify permute
     # (qwen_vl.py) — cell (r, c) sits at row r*grid_w + c. The tile rect maps to the
     # merged-cell range by intersection, keeping partly-covered boundary cells so
     # neighboring tiles share them — the row-space analogue of the overlap band.
+    # The offsets place a region-crop's tile rects into the encoded canvas's frame
+    # (the mask path encodes the FULL image while tiles index the bbox crop).
     grid_h, grid_w = enc_h // MERGED_CELL, enc_w // MERGED_CELL
     n_rows = grid_h * grid_w
-    cx0 = max(0, math.floor(crop.x0 * enc_w / canvas_w / MERGED_CELL))
-    cx1 = min(grid_w, math.ceil(crop.x1 * enc_w / canvas_w / MERGED_CELL))
-    cy0 = max(0, math.floor(crop.y0 * enc_h / canvas_h / MERGED_CELL))
-    cy1 = min(grid_h, math.ceil(crop.y1 * enc_h / canvas_h / MERGED_CELL))
+    cx0 = max(0, math.floor((crop.x0 + offset_x) * enc_w / canvas_w / MERGED_CELL))
+    cx1 = min(grid_w, math.ceil((crop.x1 + offset_x) * enc_w / canvas_w / MERGED_CELL))
+    cy0 = max(0, math.floor((crop.y0 + offset_y) * enc_h / canvas_h / MERGED_CELL))
+    cy1 = min(grid_h, math.ceil((crop.y1 + offset_y) * enc_h / canvas_h / MERGED_CELL))
     rows = [1 + r * grid_w + c for r in range(cy0, cy1) for c in range(cx0, cx1)]
     return [0] + rows + [1 + n_rows] + list(range(1 + n_rows + 1, expected_seq))
 
@@ -104,9 +106,12 @@ def _encode_canvas(clip, canvas_copy, grid_h, grid_w):
     return encoded, expected_seq
 
 
-def build_global_slices(clip, source, tiles):
-    # Pre-pass for the tile loop: encode once, slice per tile. `source` is the padded
-    # canvas the tiles' crop_rects index, so rect -> cell mapping needs no offset.
+def build_global_slices(clip, source, tiles, offset_x=0, offset_y=0):
+    # Pre-pass for the tile loop: encode once, slice per tile. `source` is the canvas
+    # the OFFSET tile rects index: the padded canvas itself on the whole-image path
+    # (offset 0), or the FULL image on the mask path, where tiles index the bbox crop
+    # and the offsets are the bbox origin — the region's tiles then slice their true
+    # place in the whole image's encode, keeping the conditioning globally informed.
     canvas_copy, enc_h, enc_w = resample_for_global(source)
     grid_h, grid_w = enc_h // MERGED_CELL, enc_w // MERGED_CELL
     encoded, expected_seq = _encode_canvas(clip, canvas_copy, grid_h, grid_w)
@@ -114,7 +119,7 @@ def build_global_slices(clip, source, tiles):
 
     tile_positives = []
     for tile in tiles:
-        indices = slice_indices(tile.crop_rect, canvas_h, canvas_w, enc_h, enc_w, expected_seq)
+        indices = slice_indices(tile.crop_rect, canvas_h, canvas_w, enc_h, enc_w, expected_seq, offset_x, offset_y)
         sliced = []
         for entry in encoded:
             tensor, extras = entry[0], dict(entry[1])

@@ -11,6 +11,23 @@ def _validate_image(image):
         raise ValueError("image must be at least 8x8 pixels, got {}x{}".format(image.shape[1], image.shape[2]))
 
 
+def _normalize_mask(mask, image):
+    # Normalize a 2D [H,W] mask to [1,H,W]; reject any other rank.
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    if mask.ndim != 3:
+        raise ValueError("mask must be a [H,W] or [B,H,W] MASK tensor, got {} dimensions".format(mask.ndim))
+    # Strict spatial match (no resample — a resized mask would misalign the region).
+    if mask.shape[1] != image.shape[1] or mask.shape[2] != image.shape[2]:
+        raise ValueError("mask size {}x{} must match image size {}x{}".format(mask.shape[1], mask.shape[2], image.shape[1], image.shape[2]))
+    # Batch must be 1 (broadcast to every image) or exactly the image batch.
+    if mask.shape[0] not in (1, image.shape[0]):
+        raise ValueError("mask batch {} must be 1 or match image batch {}".format(mask.shape[0], image.shape[0]))
+    if mask.shape[0] == 1 and image.shape[0] != 1:
+        mask = mask.expand(image.shape[0], -1, -1)
+    return mask
+
+
 class ContextAnchoredTileRefine:
     @classmethod
     def INPUT_TYPES(s):
@@ -60,19 +77,7 @@ class ContextAnchoredTileRefine:
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
         _validate_image(image)
         if mask is not None:
-            # Normalize a 2D [H,W] mask to [1,H,W]; reject any other rank.
-            if mask.ndim == 2:
-                mask = mask.unsqueeze(0)
-            if mask.ndim != 3:
-                raise ValueError("mask must be a [H,W] or [B,H,W] MASK tensor, got {} dimensions".format(mask.ndim))
-            # Strict spatial match (no resample — a resized mask would misalign the region).
-            if mask.shape[1] != image.shape[1] or mask.shape[2] != image.shape[2]:
-                raise ValueError("mask size {}x{} must match image size {}x{}".format(mask.shape[1], mask.shape[2], image.shape[1], image.shape[2]))
-            # Batch must be 1 (broadcast to every image) or exactly the image batch.
-            if mask.shape[0] not in (1, image.shape[0]):
-                raise ValueError("mask batch {} must be 1 or match image batch {}".format(mask.shape[0], image.shape[0]))
-            if mask.shape[0] == 1 and image.shape[0] != 1:
-                mask = mask.expand(image.shape[0], -1, -1)
+            mask = _normalize_mask(mask, image)
         from . import sampling
         return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask),)
 
@@ -86,18 +91,19 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     re-instantiate prompt objects they don't contain nor drift apart in story
     (gaze, tone, palette). The guider's positive text is ignored by construction;
     its negative still applies. No prompt input exists because none is needed.
+    With a mask, the WHOLE image is still encoded and the region's tiles slice their
+    true place in it, so a masked refine stays aware of the image around the region.
     """
 
     @classmethod
     def INPUT_TYPES(s):
         input_types = ContextAnchoredTileRefine.INPUT_TYPES()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode; the guider's positive prompt is ignored, the negative still applies."})
-        # No mask input: the region/vision-grid coordinate semantics for a masked VL
-        # refine are unresolved, and a half-right mapping would misplace every slice.
-        del input_types["optional"]
         return input_types
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, clip):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, clip, mask=None):
         _validate_image(image)
+        if mask is not None:
+            mask = _normalize_mask(mask, image)
         from . import sampling
-        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip),)
+        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip),)
