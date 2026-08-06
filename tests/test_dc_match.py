@@ -172,6 +172,28 @@ def test_region_gate_keeps_only_the_in_mask_band_samples():
     assert torch.allclose(ungated, torch.full((3,), sampling.DC_MATCH_CLAMP), atol=1e-7)
 
 
+def test_region_gate_keeps_only_the_in_mask_top_band_samples():
+    # The same property on the TOP band, which the LEFT_ONLY test above cannot reach
+    # (kept_top is False there, so the top branch never runs gated). It is not academic:
+    # the mask path's last tile has kept_top and kept_left, so this gate executes on every
+    # masked run. BOTH is used with the region confined to the first 4 COLUMNS, which keeps
+    # the whole left band in-region and clean, so only the top band's gate can be doing the
+    # work. 4 columns is chosen so both assertions bind: 4*(16 + 80) = 384 gated samples
+    # clears DC_MATCH_MIN_SAMPLES, and the 16x92 poisoned pixels outnumber every clean
+    # sample, so ungated the median really does land on the poison.
+    top_band = BOTH.core.y0 - BOTH.paste_rect.y0
+    sub, region = _pair(BOTH, 0.002)
+    region_mask = torch.zeros(_paste_shape(BOTH)[:3])
+    region_mask[:, :, :4] = 1.0              # columns 0..4 of a 96-wide paste are in-region
+    sub[:, :top_band, 4:, :] += 0.5          # out-of-region top-band pixels, wildly off
+    offset = sampling.seam_dc_offset(BOTH, sub, region, region_mask)
+    assert torch.allclose(offset, torch.full((3,), 0.002), atol=1e-7)
+    # Ungated, the same inputs are dragged all the way to the clamp -- so the top band's
+    # gate argument is what is doing the work above, not the median and not the left band.
+    ungated = sampling.seam_dc_offset(BOTH, sub, region)
+    assert torch.allclose(ungated, torch.full((3,), sampling.DC_MATCH_CLAMP), atol=1e-7)
+
+
 def test_too_few_in_mask_samples_take_no_correction():
     # A median over a handful of pixels can sit on an outlier and would then shift a WHOLE
     # tile, so below the floor the tile is left alone. None, not zero: it is "no measurement",

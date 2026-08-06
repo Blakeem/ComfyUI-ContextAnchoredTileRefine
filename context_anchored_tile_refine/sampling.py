@@ -1,3 +1,4 @@
+import logging
 import math
 
 import torch
@@ -516,6 +517,19 @@ def _manifest_line(tile_idx, tile, dc_offset=None):
     )
 
 
+def encode_pixels(vae, pixels):
+    # The tile encode, batch-safe. A video-family VAE (latent_dim 3 — the Wan family, used
+    # by e.g. Krea 2) reshapes a 4-D image batch to [1,C,B,H,W] (comfy/sd.py VAE.encode):
+    # the batch becomes FRAMES of one clip and temporal compression merges them into a
+    # single latent frame, cross-contaminating the images. Encoding one row at a time keeps
+    # the [1,C,1,h,w] layout every single-image run already produces, concatenated back to
+    # the [B,C,1,h,w] the noise dummy mirrors. Any B=1 run, and every 4-D VAE, take the
+    # single unchanged call — byte-for-byte the pre-helper path.
+    if getattr(vae, "latent_dim", 2) == 3 and pixels.shape[0] > 1:
+        return torch.cat([vae.encode(pixels[b:b + 1]) for b in range(pixels.shape[0])], dim=0)
+    return vae.encode(pixels)
+
+
 def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None, vl_context=None):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
@@ -644,20 +658,20 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             enc[:, iy0:iy1, ix0:ix1, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
             if debug_dir is not None:
                 _save("t{:02d}_r{}c{}_enc.png".format(tile_idx, tile.row, tile.col), enc)
-            tile_latent = vae.encode(enc)
+            tile_latent = encode_pixels(vae, enc)
         else:
             # Whole-image / n=1 path: crop == core, no anchor ring and no already-
             # processed neighbor, so encode the live crop directly (feature-2, byte-
             # for-byte). Kept exactly as before to preserve the whole-image path.
-            tile_latent = vae.encode(canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :])
+            tile_latent = encode_pixels(vae, canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :])
         # .contiguous() because downstream sampler code may .view() the slice; a 1x1
         # grid slices the full tensor, so it returns self unchanged. The ellipsis
         # slices the trailing spatial dims of both the 4-D and the 5-D noise layout.
         tile_noise = canvas_noise[..., crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8].contiguous()
-        # Fail fast on any encode/noise layout divergence — a video VAE folding an
-        # image batch into frames (B>1 through Wan-family), or a spatial compression
-        # the /8 grid math does not model. A mismatch here would otherwise broadcast
-        # into a cryptic shape error deep inside the sampler or the model.
+        # Fail fast on any encode/noise layout divergence encode_pixels does not already
+        # resolve — a VAE folding an image batch outside the video family it handles, or a
+        # spatial compression the /8 grid math does not model. A mismatch here would
+        # otherwise broadcast into a cryptic shape error deep inside the sampler or model.
         if tile_latent.shape != tile_noise.shape:
             raise RuntimeError(
                 "VAE encoded a {}x{} px tile to latent shape {}, but the tile's noise slice is {}. "
@@ -684,7 +698,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         # Per-tile conds swap. ControlNet: the swapped map's control chains are fresh copies
         # whose hints are this tile's crop_rect slice, so core's rescale is an identity and
         # the hint lands aligned. VL: the positive is replaced outright by this tile's slice
-        # of the whole-canvas vision encode (the negative passes through untouched).
+        # of the whole-canvas vision encode, and the `control` key is dropped from EVERY cond
+        # so nothing steers the negative alone. The two never both apply: refine_image drops
+        # the hint canvas on the VL path.
         # CFGGuider.sample() re-copies original_conds on every call, so the swap takes effect
         # per tile. The pristine map — the SAME object the caller handed in — goes back in
         # `finally`, so an interrupt or a sampler raise cannot leave the guider swapped.
@@ -695,7 +711,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             if hint_canvas is not None:
                 swapped_conds = conds.crop_tile_conds(swapped_conds, hint_canvas, crop)
             if tile_positives is not None:
-                swapped_conds = dict(swapped_conds)
+                # strip_control returns the map unchanged when nothing carries control, so a
+                # VL run without a ControlNet keeps the caller's own cond lists.
+                swapped_conds = dict(conds.strip_control(swapped_conds))
                 swapped_conds["positive"] = tile_positives[tile_idx]
             guider.original_conds = swapped_conds
         try:
@@ -811,6 +829,18 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
                 "VL refine needs a guider that keeps 'positive' in original_conds "
                 "(the CFGGuider convention); got {}".format(
                     sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__))
+        # ControlNet is a BASE-node feature only. Each tile's positive is replaced outright
+        # by a fresh vision-slice cond that carries no control chain, so a cropped hint would
+        # reach the negative branch alone — asymmetric CFG, with the hint steering only the
+        # unconditional side — and every per-tile positive control copy would be built and
+        # thrown away. Drop the whole hint pipeline here and say so once; _refine_tiles then
+        # strips the `control` key itself, so the hints are never validated NOR consulted.
+        if control_active:
+            logging.warning(
+                "Context-Anchored Tile Refine (VL): ControlNet conditioning is ignored by the "
+                "VL nodes, because every tile's positive is replaced by its vision slice. Use "
+                "the base Context-Anchored Tile Refine node for control.")
+        control_active = False
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, vl_clip=vl_clip)

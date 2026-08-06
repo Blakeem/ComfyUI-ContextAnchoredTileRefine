@@ -32,7 +32,7 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, **overrides):
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, **overrides):
     """Run refine() with every collaborator faked; return (recorded, result)."""
     recorded = {
         "prepare_upscaled": None,
@@ -40,7 +40,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, **overrid
         "build_guider": None,
         "build_sigmas": None,
         "refine_image": None,
-        "upscaled": torch.rand(1, 64, 64, 3),
+        "upscaled": torch.rand(1, 64, 64, 3) if upscaled is None else upscaled,
         "empty_cond": [("empty", {})],
         "sigmas": torch.linspace(1.0, 0.0, 5),
         "refined": torch.rand(1, 64, 64, 3),
@@ -102,6 +102,14 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, **overrid
         **widgets,
     )
     return recorded, result
+
+
+def test_an_upscale_result_below_8px_is_rejected_naming_upscale_by(comfy_stubs, monkeypatch):
+    # The upscale REPLACES the validated input and upscale_by goes down to 0.01, so the
+    # tensor reaching refine_image can be smaller than the /8 reflect pad allows. Without
+    # this guard torch raises a padding error naming neither the node nor the widget.
+    with pytest.raises(ValueError, match=r"upscale_by 0\.01 takes the 400x400 input to 4x4"):
+        _drive(monkeypatch, image=torch.rand(1, 400, 400, 3), upscaled=torch.rand(1, 4, 4, 3), upscale_by=0.01)
 
 
 def test_returns_a_one_tuple_of_refine_images_result(comfy_stubs, monkeypatch):

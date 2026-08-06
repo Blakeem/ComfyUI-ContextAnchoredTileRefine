@@ -70,9 +70,11 @@ def _upscale_with_model(upscale_model, image):
         comfy.model_management.free_memory(memory_required, device)
         upscale_model.to(device)
 
-    in_img = image.movedim(-1, -3).to(device)
-    output_device = comfy.model_management.intermediate_device()
+    # The try opens on the statement AFTER the device move: the large VRAM copy below is the
+    # most likely thing here to OOM, and outside the try it would strand the module on the GPU.
     try:
+        in_img = image.movedim(-1, -3).to(device)
+        output_device = comfy.model_management.intermediate_device()
         while oom:
             try:
                 steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=MODEL_TILE_OVERLAP)

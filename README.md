@@ -36,36 +36,38 @@ Three nodes share one tiling engine. Pick by model and workflow shape:
 | Tile Refine (VL) | A vision-language model (Krea 2). Same wiring, no positive prompt needed. |
 | Tile Upscale (VL) | A vision-language model, everything in one node: upscale, then refine. |
 
-### Tile Refine
-
-![Context-Anchored Tile Refine Node](node.png)
-
-The base node. Upscale the image however you like first, then feed it in.
+These four inputs appear on every node and are the ones worth explaining. Everything else (models, sampler wiring, seed, steps) behaves exactly as it does in the standard ComfyUI sampling nodes.
 
 | Input | Type | What it does |
 |---|---|---|
-| `image` | IMAGE | The image to refine (already upscaled or composited). |
-| `guider` | GUIDER | Denoises each tile. |
-| `sampler` | SAMPLER | The sampler used for each tile. |
-| `sigmas` | SIGMAS | The schedule. Sets denoise strength. |
-| `vae` | VAE | Encodes and decodes each tile. |
-| `noise` | NOISE | Noise source (e.g. RandomNoise), as in SamplerCustomAdvanced. |
-| `max_tile_width` / `max_tile_height` | INT | Largest pixel size the model sees per tile, including the context rings. |
+| `max_tile_width` / `max_tile_height` | INT | Largest pixel size the model sees per tile, including the context rings. Set to the largest size your model handles well. |
 | `context_anchor` | INT | Width of the frozen border each tile sees but never changes. Holds already-refined neighbors, and the area around a mask, steady. |
 | `context_overlap` | INT | Width of the band shared with an already-processed neighbor. 0 gives hard seams. |
-| `mask` | MASK (optional) | Refine only this region. Everything outside it is left untouched. |
 
-Only the tiling geometry is tunable; how the seam itself is hidden is baked in. Both context inputs default to 32, which is invisible on most scenes. Raise `context_overlap` toward 128 for large smooth gradients such as an open sky. Detailed scenes need less, not more.
+Tuning notes from real use:
+
+- Denoise 0.5 works well for smaller upscales (2x to 3x, around 4 tiles). For a 4x upscale to around 4k, 0.42 gives better detail with less chance of artifacts. It depends on the scene.
+- More tiles need more context: raise `context_anchor` (32 to 128 tested well) and `context_overlap` (32 to 256 tested well). Both default to 32, which is invisible on most scenes; large smooth gradients such as an open sky want the higher end of `context_overlap`. Detailed scenes need less, not more.
 
 Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html).
 
+### Tile Refine
+
+![Context-Anchored Tile Refine](refine-node.png)
+
+The base node, for any model that samples through a GUIDER. Upscale the image however you like first, then feed it in; wire `guider`, `sampler`, `sigmas`, `vae`, and `noise` as you would for SamplerCustomAdvanced. The optional `mask` refines only that region and leaves everything outside it untouched. Only the tiling geometry is tunable; how the seam itself is hidden is baked in.
+
 ### Tile Refine (VL)
+
+![Context-Anchored Tile Refine (VL)](vl-refine-node.png)
 
 The vision-conditioned variant for models whose text encoder is a vision-language model (Krea 2). Inputs are the base node's plus `clip`, and it needs no positive prompt at all: each tile's positive conditioning is a slice of one whole-image vision encode (see [the VL method](#the-vl-method-roi-token-slicing)). The guider's positive prompt is ignored; its negative still applies. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error.
 
 The `mask` works here too and keeps the global view: the whole image is still encoded once, and the masked region's tiles slice their true place in that encode, so the region is refined aware of everything around it. That fits refining one subject with its own sampler settings, and upscale-inpainting: inpaint at low resolution, composite into the full-size image, then mask-refine the pasted region so it matches the surrounding resolution and grain.
 
 ### Tile Upscale (VL)
+
+![Context-Anchored Tile Upscale (VL)](vl-upscale-node.png)
 
 The whole flow in one node: image in, refined image out. It upscales the entire image first, through the optional `upscale_model` if connected, then a single lanczos pass to exactly `input size x upscale_by` (lanczos alone when no model; a resize that would not change the size is skipped). It then runs the same VL tile refine as Tile Refine (VL).
 
@@ -93,7 +95,11 @@ With a `mask`, the node crops to the masked region plus a `context_anchor` borde
 
 ### Guider and ControlNet
 
-The `guider` input takes NAG (Normalized Attention Guidance) or any other guider. ControlNet is supported: the node re-crops the control hint to each tile, so depth, canny, or pose guidance lands on the right pixels tile by tile. Build the hint at the same size as the image you feed the node. Conditioning without a per-tile meaning (GLIGEN, area masks, reference latents) passes through unchanged.
+The `guider` input takes NAG (Normalized Attention Guidance) or any other guider. ControlNet is supported on the base Tile Refine node: it re-crops the control hint to each tile, so depth, canny, or pose guidance lands on the right pixels tile by tile. Build the hint at the same size as the image you feed the node. Conditioning without a per-tile meaning (GLIGEN, area masks, reference latents) passes through unchanged.
+
+The VL nodes ignore ControlNet entirely (a warning is logged if one is wired): every tile's positive is replaced by its vision slice, so there is nothing for a control hint to attach to. Use the base node for control.
+
+Image batches work on all three nodes, including with video-family VAEs (Krea 2): each image in the batch is encoded and conditioned on its own picture.
 
 ### Model support
 

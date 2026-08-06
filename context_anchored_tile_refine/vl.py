@@ -35,8 +35,12 @@ VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 MERGED_CELL = 32
 
 # Encode budget (total pixels, aspect preserved, snapped to /MERGED_CELL). Sized so a
-# 2x2 grid keeps the per-tile row density proven sufficient in per-tile-encode A/Bs
-# while staying inside the vision tower's native 48x48 position-embedding grid.
+# 2x2 grid keeps the per-tile row density proven sufficient in per-tile-encode A/Bs.
+# The tower's 48x48 num_position_embeddings table (QWEN35_VISION_DEFAULTS: patch 16,
+# merge 2, 2304 embeddings) is indexed on the UNMERGED 16px patch lattice, not the 32px
+# merged-cell lattice this module reasons in, so staying inside it would mean <= 768x768
+# px total; at this budget a square canvas is 28x28 merged cells = 56x56 patches and the
+# tower interpolates its position embeddings (fast_pos_embed_interpolate) by design.
 GLOBAL_SLICE_BUDGET = 768 * 1024
 
 
@@ -106,15 +110,46 @@ def _encode_canvas(clip, canvas_copy, grid_h, grid_w):
     return encoded, expected_seq
 
 
+def _encode_batch(clip, canvas_copy, grid_h, grid_w):
+    # One encode PER BATCH ROW, concatenated on the batch axis. Core's tokenizer attaches
+    # images[0] alone (comfy/text_encoders/qwen_vl.py process_qwen2vl_images reads only the
+    # first row), so handing over a whole [B,H,W,3] canvas would condition EVERY image on
+    # row 0's picture. Every row is the same size by construction, so _encode_canvas' own
+    # seq fail-fast covers layout drift and the rows always cat. A batched cond then passes
+    # through core's machinery unchanged (CONDRegular.process_cond -> repeat_to_batch_size
+    # is an identity when the cond batch already matches the latent's). B=1 takes the single
+    # unchanged encode — no cat, byte-for-byte the pre-batch path.
+    batch = int(canvas_copy.shape[0])
+    if batch == 1:
+        return _encode_canvas(clip, canvas_copy, grid_h, grid_w)
+
+    per_row = []
+    expected_seq = None
+    for b in range(batch):
+        encoded, expected_seq = _encode_canvas(clip, canvas_copy[b:b + 1], grid_h, grid_w)
+        per_row.append(encoded)
+
+    merged = []
+    for entries in zip(*per_row):
+        # Keep the first row's extras (build_global_slices drops the canvas attention_mask
+        # per tile); pooled_output is the one extra that is per-image, so cat it as well.
+        extras = dict(entries[0][1])
+        pooled = extras.get("pooled_output")
+        if isinstance(pooled, torch.Tensor):
+            extras["pooled_output"] = torch.cat([entry[1]["pooled_output"] for entry in entries], dim=0)
+        merged.append([torch.cat([entry[0] for entry in entries], dim=0), extras])
+    return merged, expected_seq
+
+
 def build_global_slices(clip, source, tiles, offset_x=0, offset_y=0):
-    # Pre-pass for the tile loop: encode once, slice per tile. `source` is the canvas
+    # Pre-pass for the tile loop: encode once per image, slice per tile. `source` is the canvas
     # the OFFSET tile rects index: the padded canvas itself on the whole-image path
     # (offset 0), or the FULL image on the mask path, where tiles index the bbox crop
     # and the offsets are the bbox origin — the region's tiles then slice their true
     # place in the whole image's encode, keeping the conditioning globally informed.
     canvas_copy, enc_h, enc_w = resample_for_global(source)
     grid_h, grid_w = enc_h // MERGED_CELL, enc_w // MERGED_CELL
-    encoded, expected_seq = _encode_canvas(clip, canvas_copy, grid_h, grid_w)
+    encoded, expected_seq = _encode_batch(clip, canvas_copy, grid_h, grid_w)
     canvas_h, canvas_w = int(source.shape[1]), int(source.shape[2])
 
     tile_positives = []

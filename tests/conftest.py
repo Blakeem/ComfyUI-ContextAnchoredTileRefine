@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,7 @@ def comfy_stubs(monkeypatch):
         "calculate_sigmas_calls": [],
         "sampler_object_calls": [],
         "prepare_noise_calls": [],
+        "convert_cond_calls": [],
         "guiders": [],
     }
 
@@ -228,6 +230,27 @@ def comfy_stubs(monkeypatch):
 
     samplers_module.CFGGuider = StubCFGGuider
 
+    sampler_helpers_module = types.ModuleType("comfy.sampler_helpers")
+
+    def convert_cond(cond):
+        # comfy.sampler_helpers.convert_cond's body, minus nothing that matters here: the
+        # extras dict is COPIED, cross_attn comes from element 0, model_conds is ensured and
+        # every cond gets a fresh uuid. vl._convert calls this to turn each tile's sliced
+        # [tensor, extras] pair into the flat-dict cond core's samplers consume.
+        recorded["convert_cond_calls"].append(cond)
+        out = []
+        for c in cond:
+            temp = c[1].copy()
+            model_conds = temp.get("model_conds", {})
+            if c[0] is not None:
+                temp["cross_attn"] = c[0]
+            temp["model_conds"] = model_conds
+            temp["uuid"] = uuid.uuid4()
+            out.append(temp)
+        return out
+
+    sampler_helpers_module.convert_cond = convert_cond
+
     sample_module = types.ModuleType("comfy.sample")
 
     def prepare_noise(latent_image, seed, batch_inds=None):
@@ -241,6 +264,7 @@ def comfy_stubs(monkeypatch):
     comfy_module.model_management = model_management_module
     comfy_module.samplers = samplers_module
     comfy_module.sample = sample_module
+    comfy_module.sampler_helpers = sampler_helpers_module
 
     latent_preview_module = types.ModuleType("latent_preview")
 
@@ -266,5 +290,6 @@ def comfy_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "comfy.model_management", model_management_module)
     monkeypatch.setitem(sys.modules, "comfy.samplers", samplers_module)
     monkeypatch.setitem(sys.modules, "comfy.sample", sample_module)
+    monkeypatch.setitem(sys.modules, "comfy.sampler_helpers", sampler_helpers_module)
     monkeypatch.setitem(sys.modules, "latent_preview", latent_preview_module)
     return recorded

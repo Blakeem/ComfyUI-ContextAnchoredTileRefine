@@ -40,9 +40,6 @@ INT_WIDGET_OPTIONS = {
     "context_overlap": {"default": 32, "min": 0, "max": 512, "step": 8},
 }
 
-FLOAT_WIDGET_OPTIONS = {
-}
-
 
 def test_required_order_is_pinned():
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
@@ -64,14 +61,6 @@ def test_input_type_strings():
 def test_int_widget_options_exact():
     required = ContextAnchoredTileRefine.INPUT_TYPES()["required"]
     for name, expected in INT_WIDGET_OPTIONS.items():
-        options = required[name][1]
-        for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
-
-
-def test_float_widget_options_exact():
-    required = ContextAnchoredTileRefine.INPUT_TYPES()["required"]
-    for name, expected in FLOAT_WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
             assert options[key] == value, "{}[{}]".format(name, key)
@@ -101,7 +90,7 @@ def test_node_class_attributes():
     assert ContextAnchoredTileRefine.RETURN_TYPES == ("IMAGE",)
     assert ContextAnchoredTileRefine.FUNCTION == "refine"
     assert callable(ContextAnchoredTileRefine.refine)
-    assert ContextAnchoredTileRefine.CATEGORY == "sampling/custom_sampling"
+    assert ContextAnchoredTileRefine.CATEGORY == "image/upscaling"
     assert not hasattr(ContextAnchoredTileRefine, "IS_CHANGED")
 
 
@@ -156,7 +145,7 @@ def test_vl_node_class_attributes():
     assert ContextAnchoredTileRefineVL.RETURN_TYPES == ("IMAGE",)
     assert ContextAnchoredTileRefineVL.FUNCTION == "refine"
     assert callable(ContextAnchoredTileRefineVL.refine)
-    assert ContextAnchoredTileRefineVL.CATEGORY == "sampling/custom_sampling"
+    assert ContextAnchoredTileRefineVL.CATEGORY == "image/upscaling"
 
 
 def test_vl_input_types_does_not_leak_into_base():
@@ -284,7 +273,7 @@ def test_upscale_node_class_attributes(comfy_stubs):
     assert ContextAnchoredTileUpscaleVL.RETURN_TYPES == ("IMAGE",)
     assert ContextAnchoredTileUpscaleVL.FUNCTION == "refine"
     assert callable(ContextAnchoredTileUpscaleVL.refine)
-    assert ContextAnchoredTileUpscaleVL.CATEGORY == "sampling/custom_sampling"
+    assert ContextAnchoredTileUpscaleVL.CATEGORY == "image/upscaling"
     # VALIDATE_INPUTS is inherited, so the /8 + range checks cover this node's geometry
     # widgets too — including its larger tile defaults.
     assert (

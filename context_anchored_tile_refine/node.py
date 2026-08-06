@@ -51,7 +51,7 @@ class ContextAnchoredTileRefine:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "refine"
-    CATEGORY = "sampling/custom_sampling"
+    CATEGORY = "image/upscaling"
 
     @classmethod
     def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
@@ -91,6 +91,8 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     re-instantiate prompt objects they don't contain nor drift apart in story
     (gaze, tone, palette). The guider's positive text is ignored by construction;
     its negative still applies. No prompt input exists because none is needed.
+    ControlNet is ignored on this node (the per-tile positive carries no control chain);
+    use the base Context-Anchored Tile Refine node for control.
     With a mask, the WHOLE image is still encoded and the region's tiles slice their
     true place in it, so a masked refine stays aware of the image around the region.
     """
@@ -166,6 +168,12 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
 
         # Everything that resamples happens here, on the whole image, before any tiling.
         upscaled = upscale.prepare_upscaled(image, upscale_model, upscale_by)
+        # The upscale REPLACES the validated input, and upscale_by goes down to 0.01, so a
+        # small image can leave here below 8px on an axis — where the /8 reflect pad (which
+        # needs pad < dim) would raise naming neither this node nor the widget that did it.
+        if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
+            raise ValueError("upscale_by {} takes the {}x{} input to {}x{}; the upscaled image must be at least 8x8 pixels".format(
+                upscale_by, image.shape[1], image.shape[2], upscaled.shape[1], upscaled.shape[2]))
 
         # One empty encode serves as the positive placeholder (vl.py replaces every tile's
         # positive with its slice of the whole-image vision encode) and, unless the optional
