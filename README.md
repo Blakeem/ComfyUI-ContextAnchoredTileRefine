@@ -2,6 +2,19 @@
 
 ComfyUI nodes for tiled refining and upscaling. An already-upscaled image is refined tile by tile with no visible seams, or only inside a masked region with the rest left untouched. Seams are hidden by conditioning, not by blending tricks. For models with a vision-language text encoder (Krea 2), the VL nodes replace the prompt entirely with vision conditioning, which removes the classic tiled-upscale failure of prompt objects reappearing in every tile.
 
+Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304 in one pass. Click any image for the full-size file.
+
+<table>
+<tr>
+<td align="center"><a href="samples/dragon-original.png"><img src="samples/dragon-original-preview.jpg" alt="Dragon, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/dragon-4x-vl-upscale.png"><img src="samples/dragon-4x-vl-upscale-preview.jpg" alt="Dragon, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x Tile Upscale (VL), Krea 2, 4096x2304</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="samples/renaissance-market-original.png"><img src="samples/renaissance-market-original-preview.jpg" alt="Renaissance market, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/renaissance-market-4x-vl-upscale.png"><img src="samples/renaissance-market-4x-vl-upscale-preview.jpg" alt="Renaissance market, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x Tile Upscale (VL), Krea 2, 4096x2304</sub></td>
+</tr>
+</table>
+
 **Jump to:**
 
 - [Installation](#installation)
