@@ -1719,7 +1719,7 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "undead, zombie, jpeg compression, scribbles, AI generated, plastic toy doll, shredded cloth"
+        "scribbles, AI generated, shredded cloth"
       ],
       "color": "#322",
       "bgcolor": "#533"
