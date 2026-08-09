@@ -16,7 +16,7 @@
         840
       ],
       "flags": {},
-      "order": 36,
+      "order": 33,
       "mode": 2,
       "inputs": [
         {
@@ -53,7 +53,7 @@
         110
       ],
       "flags": {},
-      "order": 37,
+      "order": 34,
       "mode": 2,
       "inputs": [
         {
@@ -95,7 +95,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 38,
+      "order": 35,
       "mode": 2,
       "inputs": [
         {
@@ -135,7 +135,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 33,
+      "order": 30,
       "mode": 2,
       "inputs": [
         {
@@ -218,7 +218,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 27,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -265,7 +265,7 @@
         100
       ],
       "flags": {},
-      "order": 23,
+      "order": 22,
       "mode": 0,
       "inputs": [
         {
@@ -395,7 +395,7 @@
         110
       ],
       "flags": {},
-      "order": 26,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -675,7 +675,7 @@
         110
       ],
       "flags": {},
-      "order": 28,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
@@ -752,7 +752,7 @@
         710
       ],
       "flags": {},
-      "order": 32,
+      "order": 29,
       "mode": 0,
       "inputs": [
         {
@@ -811,8 +811,7 @@
           "links": [
             918,
             934,
-            1001,
-            1008
+            1001
           ]
         }
       ],
@@ -849,8 +848,7 @@
           "type": "VAE",
           "links": [
             870,
-            996,
-            1010
+            996
           ]
         }
       ],
@@ -998,53 +996,13 @@
       "flags": {
         "collapsed": true
       },
-      "order": 34,
+      "order": 31,
       "mode": 0,
       "inputs": [
         {
           "name": "images",
           "type": "IMAGE",
           "link": 947
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.75"
-      },
-      "widgets_values": [
-        "ComfyUI-2x"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 366,
-      "type": "SaveImage",
-      "pos": [
-        5130,
-        20
-      ],
-      "size": [
-        210,
-        290
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 24,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 1012
         }
       ],
       "outputs": [
@@ -1076,53 +1034,13 @@
         110
       ],
       "flags": {},
-      "order": 35,
+      "order": 32,
       "mode": 0,
       "inputs": [
         {
           "name": "any",
           "type": "*",
           "link": 948
-        }
-      ],
-      "outputs": [
-        {
-          "name": "*",
-          "shape": 6,
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PlaySound|pysssss"
-      },
-      "widgets_values": [
-        "on empty queue",
-        0.5,
-        "notify.mp3"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 367,
-      "type": "PlaySound|pysssss",
-      "pos": [
-        5310,
-        20
-      ],
-      "size": [
-        240,
-        110
-      ],
-      "flags": {},
-      "order": 25,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "any",
-          "type": "*",
-          "link": 1013
         }
       ],
       "outputs": [
@@ -1205,84 +1123,6 @@
       ],
       "color": "#432",
       "bgcolor": "#653"
-    },
-    {
-      "id": 365,
-      "type": "ContextAnchoredTileUpscaleVL",
-      "pos": [
-        4580,
-        -260
-      ],
-      "size": [
-        340,
-        430
-      ],
-      "flags": {},
-      "order": 22,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1008
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 1009
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 1010
-        },
-        {
-          "name": "upscale_model",
-          "shape": 7,
-          "type": "UPSCALE_MODEL",
-          "link": null
-        },
-        {
-          "name": "negative",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            1012,
-            1013
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ContextAnchoredTileUpscaleVL"
-      },
-      "widgets_values": [
-        42,
-        "fixed",
-        "dpmpp_2m",
-        "sgm_uniform",
-        18,
-        3.5,
-        0.32,
-        4,
-        1536,
-        2048,
-        256,
-        64
-      ],
-      "color": "#322",
-      "bgcolor": "#533"
     },
     {
       "id": 310,
@@ -1413,8 +1253,7 @@
           "links": [
             862,
             864,
-            1000,
-            1009
+            1000
           ]
         }
       ],
@@ -1441,7 +1280,7 @@
         430
       ],
       "flags": {},
-      "order": 31,
+      "order": 28,
       "mode": 0,
       "inputs": [
         {
@@ -1526,7 +1365,7 @@
         710
       ],
       "flags": {},
-      "order": 30,
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
@@ -1565,7 +1404,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 29,
+      "order": 26,
       "mode": 0,
       "inputs": [
         {
@@ -1719,7 +1558,7 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "scribbles, AI generated, shredded cloth"
+        "jpeg compression, scribbles, AI generated, hredded cloth"
       ],
       "color": "#322",
       "bgcolor": "#533"
@@ -2047,46 +1886,6 @@
       "IMAGE"
     ],
     [
-      1008,
-      308,
-      0,
-      365,
-      1,
-      "MODEL"
-    ],
-    [
-      1009,
-      294,
-      0,
-      365,
-      2,
-      "CLIP"
-    ],
-    [
-      1010,
-      295,
-      0,
-      365,
-      3,
-      "VAE"
-    ],
-    [
-      1012,
-      365,
-      0,
-      366,
-      0,
-      "IMAGE"
-    ],
-    [
-      1013,
-      365,
-      0,
-      367,
-      0,
-      "IMAGE"
-    ],
-    [
       1017,
       318,
       0,
@@ -2150,8 +1949,8 @@
     "ds": {
       "scale": 0.9334480208135775,
       "offset": [
-        -1891.37846965777,
-        -99.12111449236887
+        -2120.6360782910147,
+        127.27981130268007
       ]
     },
     "frontendVersion": "1.48.7"
