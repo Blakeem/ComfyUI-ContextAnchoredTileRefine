@@ -134,7 +134,8 @@ Why this beats a prompt: vision tokens carry no demands, only what each cell act
 
 ## Example workflows
 
-- [Krea 2 workflow](Krea%202.json)
+- [Krea 2 upscale workflow](Krea%202.json)
+- [Krea 2 refine workflow](Krea%202%20(refine).json)
 - [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)
 
 ## License
