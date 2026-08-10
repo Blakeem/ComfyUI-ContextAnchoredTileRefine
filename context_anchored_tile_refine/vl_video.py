@@ -84,6 +84,11 @@ def resample_for_encode(picks):
     import comfy.utils
 
     height, width = int(picks.shape[1]), int(picks.shape[2])
+    # RGB only, like every sibling (vl.resample_for_global, video.refine_video): a
+    # 4-channel IMAGE would reach the tokenizer's (imgs - mean) / std, whose mean is
+    # (1,3,1,1), and raise a broadcast error naming neither this node nor the alpha
+    # channel. On a 3-channel input this is a zero-copy view.
+    picks = picks[..., :3]
     enc_h = round(height / MERGED_CELL) * MERGED_CELL
     enc_w = round(width / MERGED_CELL) * MERGED_CELL
     if enc_h * enc_w <= MAX_ENCODE_PIXELS:
@@ -96,7 +101,7 @@ def resample_for_encode(picks):
     enc_w = max(MERGED_CELL, math.floor(width * scale / MERGED_CELL) * MERGED_CELL)
     samples = picks.movedim(-1, 1)
     resampled = comfy.utils.common_upscale(samples, enc_w, enc_h, "area", "disabled")
-    return resampled.movedim(1, -1)[:, :, :, :3], enc_h, enc_w
+    return resampled.movedim(1, -1), enc_h, enc_w
 
 
 def token_layout(tokens, rows_per_block):

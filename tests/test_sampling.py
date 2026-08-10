@@ -143,6 +143,19 @@ def test_empty_schedule_returns_clone_without_vae_or_sampling(sigmas):
     assert guider.sample_calls == 0 and noise.calls == []
 
 
+def test_empty_schedule_narrows_an_rgba_input_to_three_channels():
+    # The output channel count must not depend on a widget value: every sampled path drops
+    # alpha, so the zero-step short-circuit does too (denoise 0 is an advertised mode).
+    guider, sampler, vae, noise = FakeGuider(), object(), FakeVAE(), FakeNoise()
+    image = torch.rand(1, 96, 104, 4)
+
+    out = sampling.refine_image(image, guider, sampler, torch.empty(0), vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+    assert out.shape == (1, 96, 104, 3)
+    assert torch.equal(out, image[..., :3])
+    assert vae.encode_calls == 0 and guider.sample_calls == 0
+
+
 def test_batch_dimension_preserved(comfy_stubs):
     guider, sampler, vae, noise = FakeGuider(), object(), FakeVAE(), FakeNoise()
     image = torch.rand(3, 96, 104, 3)

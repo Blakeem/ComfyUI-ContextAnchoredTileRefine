@@ -299,15 +299,21 @@ def make_tile_progress(model_patcher, steps, n_tiles):
 def _mask_bbox(mask_bin):
     # Union bounding box over the whole batch of a [B,H,W] boolean mask, as
     # (y0, y1, x0, x1) with EXCLUSIVE y1/x1 (max + 1); None when the mask is empty.
-    # torch.nonzero on the batch-union keeps one shared crop for every row.
+    # The batch-union keeps one shared crop for every row. The row extent and the column
+    # extent are INDEPENDENT reductions, so each axis is collapsed to a [H] / [W] boolean
+    # first: a 2-D torch.nonzero would materialize an [N,2] int64 row per masked pixel
+    # (~200 MB on half a 4096x6144 canvas) to yield the same four integers.
     any_mask = mask_bin.any(dim=0)
-    nz = torch.nonzero(any_mask)
-    if nz.numel() == 0:
+    rows = any_mask.any(dim=1)
+    cols = any_mask.any(dim=0)
+    if not bool(rows.any()):
         return None
-    y0 = int(nz[:, 0].min())
-    y1 = int(nz[:, 0].max()) + 1
-    x0 = int(nz[:, 1].min())
-    x1 = int(nz[:, 1].max()) + 1
+    ry = torch.nonzero(rows)
+    rx = torch.nonzero(cols)
+    y0 = int(ry.min())
+    y1 = int(ry.max()) + 1
+    x0 = int(rx.min())
+    x1 = int(rx.max()) + 1
     return (y0, y1, x0, x1)
 
 
@@ -589,8 +595,8 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
         region_latent = (torch.nn.functional.max_pool2d(region_padded[:, None].float(), 8) > 0).float()[:, 0]
 
-    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap)
-    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap)
+    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, axis="width")
+    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, axis="height")
     layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
 
     # One noise draw for the whole canvas, then sliced per tile: per-tile draws would
@@ -696,7 +702,11 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             denoise_mask = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else None
         else:
             reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
-            grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else 1.0
+            # .to(reg.device): tile_gradient builds its indicator from torch.arange, so it is
+            # always CPU, while region_latent follows the MASK/IMAGE device (CUDA under
+            # --gpu-only). The multiply below is elementwise, so it would raise across devices
+            # on every multi-tile masked refine. A no-op when both are already CPU.
+            grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8).to(reg.device) if expanded else 1.0
             denoise_mask = grad * reg
         # Per-tile conds swap. ControlNet: the swapped map's control chains are fresh copies
         # whose hints are this tile's crop_rect slice, so core's rescale is an identity and
@@ -816,7 +826,9 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # background outside the region is never shaded at all.
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
-        return image.clone()
+        # Narrowed to RGB like every sampled path, so the output channel count never depends
+        # on a widget value; on a 3-channel input the slice is the whole tensor.
+        return image[..., :3].clone()
     # ControlNet prep happens HERE because this is the last place the FULL input size is in
     # hand: the hints are validated against it, and on the mask path they take the same bbox
     # slice the image does. _refine_tiles pads them and cuts them per tile. Without a control
@@ -853,7 +865,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     bbox = _mask_bbox(mask_bin)
     if bbox is None:
         # Empty mask: nothing to refine, and (unlike the input) a clone is a safe no-op.
-        return image.clone()
+        # RGB-narrowed for the same reason as the zero-step return above.
+        return image[..., :3].clone()
     height, width = image.shape[1], image.shape[2]
     y0, y1, x0, x1 = _expand_snap_clamp(bbox, context_anchor, height, width)
     sub_image = image[:, y0:y1, x0:x1, :]

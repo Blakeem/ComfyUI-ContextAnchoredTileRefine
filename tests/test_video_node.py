@@ -80,6 +80,9 @@ class NestedPair:
 
     def __init__(self, *streams):
         self.streams = streams
+        # The flag core's sample() and previewer branch on, and the half of the guard that
+        # discriminates a nested pair from an ordinary LATENT (torch.Tensor.unbind exists too).
+        self.is_nested = True
 
     def unbind(self):
         return self.streams
@@ -98,7 +101,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, av_latent=None, upscaled
         "order": [],
         "encode_empty_calls": [],
         "sample_conditioning_frames": None,
-        "prepare_upscaled": None,
+        "picks_upscale": None,
         "encode_global": None,
         "prepare_upscaled_video": None,
         "build_basic_guider": None,
@@ -122,18 +125,21 @@ def _drive(monkeypatch, image=None, upscale_model=None, av_latent=None, upscaled
         recorded["sample_conditioning_frames"] = frames
         return recorded["picks"], recorded["stamps"]
 
-    def fake_prepare_upscaled(image, upscale_model, upscale_by):
-        recorded["prepare_upscaled"] = {"image": image, "upscale_model": upscale_model, "upscale_by": upscale_by}
-        return recorded["picks_upscaled"]
-
     def fake_encode_global(clip, picks, stamps):
         recorded["order"].append("encode_global")
         recorded["encode_global"] = {"clip": clip, "picks": picks, "stamps": stamps}
         return recorded["pack"]
 
-    def fake_prepare_upscaled_video(frames, upscale_model, upscale_by):
+    def fake_prepare_upscaled_video(frames, upscale_model, upscale_by, dtype=torch.float16):
+        # Two legs through the SAME chunked function: the conditioning picks first (fp32, the
+        # dtype the tokenizer must see), then the full-clip canvas. Only the canvas leg is an
+        # allocation event the stage-order test cares about.
+        call = {"frames": frames, "upscale_model": upscale_model, "upscale_by": upscale_by, "dtype": dtype}
+        if frames is recorded["picks"]:
+            recorded["picks_upscale"] = call
+            return recorded["picks_upscaled"]
         recorded["order"].append("prepare_upscaled_video")
-        recorded["prepare_upscaled_video"] = {"frames": frames, "upscale_model": upscale_model, "upscale_by": upscale_by}
+        recorded["prepare_upscaled_video"] = call
         return recorded["upscaled"]
 
     def fake_encode_empty(clip):
@@ -169,7 +175,6 @@ def _drive(monkeypatch, image=None, upscale_model=None, av_latent=None, upscaled
 
     monkeypatch.setattr(vl_video, "sample_conditioning_frames", fake_sample_conditioning_frames)
     monkeypatch.setattr(vl_video, "encode_global", fake_encode_global)
-    monkeypatch.setattr(upscale, "prepare_upscaled", fake_prepare_upscaled)
     monkeypatch.setattr(upscale, "prepare_upscaled_video", fake_prepare_upscaled_video)
     monkeypatch.setattr(upscale, "encode_empty", fake_encode_empty)
     monkeypatch.setattr(upscale, "build_basic_guider", fake_build_basic_guider)
@@ -334,15 +339,19 @@ def test_the_conditioning_picks_come_from_the_input_frames(comfy_stubs, monkeypa
 
 def test_the_picks_get_the_same_upscale_pipeline_as_the_canvas(comfy_stubs, monkeypatch):
     # Every stage is per-frame, so upscaling the picks alone gives the encoder exactly the
-    # content the canvas will hold — the identity the stage ordering depends on.
+    # content the canvas will hold — the identity the stage ordering depends on. Same chunked
+    # function as the canvas, so the picks' lanczos transient is capped the same way; fp32
+    # only because the tokenizer must see the dtype the unchunked call gave it.
     upscale_model = object()
     recorded, _ = _drive(monkeypatch, upscale_model=upscale_model)
 
-    assert recorded["prepare_upscaled"]["image"] is recorded["picks"]
-    assert recorded["prepare_upscaled"]["upscale_model"] is upscale_model
-    assert recorded["prepare_upscaled"]["upscale_by"] == 2.0
+    assert recorded["picks_upscale"]["frames"] is recorded["picks"]
+    assert recorded["picks_upscale"]["upscale_model"] is upscale_model
+    assert recorded["picks_upscale"]["upscale_by"] == 2.0
+    assert recorded["picks_upscale"]["dtype"] == torch.float32
     assert recorded["prepare_upscaled_video"]["upscale_model"] is upscale_model
     assert recorded["prepare_upscaled_video"]["upscale_by"] == 2.0
+    assert recorded["prepare_upscaled_video"]["dtype"] == torch.float16
 
 
 def test_the_picks_reach_the_encoder_padded_onto_the_32_grid(comfy_stubs, monkeypatch):
@@ -441,6 +450,14 @@ def test_rejects_a_latent_whose_samples_are_not_a_nested_pair(comfy_stubs, monke
         _drive(monkeypatch, av_latent={"samples": object()})
 
 
+def test_rejects_a_plain_latent_whose_samples_are_an_ordinary_tensor(comfy_stubs, monkeypatch):
+    # torch.Tensor.unbind exists, so an unbind-only guard would split an ordinary LATENT along
+    # BATCH: at batch 2 the stream-count check passes too, and a [C,H,W] slice would ride along
+    # as the "soundtrack" until video.audio_stream blamed frame/audio alignment instead.
+    with pytest.raises(ValueError, match="must be the MiniMax H3 sampler's AV LATENT"):
+        _drive(monkeypatch, av_latent={"samples": torch.rand(2, 4, 8, 8)})
+
+
 def test_rejects_a_latent_with_the_wrong_stream_count(comfy_stubs, monkeypatch):
     latent = {"samples": NestedPair(torch.rand(1, 24, 2, 4, 4))}
     with pytest.raises(ValueError, match=r"holds 1 latent stream\(s\)"):
@@ -497,3 +514,24 @@ def test_prepare_upscaled_video_resizes_in_frame_chunks_into_an_fp16_canvas(comf
     batches = [call[0][0] for call in comfy_stubs["common_upscale_calls"]]
     assert batches == [8, 1]
     assert all(call[1:] == (96, 128, "lanczos", "disabled") for call in comfy_stubs["common_upscale_calls"])
+
+
+def test_prepare_upscaled_video_dtype_only_moves_the_canvas_not_the_chunking(comfy_stubs):
+    # The conditioning-picks leg asks for fp32 (the tokenizer must see the dtype it saw from
+    # the unchunked prepare_upscaled); the chunking and the per-chunk resize calls are the
+    # canvas leg's, unchanged.
+    frames = torch.rand(9, 64, 48, 3)
+    out = upscale.prepare_upscaled_video(frames, None, 2.0, dtype=torch.float32)
+
+    assert out.shape == (9, 128, 96, 3)
+    assert out.dtype == torch.float32
+    assert [call[0][0] for call in comfy_stubs["common_upscale_calls"]] == [8, 1]
+
+
+def test_prepare_upscaled_video_dtype_does_not_force_a_copy_on_the_no_op_path(comfy_stubs):
+    # The "nothing would change" short-circuit still returns the caller's own tensor, so
+    # upscale_by 1.0 with no model costs no copy on either leg.
+    frames = torch.rand(9, 64, 64, 3)
+
+    assert upscale.prepare_upscaled_video(frames, None, 1.0, dtype=torch.float32) is frames
+    assert comfy_stubs["common_upscale_calls"] == []

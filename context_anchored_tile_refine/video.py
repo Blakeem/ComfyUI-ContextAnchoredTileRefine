@@ -207,24 +207,26 @@ def refine_video(frames, guider, sampler, sigmas, vae, seed, max_tile_width, max
 
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the clip.
-        return frames.clone()
+        # Channel-narrowed and fp32 like every other exit (line-end `refined.to(float32)`):
+        # `frames` is the upscale stage's fp16 canvas whenever a resize fired, and the node's
+        # IMAGE dtype must not depend on upscale_by. copy=True keeps the no-alias guarantee.
+        return frames[..., :3].to(torch.float32, copy=True)
 
     # fp16 before either pad, so the pad copies (a full clip each) are never fp32.
     pixels = frames[..., :3].to(torch.float16)
     frame_count = int(pixels.shape[0])
     on_grid, grid_frames = pad_frames_to_grid(pixels)
     raw, (height, width) = sampling.pad_image_to_multiple(on_grid, CANVAS_MULTIPLE)
+    # Both are full-clip tensors and neither is read again; `raw` keeps the survivor alive, so
+    # dropping the names is safe even in the aligned case where all three alias one tensor.
+    del pixels, on_grid
     canvas_h, canvas_w = int(raw.shape[1]), int(raw.shape[2])
     latent_t = video_latent_t(grid_frames)
     audio = audio_stream(audio_latent, grid_frames)
 
-    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, multiple=CANVAS_MULTIPLE)
-    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, multiple=CANVAS_MULTIPLE)
+    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, multiple=CANVAS_MULTIPLE, axis="width")
+    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, multiple=CANVAS_MULTIPLE, axis="height")
     layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
-    # Row slices of the one whole-clip encode: every tile reads the same globally-informed
-    # picture, so structures crossing a seam continue (see vl_video.py).
-    tile_positives = [vl_video.slice_rows(vl_pack, tile.crop_rect, canvas_h, canvas_w)
-                      for tile in layout.tiles]
 
     video_noise, audio_noise = canvas_noise(seed, latent_t, canvas_h, canvas_w, audio)
     steps = sigmas.shape[-1] - 1
@@ -263,7 +265,12 @@ def refine_video(frames, guider, sampler, sigmas, vae, seed, max_tile_width, max
         # interrupt or a sampler raise cannot leave the guider swapped.
         pristine_conds = guider.original_conds
         swapped_conds = dict(pristine_conds)
-        swapped_conds["positive"] = tile_positives[tile_idx]
+        # A row slice of the one whole-clip encode: every tile reads the same globally-informed
+        # picture, so structures crossing a seam continue (see vl_video.py). Sliced HERE rather
+        # than for the whole layout up front — slice_rows allocates (index_select), it is a pure
+        # function of (pack, crop, canvas dims), and only this tile's slice is ever read, so
+        # pre-building them would hold ~one extra whole-clip encode alive for the entire run.
+        swapped_conds["positive"] = vl_video.slice_rows(vl_pack, crop, canvas_h, canvas_w)
         guider.original_conds = swapped_conds
         try:
             samples = guider.sample(noise, latent, sampler, sigmas, denoise_mask=denoise_mask,

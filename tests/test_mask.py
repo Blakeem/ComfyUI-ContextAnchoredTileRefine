@@ -233,6 +233,20 @@ def test_empty_mask_returns_clone_no_side_effects():
     assert guider.calls == [] and noise.calls == []
 
 
+def test_empty_mask_narrows_an_rgba_input_to_three_channels():
+    # Same contract as the sampled mask path (test_rgba_mask_input_returns_three_channels):
+    # the channel count must not depend on whether the mask happened to be empty.
+    image = torch.rand(1, 48, 48, 4)
+    mask = torch.zeros(1, 48, 48)
+    guider, vae, noise = GridGuider(), GridVAE(), GridNoise()
+
+    out = sampling.refine_image(image, guider, object(), SIGMAS, vae, noise, max_tile_width=64, max_tile_height=64, context_anchor=8, context_overlap=0, mask=mask)
+
+    assert out.shape == (1, 48, 48, 3)
+    assert torch.equal(out, image[..., :3])
+    assert vae.encode_calls == [] and guider.calls == []
+
+
 def test_whole_image_mask_matches_no_mask_refine(comfy_stubs):
     image = torch.rand(1, 48, 48, 3)
 
@@ -322,3 +336,55 @@ def test_rgba_mask_input_returns_three_channels(comfy_stubs):
 
     out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
     assert out.shape == (1, 64, 64, 3)
+
+
+# ---- region gate device alignment ----------------------------------------
+
+
+class ForeignDeviceGradient:
+    """Stands in for tile_gradient's return when region_latent lives on ANOTHER device.
+
+    tile_gradient builds its indicator from torch.arange, so it is always CPU, while
+    region_latent follows the MASK/IMAGE device (CUDA under --gpu-only). This proxy
+    reproduces torch's behaviour there — an elementwise multiply raises, and only `.to()`
+    yields a multipliable tensor — which a CPU-only suite cannot otherwise observe.
+    """
+
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.moved = False
+
+    def to(self, device):
+        self.moved = True
+        return self.tensor
+
+    def __mul__(self, other):
+        raise RuntimeError("Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!")
+
+    __rmul__ = __mul__
+
+
+def test_masked_multi_tile_moves_gradient_onto_region_device(comfy_stubs, monkeypatch):
+    # Same geometry as test_region_gate_is_grad_times_region_latent: a 2x2 grid, so every
+    # tile is `expanded` and takes the grad * region_latent branch.
+    image = torch.rand(1, 80, 80, 3)
+    mask = torch.zeros(1, 80, 80)
+    mask[:, 16:64, 16:64] = 1.0
+
+    baseline, _guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
+
+    real_tile_gradient = sampling.tile_gradient
+    proxies = []
+
+    def foreign_tile_gradient(*args, **kwargs):
+        proxy = ForeignDeviceGradient(real_tile_gradient(*args, **kwargs))
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(sampling, "tile_gradient", foreign_tile_gradient)
+    out, guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
+
+    assert len(guider.calls) == 4
+    assert len(proxies) == 4
+    assert all(proxy.moved for proxy in proxies)   # .to(reg.device) BEFORE the multiply
+    assert torch.equal(out, baseline)              # and the moved gradient is the same value

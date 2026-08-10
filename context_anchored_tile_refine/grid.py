@@ -11,10 +11,18 @@ from dataclasses import dataclass
 class GridConfigError(ValueError):
     # Configuration error: caps too small for the chosen context_overlap +
     # context_anchor per seam side. Carries the simulator's failure fields as attributes.
-    def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason):
+    def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason, axis=None):
+        # `axis` ("width"/"height") is optional so the internal symbols above can be followed
+        # by one sentence in the caller's own widget names — nothing in the leading text names
+        # anything the user typed, and VALIDATE_INPUTS cannot pre-empt this (it never sees the
+        # image).
+        widgets = "" if axis is None else (
+            f" — max_tile_{axis} {cap} cannot hold context_anchor {ctx} + context_overlap {overlap} "
+            f"on both sides; raise max_tile_{axis} or lower context_overlap."
+        )
         super().__init__(
             f"caps too small for overlap + context: L={L} cap={cap} ctx={ctx} overlap={overlap} "
-            f"(fails at n={fail_n} with base={fail_base}, reason={reason})"
+            f"(fails at n={fail_n} with base={fail_base}, reason={reason}){widgets}"
         )
         self.r = r
         self.fail_n = fail_n
@@ -105,7 +113,7 @@ def round8_up(x):
     return round_up_multiple(x, 8)
 
 
-def solve_axis(L, cap, ctx, overlap=0, multiple=8):
+def solve_axis(L, cap, ctx, overlap=0, multiple=8, axis=None):
     # Per-axis grid solve (authoritative):
     #   r = context_anchor + context_overlap
     #   overhead(n) = 0 | r | 2r  for n = 1 | 2 | >= 3
@@ -126,7 +134,7 @@ def solve_axis(L, cap, ctx, overlap=0, multiple=8):
         if base + overhead <= cap:
             return AxisSolution(n=n, base=base, last=L - (n - 1) * base, overhead=overhead, r=r)
     # Unreachable unless the cap is smaller than the minimum base `multiple` + overhead.
-    raise GridConfigError(L, cap, ctx, overlap, r, max_n, multiple, "exhausted")
+    raise GridConfigError(L, cap, ctx, overlap, r, max_n, multiple, "exhausted", axis=axis)
 
 
 def expand_rect(core, amount, nb, W, H):
@@ -196,10 +204,21 @@ def build_layout(W, H, sx, sy, ctx, overlap=0):
 
             overlap_inner_rect = expand_rect(core, overlap, nb, W, H)
             crop_rect = expand_rect(core, r, nb, W, H)
-            # Directional: overlap on top/left only (never right/bottom). Reuses
-            # expand_rect with the right/bottom sides forced off.
-            paste_nb = Neighbors(left=nb.left, right=False, top=nb.top, bottom=False)
-            paste_rect = expand_rect(core, overlap, paste_nb, W, H)
+            # Directional: overlap on top/left only (never right/bottom), and clamped per axis
+            # to that axis's base so paste_rect never reaches past the PREVIOUS tile's core
+            # start. That is what keeps the invariant above true — each interior seam feathered
+            # exactly once, by the later tile — rather than cross-dissolving over a whole
+            # earlier core (the wide blend of two independent refinements CLAUDE.md prohibits).
+            # A no-op whenever base >= overlap, i.e. every default configuration; solve_axis has
+            # no fade floor by design, so base < overlap is reachable from widget-legal values.
+            # One expand_rect call per axis, each with the other axis's sides forced off,
+            # because the two clamps differ (sx.base vs sy.base).
+            paste_x = expand_rect(core, min(overlap, sx.base), Neighbors(left=nb.left, right=False, top=False, bottom=False), W, H)
+            paste_y = expand_rect(core, min(overlap, sy.base), Neighbors(left=False, right=False, top=nb.top, bottom=False), W, H)
+            paste_rect = ExpandedRect(
+                x0=paste_x.x0, y0=paste_y.y0, x1=paste_x.x1, y1=paste_y.y1,
+                clamped=paste_x.clamped or paste_y.clamped,
+            )
             sampled_w = crop_rect.x1 - crop_rect.x0
             sampled_h = crop_rect.y1 - crop_rect.y0
             label = tile_class_label(axis_class(col, sx.n), axis_class(row, sy.n))

@@ -138,7 +138,10 @@ def test_encode_global_sends_one_empty_prompt_video_item_and_returns_the_pack(h3
     text, items = clip.tokenize_calls[0]
     assert text == ""                                   # any text re-admits phantoms
     assert len(items) == 1 and items[0]["type"] == "video"
-    assert items[0]["data"] is picks                    # canvas-resolution identity
+    # Canvas-resolution identity: the RGB narrowing is a zero-copy view of the same
+    # storage, so the tower sees the picks' own bytes at their own size.
+    assert items[0]["data"].data_ptr() == picks.data_ptr()
+    assert torch.equal(items[0]["data"], picks)
     assert items[0]["timestamps"] == [0.0, 0.5]
     assert (pack.enc_h, pack.enc_w) == (ENC_H, ENC_W)
     assert pack.cond.shape == (1, TOTAL_ROWS, 4)
@@ -226,6 +229,19 @@ def test_over_cap_picks_are_area_resampled_once_to_an_exact_cell_grid(h3_stubs, 
     assert pack.enc_h * pack.enc_w <= vl_video.MAX_ENCODE_PIXELS
     sent = clip.tokenize_calls[0][1][0]["data"]
     assert sent.shape == (2, 128, 96, 3) and sent is not picks
+
+
+def test_four_channel_picks_are_narrowed_to_rgb_before_the_tower(h3_stubs):
+    # An RGBA IMAGE (core's JoinImageWithAlpha makes one) reaches this node's picks
+    # untouched, and the under-cap path is the normal one. The tokenizer's
+    # (imgs - mean) / std has a (1,3,1,1) mean, so a 4th channel raises a broadcast
+    # error naming neither this node nor the alpha channel.
+    clip = FakeH3Clip()
+
+    vl_video.encode_global(clip, torch.zeros(2, ENC_H, ENC_W, 4), [0.0, 0.5])
+
+    assert clip.tokenize_calls[0][1][0]["data"].shape == (2, ENC_H, ENC_W, 3)
+    assert h3_stubs["common_upscale_calls"] == []       # nothing resampled under the cap
 
 
 def test_unaligned_canvas_reports_the_grid_the_tokenizer_will_snap_to(h3_stubs):

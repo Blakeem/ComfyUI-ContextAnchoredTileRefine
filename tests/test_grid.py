@@ -161,6 +161,21 @@ def test_grid_config_error_message_names_the_inputs():
     message = str(excinfo.value)
     for token in ("L=64", "cap=4", "ctx=8", "overlap=8"):
         assert token in message
+    # No axis given (the bare solver call): the internal-symbol message stands alone.
+    assert "max_tile_" not in message
+
+
+def test_grid_config_error_axis_names_the_widgets():
+    # With `axis`, the same message gains one sentence in the caller's widget names — the
+    # only part of it a node user can act on. sampling.py passes width/height.
+    with pytest.raises(grid.GridConfigError) as excinfo:
+        grid.solve_axis(64, 4, 8, 8, axis="width")
+    message = str(excinfo.value)
+    assert "caps too small for overlap + context" in message
+    for token in ("L=64", "cap=4", "ctx=8", "overlap=8"):
+        assert token in message
+    assert "max_tile_width 4 cannot hold context_anchor 8 + context_overlap 8" in message
+    assert "raise max_tile_width or lower context_overlap" in message
 
 
 def test_solver_exhausted_guard():
@@ -306,3 +321,45 @@ def test_round_up_multiple():
 )
 def test_tile_class_label_pins(cx, cy, expected):
     assert grid.tile_class_label(cx, cy) == expected
+
+
+# --- paste_rect vs the previous tile's core (overlap > base is reachable: no fade floor) ---
+
+
+def test_paste_rect_clamps_at_previous_core_when_overlap_exceeds_base():
+    # Widget-legal and off-nominal: max_tile 768, context_anchor 32, context_overlap 256 gives
+    # r=288, so on a 4096 axis the cap admits only base<=192 -> n=22, base 192 < overlap 256.
+    # Unclamped, tile col=2's paste would start at 384-256=128, inside col=0's core (0..192)
+    # that col=1 already feathered — the wide two-refinement blend the node forbids.
+    sx = grid.solve_axis(4096, 768, 32, 256, axis="width")
+    sy = grid.solve_axis(4096, 768, 32, 256, axis="height")
+    assert (sx.n, sx.base) == (22, 192)
+    assert sx.base < 256
+    layout = grid.build_layout(4096, 4096, sx, sy, 32, 256)
+
+    for tile in layout.tiles:
+        # The previous tile's core start on each axis; the tile's own core start when there is
+        # no previous tile (paste_rect never expands on a side without a neighbor).
+        prev_x0 = (tile.col - 1) * sx.base if tile.col > 0 else tile.core.x0
+        prev_y0 = (tile.row - 1) * sy.base if tile.row > 0 else tile.core.y0
+        assert tile.paste_rect.x0 >= prev_x0
+        assert tile.paste_rect.y0 >= prev_y0
+        # Never expands right/bottom, on any configuration.
+        assert (tile.paste_rect.x1, tile.paste_rect.y1) == (tile.core.x1, tile.core.y1)
+
+    t22 = next(t for t in layout.tiles if (t.row, t.col) == (2, 2))
+    assert (t22.paste_rect.x0, t22.paste_rect.y0) == (192, 192)
+    assert (t22.paste_rect.x1, t22.paste_rect.y1) == (576, 576)
+
+
+def test_paste_rect_unchanged_when_base_exceeds_overlap():
+    # The clamp is min(overlap, base), so every configuration with base >= overlap (every
+    # default, and every other test in this file) keeps the full directional expansion.
+    sx = grid.solve_axis(2048, 1024, 64, 64)
+    sy = grid.solve_axis(2048, 1024, 64, 64)
+    layout = grid.build_layout(2048, 2048, sx, sy, 64, 64)
+
+    for tile in layout.tiles:
+        want_x0 = max(0, tile.core.x0 - (64 if tile.nb.left else 0))
+        want_y0 = max(0, tile.core.y0 - (64 if tile.nb.top else 0))
+        assert (tile.paste_rect.x0, tile.paste_rect.y0) == (want_x0, want_y0)

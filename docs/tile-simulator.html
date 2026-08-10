@@ -492,8 +492,18 @@ function buildLayout(W, H, sx, sy, ctx, overlap = 0) {
 
       var overlapInnerRect = expandRect(core, overlap, nb, W, H);         /* core + overlap, all neighbor sides */
       var cropRect = expandRect(core, r, nb, W, H);                       /* symmetric sample extent (core + overlap + ctx) */
-      var pasteRect = expandRect(core, overlap,                           /* directional: overlap on top/left only */
-        { left: nb.left, top: nb.top, right: false, bottom: false }, W, H);
+      /* Directional: overlap on top/left only, clamped per axis to that axis's base so the
+         paste never reaches past the PREVIOUS tile's core start (each interior seam stays
+         feathered exactly once). A no-op whenever base >= overlap. One call per axis because
+         the two clamps differ (sx.base vs sy.base). */
+      var pasteX = expandRect(core, Math.min(overlap, sx.base),
+        { left: nb.left, top: false, right: false, bottom: false }, W, H);
+      var pasteY = expandRect(core, Math.min(overlap, sy.base),
+        { left: false, top: nb.top, right: false, bottom: false }, W, H);
+      var pasteRect = {
+        x0: pasteX.x0, y0: pasteY.y0, x1: pasteX.x1, y1: pasteY.y1,
+        clamped: (pasteX.clamped || pasteY.clamped)
+      };
       var sampledW = cropRect.x1 - cropRect.x0;
       var sampledH = cropRect.y1 - cropRect.y0;
       var label = tileClassLabel(axisClass(col, sx.n), axisClass(row, sy.n));
@@ -706,6 +716,34 @@ var SELF_TESTS = [
       var want = {
         n: "3x3", tiles: 9, interior: "944x944", c00: "816x816",
         lastCol: 672, partition: 2048, total: 6553600, within: true
+      };
+      return expect(got, want);
+    }
+  },
+  {
+    name: "buildLayout overlap > base (L=4096 cap 768 ctx=32 overlap=256 -> 22x22, base 192): pasteRect clamps at the PREVIOUS core's start, never past it",
+    run: function () {
+      var sx = solveAxis(4096, 768, 32, 256);
+      var sy = solveAxis(4096, 768, 32, 256);
+      if (!sx.ok || !sy.ok) return { pass: false, got: "solve failed", want: "" };
+      var lay = buildLayout(4096, 4096, sx, sy, 32, 256);
+      var t22 = lay.tiles.filter(function (t) { return t.row === 2 && t.col === 2; })[0];
+      /* base 192 < overlap 256, so an UNCLAMPED expansion would put (col=2,row=2)'s pasteX0 at
+         384-256=128 — inside col=0's core (0..192), which col=1 already feathered. Clamped to
+         min(overlap, base)=192 it lands exactly on col=1's core start: feathered once. */
+      var neverPastPrevCore = lay.tiles.every(function (t) {
+        return t.pasteRect.x0 >= (t.col > 0 ? (t.col - 1) * sx.base : t.core.x0)
+            && t.pasteRect.y0 >= (t.row > 0 ? (t.row - 1) * sy.base : t.core.y0);
+      });
+      var got = {
+        n: sx.n + "x" + sy.n, base: sx.base,
+        pasteX0: t22.pasteRect.x0, pasteY0: t22.pasteRect.y0,
+        paste: (t22.pasteRect.x1 - t22.pasteRect.x0) + "x" + (t22.pasteRect.y1 - t22.pasteRect.y0),
+        neverPastPrevCore: neverPastPrevCore
+      };
+      var want = {
+        n: "22x22", base: 192, pasteX0: 192, pasteY0: 192,
+        paste: "384x384", neverPastPrevCore: true
       };
       return expect(got, want);
     }

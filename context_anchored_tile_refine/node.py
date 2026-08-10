@@ -20,7 +20,10 @@ def _unpack_av_latent(av_latent):
 
     samples = av_latent.get("samples") if isinstance(av_latent, dict) else None
     unbind = getattr(samples, "unbind", None)
-    if unbind is None:
+    # Nestedness is the discriminating half: torch.Tensor.unbind exists too, so an ordinary
+    # LATENT would pass an unbind-only guard and get split along BATCH, surfacing later as a
+    # misleading frame/audio alignment error. is_nested is False on an ordinary tensor.
+    if not getattr(samples, "is_nested", False) or not callable(unbind):
         raise ValueError("av_latent must be the MiniMax H3 sampler's AV LATENT — a LATENT whose samples are a nested (video, audio) pair. Connect the sampler's LATENT output, or leave this input unconnected.")
     streams = list(unbind())
     if len(streams) != 2:
@@ -45,7 +48,10 @@ def _normalize_mask(mask, image):
         raise ValueError(f"mask batch {mask.shape[0]} must be 1 or match image batch {image.shape[0]}")
     if mask.shape[0] == 1 and image.shape[0] != 1:
         mask = mask.expand(image.shape[0], -1, -1)
-    return mask
+    # Onto the IMAGE's device: every tensor sampling.py derives from the mask (the region
+    # gate, the AA alpha) is combined with canvas-device tensors, and under --gpu-only the
+    # VAE emits a CUDA IMAGE while the mask nodes emit a CPU MASK. A no-op when they match.
+    return mask.to(image.device)
 
 
 class ContextAnchoredTileRefine:
@@ -274,6 +280,7 @@ class ContextAnchoredTileUpscaleVLVideo(ContextAnchoredTileRefine):
     def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, av_latent=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
+        import torch
 
         from . import sampling, upscale, video, vl_video
 
@@ -305,7 +312,12 @@ class ContextAnchoredTileUpscaleVLVideo(ContextAnchoredTileRefine):
         # per-frame, which is what makes pick-then-upscale identical to upscale-then-pick and
         # lets the encode grid map onto rects the tiles have not been cut from yet.
         picks, stamps = vl_video.sample_conditioning_frames(image)
-        picks = upscale.prepare_upscaled(picks, upscale_model, upscale_by)
+        # Chunked like the canvas: core's lanczos builds an fp32 list plus a stack of the whole
+        # batch it is handed, so ~11 picks at the 2688x1536 target is ~1.1 GB transient in the
+        # same stage-order bracket this block exists to protect. fp32 is mandatory here — the
+        # tokenizer must see the dtype it sees today; both legs are per-frame, so the pixels are
+        # bit-identical either way.
+        picks = upscale.prepare_upscaled_video(picks, upscale_model, upscale_by, dtype=torch.float32)
         picks, _ = sampling.pad_image_to_multiple(picks, video.CANVAS_MULTIPLE)
         vl_pack = vl_video.encode_global(clip, picks, stamps)
         del picks           # dropped before the canvases claim the RAM the picks are holding

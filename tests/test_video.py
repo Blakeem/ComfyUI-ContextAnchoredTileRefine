@@ -174,6 +174,22 @@ def test_fixture_layout_is_a_2x2_grid_of_32_aligned_crops():
     assert (BOTTOM_RIGHT.kept_top, BOTTOM_RIGHT.kept_left) == (True, True)
 
 
+def test_grid_failure_out_of_refine_video_names_the_widget_per_axis(video_stubs):
+    # The video path forwards axis= to grid.solve_axis, so a cap too small for the
+    # context rings names the widget the user must change instead of only the
+    # solver's internal symbols (a cap of 32 cannot hold any base + ring overhead).
+    with pytest.raises(grid.GridConfigError) as width_error:
+        video.refine_video(_frames(), VideoGuider(fill=1.0), SAMPLER, SIGMAS, VideoVAE(),
+                           SEED, 32, CAP_H, ANCHOR, OVERLAP, _vl_pack())
+    assert "max_tile_width" in str(width_error.value)
+    assert "max_tile_height" not in str(width_error.value)
+
+    with pytest.raises(grid.GridConfigError) as height_error:
+        video.refine_video(_frames(), VideoGuider(fill=1.0), SAMPLER, SIGMAS, VideoVAE(),
+                           SEED, CAP_W, 32, ANCHOR, OVERLAP, _vl_pack())
+    assert "max_tile_height" in str(height_error.value)
+
+
 # --- frame grid ----------------------------------------------------------------------
 
 def test_frame_counts_snap_to_the_17k_plus_5_grid():
@@ -257,6 +273,21 @@ def test_denoise_zero_returns_the_clip_untouched(video_stubs):
 
     assert torch.equal(out, frames)
     assert out is not frames
+    assert vae.encode_calls == [] and guider.calls == []
+
+
+def test_denoise_zero_returns_float32_rgb_from_an_fp16_clip(video_stubs):
+    # prepare_upscaled_video hands back an fp16 canvas whenever a resize fires (the default
+    # upscale_by), so without the narrowing here the node's IMAGE dtype/channel count would
+    # depend on upscale_by. Every sampled exit ends in float32 RGB; this one must match.
+    frames = _frames().to(torch.float16)
+    rgba = torch.cat([frames, torch.ones_like(frames[..., :1])], dim=-1)
+
+    out, guider, vae = _run(rgba, sigmas=torch.FloatTensor([]))
+
+    assert out.dtype == torch.float32
+    assert out.shape == frames.shape
+    assert torch.equal(out, frames.to(torch.float32))
     assert vae.encode_calls == [] and guider.calls == []
 
 
