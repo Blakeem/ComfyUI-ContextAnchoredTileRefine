@@ -15,6 +15,10 @@ SIGMAS, GUIDER and CONDITIONING that `ContextAnchoredTileRefineVL` takes as inpu
 in-process from widgets instead. Each mirrors the core node that produces that type, so an
 all-in-one run and the equivalent hand-wired graph sample identically.
 
+`prepare_upscaled_video` and `build_basic_guider` are the video node's two variants of
+that pair: the same upscale rules applied in frame chunks, and the CFG-FREE guider MiniMax
+H3 runs.
+
 Module scope is torch-only; comfy is imported lazily inside functions (the same contract
 as sampling.py / vl.py, pinned by a subprocess test).
 """
@@ -25,6 +29,9 @@ import torch
 MODEL_TILE = 512
 MODEL_TILE_OVERLAP = 32
 MODEL_TILE_MIN = 128
+
+# Frames per whole-clip upscale chunk; see prepare_upscaled_video.
+UPSCALE_FRAME_CHUNK = 8
 
 
 def scale_target(width, height, upscale_by):
@@ -111,6 +118,31 @@ def prepare_upscaled(image, upscale_model, upscale_by):
     return _lanczos_resize(current, target_width, target_height)
 
 
+def prepare_upscaled_video(frames, upscale_model, upscale_by):
+    # prepare_upscaled's rules applied to a whole clip: [T,H,W,C] in, [T,target_h,target_w,C]
+    # fp16 out. Chunked because core's lanczos builds an fp32 list plus a stack of the WHOLE
+    # batch it is handed (comfy/utils.py lanczos) — ~15 GB at 2688x1536x124 on a 32 GB
+    # machine — while 8 frames cap that transient near 1 GB, and writing into a preallocated
+    # canvas avoids a second full-clip allocation (tests-AB/spike_h3_stress.py:460-470).
+    # fp16 is the canvas dtype video.py works in; the outputs are 8-bit, so the step is below
+    # the quantization floor.
+    target_width, target_height = scale_target(int(frames.shape[2]), int(frames.shape[1]), upscale_by)
+    frame_count = int(frames.shape[0])
+    canvas = None
+
+    if upscale_model is None and int(frames.shape[2]) == target_width and int(frames.shape[1]) == target_height:
+        # Same rule as prepare_upscaled: a resize that would not change the size is a loss,
+        # not an identity (see the module docstring), so the caller's tensor comes back.
+        return frames
+
+    canvas = torch.empty([frame_count, target_height, target_width, int(frames.shape[3])],
+                         dtype=torch.float16)
+    for f0 in range(0, frame_count, UPSCALE_FRAME_CHUNK):
+        f1 = min(f0 + UPSCALE_FRAME_CHUNK, frame_count)
+        canvas[f0:f1] = prepare_upscaled(frames[f0:f1], upscale_model, upscale_by)
+    return canvas
+
+
 class Noise_RandomNoise:
     # comfy_extras/nodes_custom_sampler.py Noise_RandomNoise: the object behind the NOISE
     # type, reproduced here because the all-in-one node takes a seed widget rather than a
@@ -155,6 +187,25 @@ def build_guider(model, positive, negative, cfg):
     guider = comfy.samplers.CFGGuider(model)
     guider.set_conds(positive, negative)
     guider.set_cfg(cfg)
+    return guider
+
+
+def build_basic_guider(model, positive):
+    # comfy_extras/nodes_custom_sampler.py:805-827 BasicGuider.execute, whose Guider_Basic is
+    # a CFGGuider subclass carrying ONLY a positive. MiniMax H3 is CFG-free, so this is the
+    # guider its templates run: a CFGGuider with a dummy negative would double the DiT cost
+    # for a channel the model never weighs. The subclass is declared here, inside the
+    # function, so the module scope stays torch-only; `positive` still lands in
+    # `original_conds` (comfy/samplers.py:1201-1205 inner_set_conds), which is the seam
+    # video.py's per-tile positive swap keys on.
+    import comfy.samplers
+
+    class Guider_Basic(comfy.samplers.CFGGuider):
+        def set_conds(self, positive):
+            self.inner_set_conds({"positive": positive})
+
+    guider = Guider_Basic(model)
+    guider.set_conds(positive)
     return guider
 
 

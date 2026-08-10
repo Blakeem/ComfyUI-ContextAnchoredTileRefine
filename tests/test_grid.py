@@ -223,6 +223,74 @@ def test_axis_class_pins():
     assert grid.axis_class(1, 3) == "mid"
 
 
+# --- multiple=32: the MiniMax H3 granularity (VAE 16 x DiT patch 2). Same ladder,
+# same first-fit n, bases snapped to 32 instead of 8. ---
+
+
+def test_multiple32_single_tile_no_overhead():
+    # n=1: base round_up_multiple(1408,32)=1408, overhead 0 <= cap 1408.
+    s = grid.solve_axis(1408, 1408, 32, 32, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead, s.r) == (1, 1408, 1408, 0, 64)
+
+
+def test_multiple32_two_tiles_pay_r():
+    # The spike's 2688x1536 canvas at cap 1408, ctx=overlap=32 -> r=64.
+    # x: n=2 base round_up_multiple(1344,32)=1344, +r 64 = 1408 <= 1408.
+    # y: n=2 base round_up_multiple(768,32)=768, +r 64 = 832 <= 1408.
+    sx = grid.solve_axis(2688, 1408, 32, 32, multiple=32)
+    sy = grid.solve_axis(1536, 1408, 32, 32, multiple=32)
+    assert (sx.n, sx.base, sx.last, sx.overhead, sx.r) == (2, 1344, 1344, 64, 64)
+    assert (sy.n, sy.base, sy.last, sy.overhead) == (2, 768, 768, 64)
+
+
+def test_multiple32_snaps_base_up_past_the_8_grid():
+    # Same inputs as t3 (which lands on 1544 at /8): n=2 base
+    # round_up_multiple(1540,32)=1568, +128 = 1696 <= 2048; last = 3080 - 1568 = 1512.
+    s = grid.solve_axis(3080, 2048, 64, 64, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead) == (2, 1568, 1512, 128)
+    assert grid.solve_axis(3080, 2048, 64, 64).base == 1544  # /8 default unchanged
+
+
+def test_multiple32_five_tiles_pay_2r():
+    # Same inputs as t5. r=64. n=4: 1024 + 2r(128) = 1152 > 1024. n=5: base
+    # round_up_multiple(820,32)=832, +128 = 960 <= 1024; last = 4096 - 4*832 = 768.
+    s = grid.solve_axis(4096, 1024, 0, 64, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead, s.r) == (5, 832, 768, 128, 64)
+
+
+def test_multiple32_exhausted_reports_the_multiple_as_fail_base():
+    # max_n = ceil(64/32) + 1 = 3; the smallest base the ladder can offer is 32, not 8.
+    with pytest.raises(grid.GridConfigError) as excinfo:
+        grid.solve_axis(64, 4, 0, 0, multiple=32)
+    exc = excinfo.value
+    assert exc.reason == "exhausted"
+    assert (exc.fail_n, exc.fail_base, exc.r) == (3, 32, 0)
+
+
+@pytest.mark.parametrize("cap", [512, 1024, 1408, 2048])
+def test_multiple32_sweep(cap):
+    # ctx=0/overlap=0 so overhead is 0 at every n and minimality is a base-only test.
+    for L in range(32, 4097, 32):
+        s = grid.solve_axis(L, cap, 0, 0, multiple=32)
+        assert s.n == 1 or grid.round_up_multiple(math.ceil(L / (s.n - 1)), 32) > cap
+        assert s.base % 32 == 0
+        assert s.base * (s.n - 1) + s.last == L
+        assert 0 < s.last <= s.base
+
+
+def test_multiple_default_matches_explicit_8():
+    for L in range(8, 4097, 8):
+        assert grid.solve_axis(L, 1024, 64, 64) == grid.solve_axis(L, 1024, 64, 64, multiple=8)
+
+
+def test_round_up_multiple():
+    assert grid.round_up_multiple(1541, 8) == 1544
+    assert grid.round_up_multiple(1536, 32) == 1536
+    assert grid.round_up_multiple(1537, 32) == 1568
+    # round8_up delegates, so the public /8 name keeps its exact meaning.
+    assert grid.round8_up(1541) == grid.round_up_multiple(1541, 8)
+
+
 @pytest.mark.parametrize(
     "cx,cy,expected",
     [

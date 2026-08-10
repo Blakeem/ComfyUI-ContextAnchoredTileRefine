@@ -97,30 +97,38 @@ def round8(x):
     return round(x / 8) * 8
 
 
+def round_up_multiple(x, multiple):
+    # Smallest multiple of `multiple` that is >= x.
+    return math.ceil(x / multiple) * multiple
+
+
 def round8_up(x):
     # Smallest multiple of 8 that is >= x.
-    return math.ceil(x / 8) * 8
+    return round_up_multiple(x, 8)
 
 
-def solve_axis(L, cap, ctx, overlap=0):
+def solve_axis(L, cap, ctx, overlap=0, multiple=8):
     # Per-axis grid solve (authoritative):
     #   r = context_anchor + context_overlap
     #   overhead(n) = 0 | r | 2r  for n = 1 | 2 | >= 3
-    #   base(n) = round8_up(ceil(L / n)); choose the smallest n with
+    #   base(n) = round_up_multiple(ceil(L / n), multiple); choose the smallest n with
     #   base(n) + overhead(n) <= cap.
     # There is NO fade/overlap floor — a base is judged on the cap constraint alone
     # (owner's decision; keep it simple). Only "exhausted" remains as a failure.
+    # `multiple` is the pixel granularity a sampled crop must land on: 8 for the
+    # /8-latent image VAEs (the default, which keeps the image path bit-identical),
+    # 32 for MiniMax H3 (VAE spatial factor 16 x DiT patch 2).
     r = ctx + overlap
-    max_n = max(1, math.ceil(L / 8)) + 1  # defensive bound; base(max_n) = 8
+    max_n = max(1, math.ceil(L / multiple)) + 1  # defensive bound; base(max_n) = multiple
 
     for n in range(1, max_n + 1):
-        base = round8_up(math.ceil(L / n))
+        base = round_up_multiple(math.ceil(L / n), multiple)
         overhead = 0 if n == 1 else r if n == 2 else 2 * r
 
         if base + overhead <= cap:
             return AxisSolution(n=n, base=base, last=L - (n - 1) * base, overhead=overhead, r=r)
-    # Unreachable unless the cap is smaller than the minimum base 8 + overhead.
-    raise GridConfigError(L, cap, ctx, overlap, r, max_n, 8, "exhausted")
+    # Unreachable unless the cap is smaller than the minimum base `multiple` + overhead.
+    raise GridConfigError(L, cap, ctx, overlap, r, max_n, multiple, "exhausted")
 
 
 def expand_rect(core, amount, nb, W, H):

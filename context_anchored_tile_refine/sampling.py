@@ -282,6 +282,13 @@ def make_tile_progress(model_patcher, steps, n_tiles):
         def callback(step, x0, x, total_steps):
             preview = None
             if previewer:
+                # Core wraps a nested-latent callback and hands x0 back as a NestedTensor
+                # (comfy/samplers.py:1289-1295), which no previewer can decode; core's own
+                # callback previews the first stream (latent_preview.py:126-127). MiniMax H3
+                # HAS a previewer (latent_formats.py MiniMaxH3AV defines latent_rgb_factors),
+                # so without this every video tile preview would crash. No-op for images.
+                if x0.is_nested:
+                    x0 = x0.tensors[0]
                 preview = previewer.decode_latent_to_preview_image("JPEG", x0)
             pbar.update_absolute(tile_idx * steps + step + 1, total, preview)
         return callback

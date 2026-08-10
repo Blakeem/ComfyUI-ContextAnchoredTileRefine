@@ -11,6 +11,27 @@ def _validate_image(image):
         raise ValueError("image must be at least 8x8 pixels, got {}x{}".format(image.shape[1], image.shape[2]))
 
 
+def _unpack_av_latent(av_latent):
+    # The audio stream of a MiniMax H3 AV LATENT, duck-typed the way conds.py duck-types
+    # control objects (comfy is never imported to check a type). The video stream is
+    # discarded: this node re-encodes the video from the upscaled pixels, and only the
+    # soundtrack rides along frozen as sampling context.
+    if av_latent is None:
+        return None
+
+    samples = av_latent.get("samples") if isinstance(av_latent, dict) else None
+    unbind = getattr(samples, "unbind", None)
+    if unbind is None:
+        raise ValueError("av_latent must be the MiniMax H3 sampler's AV LATENT — a LATENT whose samples are a nested (video, audio) pair. Connect the sampler's LATENT output, or leave this input unconnected.")
+    streams = list(unbind())
+    if len(streams) != 2:
+        raise ValueError("av_latent holds {} latent stream(s); the MiniMax H3 sampler's AV LATENT holds exactly 2 (video, audio). Connect that output, or leave this input unconnected.".format(len(streams)))
+    # .cpu() because the frozen soundtrack is only ever re-uploaded per tile (video.py pairs
+    # it onto the tile encode's device): parking it in VRAM would hold ~megabytes hostage for
+    # the whole run beside the canvases.
+    return streams[1].cpu()
+
+
 def _normalize_mask(mask, image):
     # Normalize a 2D [H,W] mask to [1,H,W]; reject any other rank.
     if mask.ndim == 2:
@@ -185,3 +206,119 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         noise = upscale.Noise_RandomNoise(seed)
 
         return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip),)
+
+
+class ContextAnchoredTileUpscaleVLVideo(ContextAnchoredTileRefine):
+    """Upscale + VL tile refine for MiniMax H3 video: frames in, refined frames out.
+
+    ContextAnchoredTileUpscaleVL's design carried onto H3's audio-video latents. Tiling is
+    SPATIAL only — every tile refines the whole clip at once, so a seam is one decision for
+    all frames and cannot flicker — and the audio stream rides along frozen so a refine pass
+    never rewrites the soundtrack. The conditioning is one 2 fps vision encode of the whole
+    upscaled clip that each tile slices its own rows out of: globally informed, positionally
+    exact, and demand-free, which is why there is no prompt input (text re-admits the phantom
+    objects the VL path exists to remove) and no cfg or negative (H3 is CFG-free).
+
+    Stage order inside refine() is load-bearing, not incidental: the 32B text encoder runs
+    on ~11 upscaled 2 fps picks and is gone BEFORE the full-clip canvases are allocated.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        import comfy.samplers
+
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "The clip to upscale and then refine, as the frames of ONE video at H3's native 24 fps (from VAE Decode, or Get Video Components). Frame counts off the model's 17k+5 grid are repeat-padded internally and trimmed back, so the output frame count always matches this input."}),
+                "model": ("MODEL", {"tooltip": "The MiniMax H3 diffusion model used to denoise each tile."}),
+                "clip": ("CLIP", {"tooltip": "The workflow's CLIP — must be the MiniMax H3 text encoder. The whole upscaled clip is sampled at 2 fps and encoded ONCE through its vision path, and each tile's positive conditioning becomes its slice of that encode. There is no prompt input: the encode runs on an empty prompt because any text re-admits phantom objects."}),
+                "vae": ("VAE", {"tooltip": "The MiniMax H3 VAE used to encode each tile for sampling and decode the result."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Seed for the noise. Noise is drawn once for the whole canvas and sliced per tile, so a tile's noise does not change when the grid does."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "res_multistep", "tooltip": "The sampler used to denoise each tile. res_multistep is the A/B-settled default for H3."}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "simple", "tooltip": "The sigma schedule used when sampling each tile."}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 10000, "tooltip": "Sampling steps per tile. As in BasicScheduler, the schedule is built for steps/denoise steps and only the last steps+1 sigmas are used. 8 is settled independently of denoise: fewer steps inside the window visibly under-integrate at low denoise."}),
+                "denoise": ("FLOAT", {"default": 0.22, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much of the schedule to run per tile: higher values rewrite more of the clip, lower values keep more of the upscaled pixels. 0.22 is the owner-approved working point. 0.0 skips diffusion entirely and returns the upscale alone."}),
+                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Target scale for the whole-clip upscale stage that runs before any tiling. The optional upscale_model runs first and this factor sets the final size; 1.0 with no model leaves the input pixels untouched."}),
+                "max_tile_width": ("INT", {"default": 1408, "min": 256, "max": MAX_RESOLUTION, "step": 32, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. A crop this wide holds the WHOLE clip, so this is a VRAM ceiling, not a resolution one: 1408x1408 crops of a 124-frame clip are the validated ceiling on a 24 GB card."}),
+                "max_tile_height": ("INT", {"default": 1408, "min": 256, "max": MAX_RESOLUTION, "step": 32, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. A crop this tall holds the WHOLE clip, so this is a VRAM ceiling, not a resolution one: 1408x1408 crops of a 124-frame clip are the validated ceiling on a 24 GB card."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 32, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge then cropped away. It carries the already-refined neighbours into this tile's conditioning. Always additive: the ring outside a tile core is context_overlap + context_anchor."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 32, "tooltip": "Inter-tile directional feather width (multi-tile runs only). Each tile is sampled oversized; on sides bordering an already-processed neighbour (top/left) this band is fully diffused from the same raw pixels by both tiles and feathered into that neighbour, elsewhere it is context, then cropped. Detailed scenes need LESS; large smooth gradients want more. 0 = hard seams."}),
+            },
+            "optional": {
+                "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model run over the whole clip before tiling. Its fixed integer scale rarely lands on upscale_by, so a single lanczos pass then takes the result to the exact target."}),
+                "av_latent": ("LATENT", {"tooltip": "The MiniMax H3 sampler's AV LATENT for THIS clip. Connected, its audio stream is the frozen soundtrack every tile samples against — the configuration every full-video test validated, and recommended whenever the frames came from the H3 sampler. Unconnected, a silent zero audio latent stands in: clean in the single-frame runs, but never validated at full video scale. Its length must match the frame count."}),
+            },
+        }
+
+    @classmethod
+    def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
+        # Same reasoning as the image node's /8 check (widget steps are UI-only, an
+        # API-submitted workflow can send arbitrary INTs), on H3's coarser grid: every
+        # sampled crop must be a multiple of 32 (VAE spatial factor 16 x DiT patch 2), and
+        # each of these four widths feeds a crop dimension directly.
+        checks = (
+            ("max_tile_width", max_tile_width, 256, MAX_RESOLUTION),
+            ("max_tile_height", max_tile_height, 256, MAX_RESOLUTION),
+            ("context_anchor", context_anchor, 0, 512),
+            ("context_overlap", context_overlap, 0, 512),
+        )
+        for name, value, minimum, maximum in checks:
+            if value is None:
+                continue
+            if value % 32 != 0:
+                return "{} must be a multiple of 32, got {}".format(name, value)
+            if value < minimum or value > maximum:
+                return "{} must be between {} and {}, got {}".format(name, minimum, maximum, value)
+        return True
+
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, av_latent=None):
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        import comfy.samplers
+        from . import sampling, upscale, video, vl_video
+
+        audio_latent = None
+        picks = None
+        stamps = None
+        vl_pack = None
+        upscaled = None
+        placeholder = None
+        guider = None
+        sigmas = None
+        sampler = None
+
+        _validate_image(image)
+        # The target size is known before any pixel moves (prepare_upscaled always lands on
+        # scale_target), so the too-small case is rejected here rather than after a full-clip
+        # upscale. Below 32px an axis cannot carry even one /32 crop, and the reflect pad
+        # (which needs pad < dim) would raise naming neither this node nor upscale_by.
+        target_width, target_height = upscale.scale_target(int(image.shape[2]), int(image.shape[1]), upscale_by)
+        if target_height < video.CANVAS_MULTIPLE or target_width < video.CANVAS_MULTIPLE:
+            raise ValueError("upscale_by {} takes the {}x{} input to {}x{}; the upscaled clip must be at least {}x{} pixels".format(
+                upscale_by, image.shape[1], image.shape[2], target_height, target_width, video.CANVAS_MULTIPLE, video.CANVAS_MULTIPLE))
+        audio_latent = _unpack_av_latent(av_latent)
+
+        # STAGE ORDER IS THE HARD CONSTRAINT HERE, not a preference: the 32B text encoder
+        # must never be resident while the full-clip canvases exist (two spike runs died at
+        # exactly that RAM bracket — tests-AB/spike_h3_stress.py:437-440). So the conditioning
+        # is encoded from the ~11 2 fps picks ALONE, brought to canvas geometry by the same
+        # model + lanczos + reflect pad the canvas will get. Every one of those ops is
+        # per-frame, which is what makes pick-then-upscale identical to upscale-then-pick and
+        # lets the encode grid map onto rects the tiles have not been cut from yet.
+        picks, stamps = vl_video.sample_conditioning_frames(image)
+        picks = upscale.prepare_upscaled(picks, upscale_model, upscale_by)
+        picks, _ = sampling.pad_image_to_multiple(picks, video.CANVAS_MULTIPLE)
+        vl_pack = vl_video.encode_global(clip, picks, stamps)
+        del picks           # dropped before the canvases claim the RAM the picks are holding
+
+        # Only now do the full-clip canvases exist.
+        upscaled = upscale.prepare_upscaled_video(image, upscale_model, upscale_by)
+        # The positive placeholder is the whole-clip encode itself, not a second CLIP load:
+        # video.py replaces it with the tile's own row slice on every sample() call, and the
+        # guider only ever needs `positive` to BE in original_conds.
+        placeholder = [[vl_pack.cond, {"minimax_token_tags": vl_pack.tags}]]
+        guider = upscale.build_basic_guider(model, placeholder)
+        sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
+        sampler = comfy.samplers.sampler_object(sampler_name)
+
+        return (video.refine_video(upscaled, guider, sampler, sigmas, vae, seed, max_tile_width, max_tile_height, context_anchor, context_overlap, vl_pack, audio_latent=audio_latent),)
