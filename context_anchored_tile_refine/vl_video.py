@@ -132,7 +132,7 @@ def encode_global(clip, picks, stamps):
     except TypeError as error:
         raise RuntimeError(
             "VL video refine: this CLIP's tokenizer does not accept minimax_ref_items. "
-            "The node needs the MiniMax H3 CLIP. ({})".format(error)) from error
+            f"The node needs the MiniMax H3 CLIP. ({error})") from error
     layout, total_rows = token_layout(tokens, rows_per_block)
     if not any(kind == "grid" for kind, _ in layout):
         # Core tokenizers swallow unknown kwargs (comfy/sd.py CLIP.tokenize -> **kwargs), so
@@ -154,8 +154,8 @@ def encode_global(clip, picks, stamps):
 
     if len(encoded) != 1:
         raise RuntimeError(
-            "VL video refine: the scheduled encode returned {} sections, expected 1. A "
-            "hook-scheduled CLIP cannot be sliced per tile.".format(len(encoded)))
+            f"VL video refine: the scheduled encode returned {len(encoded)} sections, expected 1. A "
+            "hook-scheduled CLIP cannot be sliced per tile.")
     cond, extras = encoded[0][0], dict(encoded[0][1])
     if cond.shape[1] != total_rows:
         raise RuntimeError(
@@ -169,9 +169,8 @@ def encode_global(clip, picks, stamps):
     tags = extras.get("minimax_token_tags")
     if tags is None or int(tags.shape[0]) != total_rows:
         raise RuntimeError(
-            "VL video refine: minimax_token_tags is missing or misaligned ({} vs {} rows). "
-            "The node needs the MiniMax H3 CLIP.".format(
-                None if tags is None else int(tags.shape[0]), total_rows))
+            f"VL video refine: minimax_token_tags is missing or misaligned ({None if tags is None else int(tags.shape[0])} vs {total_rows} rows). "
+            "The node needs the MiniMax H3 CLIP.")
     return GlobalEncode(cond, tags, layout, enc_h, enc_w, extras)
 
 

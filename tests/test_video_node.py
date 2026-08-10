@@ -11,7 +11,7 @@ import inspect
 import pytest
 import torch
 
-from context_anchored_tile_refine import sampling, upscale, video, vl_video
+from context_anchored_tile_refine import upscale, video, vl_video
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVLVideo
 
 REQUIRED_ORDER = [
@@ -219,7 +219,7 @@ def test_widget_options_exact(comfy_stubs):
     for name, expected in WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
+            assert options[key] == value, f"{name}[{key}]"
 
 
 def test_combo_inputs_come_from_comfy_samplers(comfy_stubs):
@@ -277,7 +277,7 @@ def test_refine_signature_matches_input_names(comfy_stubs):
     # TypeError at execution time, which this catches at test time instead.
     input_types = ContextAnchoredTileUpscaleVLVideo.INPUT_TYPES()
     parameters = list(inspect.signature(ContextAnchoredTileUpscaleVLVideo.refine).parameters)
-    assert parameters == ["self"] + list(input_types["required"]) + list(input_types["optional"])
+    assert parameters == ["self", *input_types["required"], *input_types["optional"]]
 
 
 # --- VALIDATE_INPUTS ------------------------------------------------------------------

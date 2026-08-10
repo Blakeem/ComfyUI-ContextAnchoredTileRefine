@@ -7,6 +7,7 @@ import sys
 import types
 import uuid
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import torch
@@ -38,19 +39,19 @@ def _resolve_comfyui_root():
         if (path / "comfy").is_dir():
             return path, trace
         raise ValueError(
-            "COMFYUI_ROOT={} does not contain a 'comfy' directory".format(env_root)
+            f"COMFYUI_ROOT={env_root} does not contain a 'comfy' directory"
         )
     trace.append("COMFYUI_ROOT env var: not set")
 
     standard_root = REPO_ROOT.parent.parent.resolve()
     if (standard_root / "comfy").is_dir():
         return standard_root, trace
-    trace.append("standard layout {}: no 'comfy' directory".format(standard_root))
+    trace.append(f"standard layout {standard_root}: no 'comfy' directory")
 
     for desktop_root in DESKTOP_COMFYUI_ROOTS:
         if (desktop_root / "comfy").is_dir():
             return desktop_root, trace
-        trace.append("Desktop install {}: no 'comfy' directory".format(desktop_root))
+        trace.append(f"Desktop install {desktop_root}: no 'comfy' directory")
 
     return None, trace
 
@@ -66,7 +67,7 @@ def comfy_env():
     if root is None:
         pytest.skip(
             "ComfyUI root not found. Checked:\n"
-            + "\n".join("  - {}".format(step) for step in trace)
+            + "\n".join(f"  - {step}" for step in trace)
         )
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -77,9 +78,9 @@ def comfy_env():
     origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
     if origin is None or origin.parent != (root / "comfy").resolve():
         pytest.skip(
-            "A different 'comfy' package shadows the ComfyUI source at {} "
-            "(comfy.samplers resolved to: {}). Set COMFYUI_ROOT or remove the "
-            "conflicting package.".format(root, origin)
+            f"A different 'comfy' package shadows the ComfyUI source at {root} "
+            f"(comfy.samplers resolved to: {origin}). Set COMFYUI_ROOT or remove the "
+            "conflicting package."
         )
     return root
 
@@ -194,8 +195,8 @@ def comfy_stubs(monkeypatch):
     class StubKSampler:
         # Only the two combo lists node.py's INPUT_TYPES reads. Short on purpose, but they
         # must contain every default the node declares or the widget would be invalid.
-        SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "ddim", "res_multistep"]
-        SCHEDULERS = ["normal", "karras", "simple", "sgm_uniform", "beta"]
+        SAMPLERS: ClassVar[list[str]] = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "ddim", "res_multistep"]
+        SCHEDULERS: ClassVar[list[str]] = ["normal", "karras", "simple", "sgm_uniform", "beta"]
 
     samplers_module.KSampler = StubKSampler
 

@@ -47,15 +47,14 @@ import ab_env  # noqa: E402
 
 if "COMFYUI_ROOT" not in os.environ:
     if not (H3_ROOT / "comfy" / "ldm" / "minimax" / "model.py").is_file():
-        raise SystemExit("No MiniMax H3 support at {} — set COMFYUI_ROOT".format(H3_ROOT))
+        raise SystemExit(f"No MiniMax H3 support at {H3_ROOT} — set COMFYUI_ROOT")
     os.environ["COMFYUI_ROOT"] = str(H3_ROOT)
 
 ROOT, ROOT_NOTE = ab_env.bootstrap()
 
+import ab_models  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-
-import ab_models  # noqa: E402
 
 # ------------------------------------------------------------------ CONFIG
 
@@ -133,10 +132,10 @@ def save_outputs(label, frames, settings):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for index in (0, frames.shape[0] // 2, frames.shape[0] - 1):
         ab_models.save_png(
-            OUTPUT_DIR / "H3_{}_f{:03d}.png".format(label, index),
+            OUTPUT_DIR / f"H3_{label}_f{index:03d}.png",
             frames[index:index + 1], settings)
 
-    path = OUTPUT_DIR / "H3_{}.mp4".format(label)
+    path = OUTPUT_DIR / f"H3_{label}.mp4"
     container = av.open(str(path), mode="w")
     stream = container.add_stream("libx264", rate=FPS)
     stream.width, stream.height = int(frames.shape[2]), int(frames.shape[1])
@@ -151,13 +150,12 @@ def save_outputs(label, frames, settings):
     for packet in stream.encode():
         container.mux(packet)
     container.close()
-    print("  wrote {}".format(path), flush=True)
+    print(f"  wrote {path}", flush=True)
 
 
 def latent_stats(tag, reference, candidate):
     diff = (candidate.float() - reference.float()).abs()
-    print("  {}: mean|d|={:.5f} max|d|={:.3f} ref_std={:.3f}".format(
-        tag, diff.mean().item(), diff.max().item(), reference.float().std().item()),
+    print(f"  {tag}: mean|d|={diff.mean().item():.5f} max|d|={diff.max().item():.3f} ref_std={reference.float().std().item():.3f}",
         flush=True)
 
 
@@ -168,14 +166,13 @@ def get_positive(force):
     Text-only, so it is canvas-size independent and shared by every refine run."""
     cache = ab_models.cache_path(CACHE_DIR, "h3spike", "cond", WIDTH, HEIGHT, BASE_KEY)
     if cache.is_file() and not force:
-        print("conditioning from cache: {}".format(cache.name), flush=True)
+        print(f"conditioning from cache: {cache.name}", flush=True)
         return torch.load(cache, weights_only=True)
 
     clip = ab_models.load_clip(CLIP_NAME, CLIP_TYPE)
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            positive = ab_models.encode_prompt(clip, PROMPT)
-    print("conditioning: {}".format(probe), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        positive = ab_models.encode_prompt(clip, PROMPT)
+    print(f"conditioning: {probe}", flush=True)
     del clip
     ab_models.free_gpu()
 
@@ -193,8 +190,7 @@ def empty_av_latent():
 
     latent, frame_count = _empty_av_latent(WIDTH, HEIGHT, LENGTH)
     if frame_count != LENGTH:
-        raise RuntimeError("LENGTH {} not on the 17k+5 grid (snapped to {})".format(
-            LENGTH, frame_count))
+        raise RuntimeError(f"LENGTH {LENGTH} not on the 17k+5 grid (snapped to {frame_count})")
     return latent
 
 
@@ -203,7 +199,7 @@ def render_base(positive, force):
     cache = ab_models.cache_path(CACHE_DIR, "h3spike", "base", WIDTH, HEIGHT, BASE_KEY)
     if cache.is_file() and not force:
         pair = torch.load(cache, weights_only=True)
-        print("base latents from cache: {}".format(cache.name), flush=True)
+        print(f"base latents from cache: {cache.name}", flush=True)
         return pair["video"], pair["audio"]
 
     model = ab_models.load_unet(UNET_NAME)
@@ -211,11 +207,10 @@ def render_base(positive, force):
     sigmas = ab_models.build_sigmas(model, SCHEDULER, STEPS, 1.0)
     sampler = ab_models.build_sampler(SAMPLER)
     noise = ab_models.build_noise(BASE_SEED)
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            out = ab_models.sample_custom_advanced(
-                noise, guider, sampler, sigmas, empty_av_latent())
-    print("base sample ({} steps): {}".format(STEPS, probe), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        out = ab_models.sample_custom_advanced(
+            noise, guider, sampler, sigmas, empty_av_latent())
+    print(f"base sample ({STEPS} steps): {probe}", flush=True)
     del guider, model
     ab_models.free_gpu()
 
@@ -223,23 +218,21 @@ def render_base(positive, force):
     video, audio = video.cpu(), audio.cpu()
     cache.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"video": video, "audio": audio}, cache)
-    print("cached base latents: {}".format(cache.name), flush=True)
+    print(f"cached base latents: {cache.name}", flush=True)
     return video, audio
 
 
 def decode_video(vae, video_latent):
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            frames = ab_models.vae_decode(vae, {"samples": video_latent})
-    print("decode: {}  -> frames {}".format(probe, tuple(frames.shape)), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        frames = ab_models.vae_decode(vae, {"samples": video_latent})
+    print(f"decode: {probe}  -> frames {tuple(frames.shape)}", flush=True)
     return frames
 
 
 def encode_video(vae, frames):
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            latent = vae.encode(frames)
-    print("encode: {}  -> latent {}".format(probe, tuple(latent.shape)), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        latent = vae.encode(frames)
+    print(f"encode: {probe}  -> latent {tuple(latent.shape)}", flush=True)
     return latent
 
 
@@ -257,10 +250,9 @@ def refine(model, positive, video_latent, audio_latent, denoise):
             (video_latent.clone(), audio_latent.clone())),
         "noise_mask": frozen_audio_mask(video_latent, audio_latent),
     }
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
-    print("refine d={} ({} steps): {}".format(denoise, steps, probe), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
+    print(f"refine d={denoise} ({steps} steps): {probe}", flush=True)
     del guider
     video, _ = out["samples"].unbind()
     return video.cpu()
@@ -274,9 +266,8 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    print("ComfyUI root: {} ({}) version {}".format(
-        ROOT, ROOT_NOTE, ab_env.version(ROOT)), flush=True)
-    tag = "d{:02.0f}".format(args.denoise * 100)
+    print(f"ComfyUI root: {ROOT} ({ROOT_NOTE}) version {ab_env.version(ROOT)}", flush=True)
+    tag = f"d{args.denoise * 100:02.0f}"
     settings = dict(BASE_KEY, denoise=args.denoise, refine_seed=REFINE_SEED,
                     up_w=UP_W, up_h=UP_H)
     # base/upscaled/up_roundtrip run no refine: they must not carry args.denoise or
@@ -299,8 +290,7 @@ def main():
     up_latent = encode_video(vae, up_frames)
     expected = (1, 24, base_video.shape[2], UP_H // 16, UP_W // 16)
     if tuple(up_latent.shape) != expected:
-        raise RuntimeError("upscaled latent {} != expected {}".format(
-            tuple(up_latent.shape), expected))
+        raise RuntimeError(f"upscaled latent {tuple(up_latent.shape)} != expected {expected}")
     up_latent = up_latent.cpu()
     del up_frames
     ab_models.clear_cache()
@@ -317,12 +307,12 @@ def main():
     ab_models.free_gpu()
 
     latent_stats("refine_up latent vs its input", up_latent, up_video)
-    save_outputs("refine_pure_{}".format(tag), decode_video(vae, pure_video),
+    save_outputs(f"refine_pure_{tag}", decode_video(vae, pure_video),
                  dict(settings, run_label="refine_pure"))
-    save_outputs("refine_up_{}".format(tag), decode_video(vae, up_video),
+    save_outputs(f"refine_up_{tag}", decode_video(vae, up_video),
                  dict(settings, run_label="refine_up"))
 
-    print("done. A/B in {}".format(OUTPUT_DIR), flush=True)
+    print(f"done. A/B in {OUTPUT_DIR}", flush=True)
     print(json.dumps(settings, indent=1, sort_keys=True), flush=True)
 
 

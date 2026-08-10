@@ -196,7 +196,7 @@ def test_encode_global_rejects_a_multi_section_schedule(h3_stubs):
 
 
 def test_encode_global_rejects_a_row_count_the_layout_does_not_explain(h3_stubs):
-    with pytest.raises(RuntimeError, match="has 22 rows, expected {}".format(TOTAL_ROWS)):
+    with pytest.raises(RuntimeError, match=f"has 22 rows, expected {TOTAL_ROWS}"):
         vl_video.encode_global(FakeH3Clip(seq_delta=3), _picks(), [0.0, 0.5])
 
 
@@ -206,7 +206,7 @@ def test_encode_global_rejects_missing_token_tags(h3_stubs):
 
 
 def test_encode_global_rejects_misaligned_token_tags(h3_stubs):
-    with pytest.raises(RuntimeError, match="18 vs {} rows".format(TOTAL_ROWS)):
+    with pytest.raises(RuntimeError, match=f"18 vs {TOTAL_ROWS} rows"):
         vl_video.encode_global(FakeH3Clip(tags="short"), _picks(), [0.0, 0.5])
 
 

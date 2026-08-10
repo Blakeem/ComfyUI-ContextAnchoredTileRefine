@@ -55,9 +55,9 @@ def prepare_hint_canvas(original_conds, image_size, bbox=None):
                 # Fail fast: a hint that is not the image being refined is a wiring mistake,
                 # and core's fallback (proportional stretch) would silently misalign it.
                 raise ValueError(
-                    "ContextAnchoredTileRefine: the ControlNet hint is {}x{} (HxW) but the "
-                    "image being refined is {}x{}. Feed the control preprocessor the same "
-                    "upscaled image this node refines.".format(hint_h, hint_w, height, width)
+                    f"ContextAnchoredTileRefine: the ControlNet hint is {hint_h}x{hint_w} (HxW) but the "
+                    f"image being refined is {height}x{width}. Feed the control preprocessor the same "
+                    "upscaled image this node refines."
                 )
             canvas[id(hint)] = _slice_bbox(hint, bbox)
         for extra in getattr(control, "extra_concat_orig", None) or ():

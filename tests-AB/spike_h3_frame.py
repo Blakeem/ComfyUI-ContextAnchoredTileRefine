@@ -32,12 +32,10 @@ import json
 
 faulthandler.enable()
 
-import spike_h3 as poc  # bootstraps the ComfyUI env (aimdo + memory flags)
-import spike_h3_stress as stress
-
-import torch
-
-import ab_models
+import ab_models  # noqa: E402
+import spike_h3 as poc  # noqa: E402  (bootstraps the ComfyUI env: aimdo + memory flags)
+import spike_h3_stress as stress  # noqa: E402
+import torch  # noqa: E402
 
 OUTPUT_DIR = poc.OUTPUT_DIR
 CACHE_DIR = poc.CACHE_DIR
@@ -89,33 +87,31 @@ def encode_image_vl(frame_up, force):
     cache = ab_models.cache_path(CACHE_DIR, "h3frame", "vlimg", UP_W, UP_H, FRAME_KEY)
     if cache.is_file() and not force:
         payload = torch.load(cache, weights_only=True)
-        print("VL image encode from cache: {}".format(cache.name), flush=True)
+        print(f"VL image encode from cache: {cache.name}", flush=True)
         return payload["cond"], payload["tags"], payload["layout"]
 
     ab_models.free_gpu()
     print("VL image encode: loading 32B encoder...", flush=True)
     clip = ab_models.load_clip(poc.CLIP_NAME, poc.CLIP_TYPE)
     rows_per_block = (UP_H // 32) * (UP_W // 32)
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            tokens = clip.tokenize("", images=[frame_up])
-            layout = []
-            pos = 0
-            for entry in tokens["qwen3vl_32b"][0]:
-                if isinstance(entry[0], dict):
-                    layout.append(("grid", pos))
-                    pos += rows_per_block
-                else:
-                    layout.append(("text", pos))
-                    pos += 1
-            encoded = clip.encode_from_tokens_scheduled(tokens)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        tokens = clip.tokenize("", images=[frame_up])
+        layout = []
+        pos = 0
+        for entry in tokens["qwen3vl_32b"][0]:
+            if isinstance(entry[0], dict):
+                layout.append(("grid", pos))
+                pos += rows_per_block
+            else:
+                layout.append(("text", pos))
+                pos += 1
+        encoded = clip.encode_from_tokens_scheduled(tokens)
     if len(encoded) != 1:
-        raise RuntimeError("scheduled encode returned {} sections".format(len(encoded)))
+        raise RuntimeError(f"scheduled encode returned {len(encoded)} sections")
     cond, extras = encoded[0][0], encoded[0][1]
-    print("VL image encode: {} ({} rows)".format(probe, pos), flush=True)
+    print(f"VL image encode: {probe} ({pos} rows)", flush=True)
     if cond.shape[1] != pos:
-        raise RuntimeError("VL image encode has {} rows, expected {}".format(
-            cond.shape[1], pos))
+        raise RuntimeError(f"VL image encode has {cond.shape[1]} rows, expected {pos}")
     tags = extras.get("minimax_token_tags")
     if tags is None or int(tags.shape[0]) != pos:
         raise RuntimeError("minimax_token_tags missing or misaligned")
@@ -155,8 +151,7 @@ def generate_caption(clip, vl_input):
     ids = clip.generate(tokens, do_sample=False, max_length=512, repetition_penalty=1.05)
     text = clip.decode(ids).strip()
     if not _usable(text):
-        print("[caption] unusable answer (raw: {!r}); trying fallbacks".format(
-            clip.decode(ids, skip_special_tokens=False)[:120]), flush=True)
+        print(f"[caption] unusable answer (raw: {clip.decode(ids, skip_special_tokens=False)[:120]!r}); trying fallbacks", flush=True)
         ids = clip.generate(tokens, do_sample=True, max_length=512, temperature=0.7,
                             top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
         text = clip.decode(ids).strip()
@@ -166,8 +161,7 @@ def generate_caption(clip, vl_input):
         ids = clip.generate(retokens, do_sample=False, max_length=512, repetition_penalty=1.05)
         text = clip.decode(ids).strip()
     if not _usable(text):
-        raise RuntimeError("caption generation: unusable after fallbacks (raw: {!r})".format(
-            clip.decode(ids, skip_special_tokens=False)[:120]))
+        raise RuntimeError(f"caption generation: unusable after fallbacks (raw: {clip.decode(ids, skip_special_tokens=False)[:120]!r})")
     return text
 
 
@@ -183,11 +177,11 @@ def build_caption_arms(frame_up, up, force):
     key = dict(FRAME_KEY, rects=rects, instruction=CAPTION_INSTRUCTION,
                captioner=CAPTIONER_CLIP_NAME)
     digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]
-    caption_cache = CACHE_DIR / "h3frame_captions_{}.json".format(digest)
+    caption_cache = CACHE_DIR / f"h3frame_captions_{digest}.json"
 
     if caption_cache.is_file() and not force:
         captions = json.loads(caption_cache.read_text(encoding="utf-8"))["captions"]
-        print("[caption] cache hit  {}".format(caption_cache.name), flush=True)
+        print(f"[caption] cache hit  {caption_cache.name}", flush=True)
     else:
         ab_models.free_gpu()
         captioner = ab_models.load_clip(CAPTIONER_CLIP_NAME, CAPTIONER_CLIP_TYPE)
@@ -204,7 +198,7 @@ def build_caption_arms(frame_up, up, force):
         caption_cache.write_text(json.dumps(dict(key, captions=captions), indent=1),
                                  encoding="utf-8")
     for index, caption in enumerate(captions):
-        print("[caption] tile {}: {}".format(index, caption), flush=True)
+        print(f"[caption] tile {index}: {caption}", flush=True)
 
     ab_models.free_gpu()
     clip = ab_models.load_clip(poc.CLIP_NAME, poc.CLIP_TYPE)
@@ -231,8 +225,7 @@ def build_caption_arms(frame_up, up, force):
             encoded = clip.encode_from_tokens_scheduled(tokens)
             cond, extras = encoded[0][0], encoded[0][1]
             if cond.shape[1] != pos:
-                raise RuntimeError("vlcap encode has {} rows, expected {}".format(
-                    cond.shape[1], pos))
+                raise RuntimeError(f"vlcap encode has {cond.shape[1]} rows, expected {pos}")
             tags = extras.get("minimax_token_tags")
             if tags is None or int(tags.shape[0]) != pos:
                 raise RuntimeError("vlcap minimax_token_tags missing or misaligned")
@@ -253,8 +246,8 @@ def refine_frame(model, vae, up, tile_positive_fn, denoise, noise_pack, audio_ze
                     (rect["crop"][3] - rect["crop"][1]) // 16,
                     (rect["crop"][2] - rect["crop"][0]) // 16)
         if tuple(z.shape) != expected:
-            raise RuntimeError("tile latent {} != expected {} — {}-frame encode drifted"
-                               .format(tuple(z.shape), expected, FRAMES))
+            raise RuntimeError(f"tile latent {tuple(z.shape)} != expected {expected} — {FRAMES}-frame encode drifted"
+                               )
         del crop
         refined = stress.refine_tile(
             model, tile_positive, z, audio_zeros,
@@ -283,15 +276,14 @@ def main():
     args = parser.parse_args()
 
     version = poc.ab_env.version(poc.ROOT)
-    print("ComfyUI root: {} ({}) version {}".format(
-        poc.ROOT, poc.ROOT_NOTE, version), flush=True)
+    print(f"ComfyUI root: {poc.ROOT} ({poc.ROOT_NOTE}) version {version}", flush=True)
 
     vae = ab_models.load_vae(poc.VAE_NAME)
     up = upscaled_clip(vae)
     ab_models.save_png(OUTPUT_DIR / "H3F_upscaled.png", up[FRAME_INDEX:FRAME_INDEX + 1],
                        dict(FRAME_KEY, run_label="upscaled", conditioning="n/a",
                             comfyui_version=version))
-    print("upscaled clip ready {}".format(tuple(up.shape)), flush=True)
+    print(f"upscaled clip ready {tuple(up.shape)}", flush=True)
 
     text_positive = poc.get_positive(args.force)
     vl_pack = encode_image_vl(up[FRAME_INDEX:FRAME_INDEX + 1], args.force)
@@ -320,7 +312,7 @@ def main():
             with ab_models.VramProbe() as probe:
                 refined = refine_frame(model, vae, up, providers[arm], denoise,
                                        noise_pack, audio_zeros)
-            label = "H3F_{}_d{:02.0f}".format(arm, denoise * 100)
+            label = f"H3F_{arm}_d{denoise * 100:02.0f}"
             settings = dict(FRAME_KEY, run_label=label,
                             conditioning=conditioning_labels[arm], denoise=denoise,
                             denoise_effective=effective, refine_seed=poc.REFINE_SEED,
@@ -330,12 +322,12 @@ def main():
             ab_models.save_png(
                 OUTPUT_DIR / (label + ".png"), refined[FRAME_INDEX:FRAME_INDEX + 1],
                 settings)
-            print("{}: {}  (effective denoise {})".format(label, probe, effective),
+            print(f"{label}: {probe}  (effective denoise {effective})",
                   flush=True)
             del refined
     del model
     ab_models.free_gpu()
-    print("done. sweep in {}".format(OUTPUT_DIR), flush=True)
+    print(f"done. sweep in {OUTPUT_DIR}", flush=True)
     print(json.dumps({"denoises": args.denoises, "frame": FRAME_INDEX}), flush=True)
 
 

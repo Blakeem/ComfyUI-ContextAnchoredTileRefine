@@ -48,12 +48,10 @@ import os
 
 faulthandler.enable()  # native-crash stack into the log (two runs died with SIGSEGV)
 
-import spike_h3 as poc  # module import runs the ComfyUI bootstrap
-
-import numpy as np
-import torch
-
-import ab_models
+import ab_models  # noqa: E402
+import numpy as np  # noqa: E402
+import spike_h3 as poc  # noqa: E402  (module import runs the ComfyUI bootstrap)
+import torch  # noqa: E402
 
 # ------------------------------------------------------------------ CONFIG
 
@@ -80,8 +78,8 @@ def save_video_atomic(label, frames, settings):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     save_frame_pngs(label, frames, settings)
 
-    final = OUTPUT_DIR / "H3S_{}.mp4".format(label)
-    tmp = OUTPUT_DIR / "H3S_{}.tmp".format(label)
+    final = OUTPUT_DIR / f"H3S_{label}.mp4"
+    tmp = OUTPUT_DIR / f"H3S_{label}.tmp"
     container = av.open(str(tmp), mode="w", format="mp4")
     stream = container.add_stream("libx264", rate=FPS)
     stream.width, stream.height = int(frames.shape[2]), int(frames.shape[1])
@@ -97,13 +95,13 @@ def save_video_atomic(label, frames, settings):
         container.mux(packet)
     container.close()
     os.replace(tmp, final)
-    print("  wrote {}".format(final), flush=True)
+    print(f"  wrote {final}", flush=True)
 
 
 def save_frame_pngs(label, frames, settings):
     for index in (0, frames.shape[0] // 2, frames.shape[0] - 1):
         ab_models.save_png(
-            OUTPUT_DIR / "H3S_{}_f{:03d}.png".format(label, index),
+            OUTPUT_DIR / f"H3S_{label}_f{index:03d}.png",
             frames[index:index + 1], settings)
 
 
@@ -208,7 +206,7 @@ def encode_global_vl(picks, stamps, force):
     cache = ab_models.cache_path(CACHE_DIR, "h3stress", "vlcond", UP_W, UP_H, STRESS_KEY)
     if cache.is_file() and not force:
         payload = torch.load(cache, weights_only=True)
-        print("VL global encode from cache: {}".format(cache.name), flush=True)
+        print(f"VL global encode from cache: {cache.name}", flush=True)
         return payload["cond"], payload["tags"], payload["layout"]
 
     import comfy.model_management
@@ -224,31 +222,28 @@ def encode_global_vl(picks, stamps, force):
         clip = ab_models.load_clip(poc.CLIP_NAME, poc.CLIP_TYPE)
         items = [{"type": "video", "data": picks, "timestamps": stamps}]
         rows_per_block = (UP_H // 32) * (UP_W // 32)
-        with ab_models.VramProbe() as probe:
-            with torch.inference_mode():
-                tokens = clip.tokenize("", minimax_ref_items=items)
-                layout = []
-                pos = 0
-                for entry in tokens["qwen3vl_32b"][0]:
-                    if isinstance(entry[0], dict):
-                        layout.append(("grid", pos))
-                        pos += rows_per_block
-                    else:
-                        layout.append(("text", pos))
-                        pos += 1
-                encoded = clip.encode_from_tokens_scheduled(tokens)
+        with ab_models.VramProbe() as probe, torch.inference_mode():
+            tokens = clip.tokenize("", minimax_ref_items=items)
+            layout = []
+            pos = 0
+            for entry in tokens["qwen3vl_32b"][0]:
+                if isinstance(entry[0], dict):
+                    layout.append(("grid", pos))
+                    pos += rows_per_block
+                else:
+                    layout.append(("text", pos))
+                    pos += 1
+            encoded = clip.encode_from_tokens_scheduled(tokens)
     finally:
         comfy.model_management.EXTRA_RESERVED_VRAM = saved_reserve
     if len(encoded) != 1:
-        raise RuntimeError("scheduled encode returned {} sections".format(len(encoded)))
+        raise RuntimeError(f"scheduled encode returned {len(encoded)} sections")
     cond, extras = encoded[0][0], encoded[0][1]
     blocks = sum(1 for kind, _ in layout if kind == "grid")
-    print("VL global encode: {} ({} rows, {} blocks)".format(
-        probe, pos, blocks), flush=True)
+    print(f"VL global encode: {probe} ({pos} rows, {blocks} blocks)", flush=True)
     if cond.shape[1] != pos:
         raise RuntimeError(
-            "VL encode has {} rows, expected {} — token layout drifted".format(
-                cond.shape[1], pos))
+            f"VL encode has {cond.shape[1]} rows, expected {pos} — token layout drifted")
     tags = extras.get("minimax_token_tags")
     if tags is None or int(tags.shape[0]) != pos:
         raise RuntimeError("minimax_token_tags missing or misaligned")
@@ -310,8 +305,7 @@ class SlicedNoise:
 
         expected = tuple(input_latent["samples"].unbind()[0].shape)
         if tuple(self._video.shape) != expected:
-            raise RuntimeError("noise slice {} != tile latent {}".format(
-                tuple(self._video.shape), expected))
+            raise RuntimeError(f"noise slice {tuple(self._video.shape)} != tile latent {expected}")
         return comfy.nested_tensor.NestedTensor(
             (self._video.clone(), self._audio.clone()))
 
@@ -333,10 +327,9 @@ def refine_tile(model, positive, video_latent, audio_latent, mask, denoise, nois
         "noise_mask": comfy.nested_tensor.NestedTensor(
             (mask, torch.zeros_like(audio_latent, device="cpu"))),
     }
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
-    print("  tile sample d={} ({} steps): {}".format(denoise, steps, probe), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
+    print(f"  tile sample d={denoise} ({steps} steps): {probe}", flush=True)
     del guider
     video, _ = out["samples"].unbind()
     return video
@@ -349,7 +342,7 @@ def render_base_full(positive, force):
     cache = ab_models.cache_path(CACHE_DIR, "h3stress", "base", BASE_W, BASE_H, STRESS_KEY)
     if cache.is_file() and not force:
         pair = torch.load(cache, weights_only=True)
-        print("base latents from cache: {}".format(cache.name), flush=True)
+        print(f"base latents from cache: {cache.name}", flush=True)
         return pair["video"], pair["audio"]
 
     # Cache miss on an arm that skipped the text cond: load it now, still in the early
@@ -365,10 +358,9 @@ def render_base_full(positive, force):
     sigmas = ab_models.build_sigmas(model, poc.SCHEDULER, poc.STEPS, 1.0)
     sampler = ab_models.build_sampler(poc.SAMPLER)
     noise = ab_models.build_noise(poc.BASE_SEED)
-    with ab_models.VramProbe() as probe:
-        with torch.inference_mode():
-            out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
-    print("base sample ({} steps): {}".format(poc.STEPS, probe), flush=True)
+    with ab_models.VramProbe() as probe, torch.inference_mode():
+        out = ab_models.sample_custom_advanced(noise, guider, sampler, sigmas, latent)
+    print(f"base sample ({poc.STEPS} steps): {probe}", flush=True)
     del guider, model
     ab_models.free_gpu()
 
@@ -397,8 +389,7 @@ def main():
 
     import comfy.utils
 
-    print("ComfyUI root: {} ({}) version {}".format(
-        poc.ROOT, poc.ROOT_NOTE, poc.ab_env.version(poc.ROOT)), flush=True)
+    print(f"ComfyUI root: {poc.ROOT} ({poc.ROOT_NOTE}) version {poc.ab_env.version(poc.ROOT)}", flush=True)
     # BasicScheduler semantics land the true start point off the nominal denoise
     # (int() truncation in total_steps); record the effective value for the A/B notes.
     steps = args.refine_steps if args.refine_steps else max(1, round(poc.STEPS * args.denoise))
@@ -445,7 +436,7 @@ def main():
             picks = comfy.utils.common_upscale(
                 picks.movedim(-1, 1), UP_W, UP_H, "lanczos", "disabled"
             ).movedim(1, -1).to(torch.float16).contiguous()
-        print("VL picks upscaled: {}".format(tuple(picks.shape)), flush=True)
+        print(f"VL picks upscaled: {tuple(picks.shape)}", flush=True)
         # Evict the VAE before the 32B encoder loads; every other model swap in this
         # harness brackets itself the same way instead of trusting comfy's estimate.
         ab_models.free_gpu()
@@ -487,8 +478,7 @@ def main():
                     (rect["crop"][3] - rect["crop"][1]) // 16,
                     (rect["crop"][2] - rect["crop"][0]) // 16)
         if tuple(z.shape) != expected:
-            raise RuntimeError("tile latent {} != expected {}".format(
-                tuple(z.shape), expected))
+            raise RuntimeError(f"tile latent {tuple(z.shape)} != expected {expected}")
         refined = refine_tile(model, tile_positive, z, base_audio,
                               anchor_mask(z, rect), args.denoise,
                               SlicedNoise(poc.REFINE_SEED, noise_pack, rect),
@@ -519,8 +509,7 @@ def main():
     label = "refined_{}d{:02.0f}".format("vl_" if args.vl else "", args.denoise * 100)
     save_video_atomic(label, live, dict(settings, run_label=label))
 
-    print("done. compare H3S_upscaled_fNNN.png vs H3S_refined_*_fNNN.png in {}".format(
-        OUTPUT_DIR), flush=True)
+    print(f"done. compare H3S_upscaled_fNNN.png vs H3S_refined_*_fNNN.png in {OUTPUT_DIR}", flush=True)
     print(json.dumps(settings, indent=1, sort_keys=True), flush=True)
 
 

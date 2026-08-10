@@ -10,10 +10,10 @@ import sys
 
 import pytest
 import torch
-
-from context_anchored_tile_refine import grid, sampling, video, vl_video
 from test_sampling import fake_model_patcher
 from test_tiling import RecordingPreviewer
+
+from context_anchored_tile_refine import grid, sampling, video, vl_video
 
 CANVAS_W, CANVAS_H = 192, 256
 CAP_W, CAP_H = 160, 192
@@ -229,7 +229,7 @@ def test_unaligned_canvas_is_padded_to_32_and_cropped_back(video_stubs):
     # 224x176 pads to 224x192; the output must come back at the caller's size.
     frames = _frames(height=224, width=176)
 
-    out, guider, vae = _run(frames)
+    out, _guider, vae = _run(frames)
 
     assert vae.encode_calls[0].shape[2] % 32 == 0
     assert out.shape == (FRAMES, 224, 176, 3)
@@ -265,7 +265,7 @@ def test_denoise_zero_returns_the_clip_untouched(video_stubs):
 def test_every_canvas_pixel_is_painted_and_a_hard_core_owns_it(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    out, _guider, _vae = _run(frames)
 
     # Zero unpainted pixels: the cores tile the canvas exactly, and every raw value is < 1.0
     # while every tile fill is >= 2.0.
@@ -292,7 +292,7 @@ def test_every_canvas_pixel_is_painted_and_a_hard_core_owns_it(video_stubs):
 def test_bands_encode_from_raw_while_the_anchor_ring_reads_the_live_canvas(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, _guider, vae = _run(frames)
 
     raw = frames.to(torch.float16)
     crop = TOP_RIGHT.crop_rect              # (32,0)-(192,192); anchor ring = cols 32..63
@@ -313,7 +313,7 @@ def test_bands_encode_from_raw_while_the_anchor_ring_reads_the_live_canvas(video
 def test_the_first_tile_encodes_the_raw_canvas(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, _guider, vae = _run(frames)
 
     crop = TOP_LEFT.crop_rect
     assert torch.equal(vae.encode_calls[0],
@@ -324,7 +324,7 @@ def test_canvases_are_fp16_and_the_input_is_never_mutated(video_stubs):
     frames = _frames()
     original = frames.clone()
 
-    out, guider, vae = _run(frames)
+    _out, _guider, vae = _run(frames)
 
     assert vae.encode_calls[0].dtype == torch.float16
     assert torch.equal(frames, original)
@@ -349,11 +349,11 @@ def test_noise_is_drawn_once_for_the_whole_canvas(video_stubs):
 def test_each_tile_gets_its_canvas_noise_slice(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, guider, _vae = _run(frames)
 
     canvas_noise = torch.arange(24 * LATENT_T * 16 * 12, dtype=torch.float32).reshape(
         1, 24, LATENT_T, CANVAS_H // 16, CANVAS_W // 16)
-    for tile, call in zip(LAYOUT.tiles, guider.calls):
+    for tile, call in zip(LAYOUT.tiles, guider.calls, strict=True):
         crop = tile.crop_rect
         expected = canvas_noise[..., crop.y0 // 16:crop.y1 // 16, crop.x0 // 16:crop.x1 // 16]
         assert torch.equal(call["video_noise"], expected)
@@ -363,7 +363,7 @@ def test_each_tile_gets_its_canvas_noise_slice(video_stubs):
 def test_the_audio_noise_is_the_same_draw_for_every_tile(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, guider, _vae = _run(frames)
 
     expected = torch.arange(32 * 2 * AUDIO_T, dtype=torch.float32).reshape(1, 32, 2, AUDIO_T)
     for call in guider.calls:
@@ -387,10 +387,10 @@ def test_a_latent_that_disagrees_with_its_noise_slice_fails_fast(video_stubs):
 def test_video_mask_is_the_binary_anchor_ring_over_every_latent_frame(video_stubs):
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, guider, _vae = _run(frames)
 
-    for tile, call in zip(LAYOUT.tiles, guider.calls):
-        video_mask, audio_mask = call["denoise_mask"].unbind()
+    for tile, call in zip(LAYOUT.tiles, guider.calls, strict=True):
+        video_mask, _audio_mask = call["denoise_mask"].unbind()
         gradient = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=16)
         assert video_mask.shape == (1, 1, LATENT_T, CAP_H // 16, CAP_W // 16)
         assert set(video_mask.unique().tolist()) <= {0.0, 1.0}
@@ -403,7 +403,7 @@ def test_the_top_left_tile_freezes_only_its_right_and_bottom_anchor_rings(video_
     # block is latent cells x 0..7, y 0..9; the two anchor rings are 2 cells (32px) wide.
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, guider, _vae = _run(frames)
 
     video_mask = guider.calls[0]["denoise_mask"].unbind()[0][0, 0, 0]
     expected = torch.zeros(CAP_H // 16, CAP_W // 16)
@@ -416,7 +416,7 @@ def test_the_audio_stream_is_frozen_for_every_tile(video_stubs):
     # regenerate the audio once per tile.
     frames = _frames()
 
-    out, guider, vae = _run(frames)
+    _out, guider, _vae = _run(frames)
 
     for call in guider.calls:
         audio_mask = call["denoise_mask"].unbind()[1]
@@ -429,7 +429,7 @@ def test_the_audio_stream_is_frozen_for_every_tile(video_stubs):
 def test_a_connected_audio_latent_rides_along_unchanged(video_stubs):
     audio = torch.full((1, 32, 2, AUDIO_T), 0.25)
 
-    out, guider, vae = _run(_frames(), audio_latent=audio)
+    _out, guider, _vae = _run(_frames(), audio_latent=audio)
 
     for call in guider.calls:
         assert torch.equal(call["audio_latent"], audio)
@@ -438,7 +438,7 @@ def test_a_connected_audio_latent_rides_along_unchanged(video_stubs):
 
 
 def test_an_unconnected_audio_latent_falls_back_to_silence(video_stubs):
-    out, guider, vae = _run(_frames())
+    _out, guider, _vae = _run(_frames())
 
     audio = guider.calls[0]["audio_latent"]
     assert audio.shape == (1, 32, 2, AUDIO_T)
@@ -482,7 +482,7 @@ def test_the_nested_latent_streams_share_the_encodes_device(video_stubs):
 def test_an_audio_latent_of_the_wrong_length_is_rejected(video_stubs):
     audio = torch.zeros(1, 32, 2, AUDIO_T + 3)
 
-    with pytest.raises(ValueError, match="audio length 11 does not match .* 5 frames need 8"):
+    with pytest.raises(ValueError, match=r"audio length 11 does not match .* 5 frames need 8"):
         _run(_frames(), audio_latent=audio)
 
 
@@ -490,7 +490,7 @@ def test_the_audio_length_is_checked_against_the_PADDED_frame_count(video_stubs)
     # 6 frames pad to 22, so the latent the H3 sampler made for 6 frames is the wrong one.
     audio = torch.zeros(1, 32, 2, video.audio_latent_length(22))
 
-    out, guider, vae = _run(_frames(count=6), audio_latent=audio)
+    _out, guider, _vae = _run(_frames(count=6), audio_latent=audio)
 
     assert guider.calls[0]["audio_latent"].shape[-1] == 37
     with pytest.raises(ValueError, match="22 frames need 37"):
@@ -502,9 +502,9 @@ def test_the_audio_length_is_checked_against_the_PADDED_frame_count(video_stubs)
 def test_each_tile_samples_with_its_own_vl_slice(video_stubs):
     pack = _vl_pack()
 
-    out, guider, vae = _run(_frames(), pack=pack)
+    _out, guider, _vae = _run(_frames(), pack=pack)
 
-    for tile, call in zip(LAYOUT.tiles, guider.calls):
+    for tile, call in zip(LAYOUT.tiles, guider.calls, strict=True):
         expected = vl_video.slice_rows(pack, tile.crop_rect, CANVAS_H, CANVAS_W)
         assert call["positive"][0]["cross_attn"].shape == expected[0]["cross_attn"].shape
         assert torch.equal(call["positive"][0]["cross_attn"], expected[0]["cross_attn"])
@@ -520,7 +520,7 @@ def test_the_pristine_conds_map_is_restored_after_every_tile(video_stubs):
     guider = VideoGuider(fill=1.0)
     pristine = guider.original_conds
 
-    out, _, _ = _run(_frames(), guider=guider)
+    _out, _, _ = _run(_frames(), guider=guider)
 
     assert guider.original_conds is pristine
     assert guider.original_conds["positive"] == ["base-positive"]
@@ -550,7 +550,7 @@ def test_interrupt_is_checked_once_per_tile(video_stubs):
 
 
 def test_progress_aggregates_across_tiles(video_stubs):
-    out, guider, vae = _run(_frames())
+    _out, guider, _vae = _run(_frames())
 
     (pbar,) = video_stubs["progress_bars"]
     assert pbar.total == 8      # 2 steps * 4 tiles

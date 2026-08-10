@@ -23,7 +23,7 @@ def _gradient_image():
 
 def test_sd15_whole_image_refine(comfy_env):
     if not CKPT.is_file():
-        pytest.skip("SD1.5 checkpoint not found: {}".format(CKPT))
+        pytest.skip(f"SD1.5 checkpoint not found: {CKPT}")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
 
@@ -73,7 +73,7 @@ def test_sd15_whole_image_refine(comfy_env):
 
 def test_sd15_masked_refine(comfy_env):
     if not CKPT.is_file():
-        pytest.skip("SD1.5 checkpoint not found: {}".format(CKPT))
+        pytest.skip(f"SD1.5 checkpoint not found: {CKPT}")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
 
@@ -134,7 +134,7 @@ def test_sd15_masked_refine(comfy_env):
 
 def test_sd15_grid_refine(comfy_env):
     if not CKPT.is_file():
-        pytest.skip("SD1.5 checkpoint not found: {}".format(CKPT))
+        pytest.skip(f"SD1.5 checkpoint not found: {CKPT}")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
 

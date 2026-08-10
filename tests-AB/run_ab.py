@@ -219,7 +219,7 @@ import ab_models  # noqa: E402
 
 
 def output_path(image, run):
-    return OUTPUT_DIR / "AB_{}__{}.png".format(image.label, run.label)
+    return OUTPUT_DIR / f"AB_{image.label}__{run.label}.png"
 
 
 def upscale_size():
@@ -262,7 +262,7 @@ class StageClock:
 
     def report(self):
         for label, seconds in self.entries:
-            print("[time]    {:<14} {:7.1f}s".format(label, seconds))
+            print(f"[time]    {label:<14} {seconds:7.1f}s")
         print("[time]    {:<14} {:7.1f}s".format("TOTAL", sum(s for _, s in self.entries)))
 
 
@@ -290,10 +290,10 @@ def forbid_vae_fallback():
     def refuse(name):
         def guard(self, *args, **kwargs):
             raise RuntimeError(
-                "VAE.{} was entered: ComfyUI fell back to tiled VAE because the regular path "
+                f"VAE.{name} was entered: ComfyUI fell back to tiled VAE because the regular path "
                 "ran out of memory. Tiled VAE adds its own per-tile DC drift (up to 6/255 vs "
                 "0.7/255 for whole decode), so this run would not measure what it claims. "
-                "Free VRAM (render one arm per process with --only) and retry.".format(name))
+                "Free VRAM (render one arm per process with --only) and retry.")
         return guard
 
     # These are the six leaf tiled methods in comfy/sd.py; the public decode_tiled/
@@ -310,7 +310,7 @@ def forbid_vae_fallback():
             "measurement from this harness.".format(", ".join(missing)))
     for name in required:
         setattr(comfy.sd.VAE, name, refuse(name))
-    print("[env]     tiled-VAE fallback armed to raise on {} entry points".format(len(required)))
+    print(f"[env]     tiled-VAE fallback armed to raise on {len(required)} entry points")
 
 
 # ------------------------------------------------------------------ stages
@@ -321,7 +321,7 @@ def stage_conditioning(images):
     conditioning PerpNeg wants is prompt-independent and is encoded once.
 
     Runs FIRST now, because the base generation (stage 2) consumes these conds."""
-    print("[clip]    loading {} ({})".format(CLIP_NAME, CLIP_TYPE))
+    print(f"[clip]    loading {CLIP_NAME} ({CLIP_TYPE})")
     with ab_models.VramProbe() as probe:
         clip = ab_models.load_clip(CLIP_NAME, CLIP_TYPE)
         empty = ab_models.encode_prompt(clip, "")
@@ -339,10 +339,10 @@ def stage_conditioning(images):
                 ab_models.encode_prompt(clip, positive),
                 ab_models.encode_prompt(clip, negative),
             )
-            print("[clip]    {:<9} prompts from {}: {!r}".format(image.label, origin, positive[:60]))
+            print(f"[clip]    {image.label:<9} prompts from {origin}: {positive[:60]!r}")
         del clip
     ab_models.free_gpu()
-    print("[clip]    encoded and released  {}".format(probe))
+    print(f"[clip]    encoded and released  {probe}")
     return conds, empty, prompts
 
 
@@ -374,9 +374,9 @@ def stage_base(images, conds, empty, prompts, force):
         if cached.is_file() and not force:
             tensor = torch.load(cached, map_location="cpu")
             ab_models.require_image_shape(tensor, BASE.height, BASE.width,
-                                          "cached base {}".format(image.label))
+                                          f"cached base {image.label}")
             bases[image.label] = tensor
-            print("[base]    {:<9} cache hit  {}".format(image.label, cached.name))
+            print(f"[base]    {image.label:<9} cache hit  {cached.name}")
         else:
             pending.append((image, cached))
 
@@ -385,38 +385,33 @@ def stage_base(images, conds, empty, prompts, force):
         return bases, None, None
 
     print("[base]    loading {}{}".format(
-        UNET_NAME, " + LoRA {} @ {}".format(BASE.lora_name, BASE.lora_strength) if BASE.lora_name else " (no LoRA)"))
+        UNET_NAME, f" + LoRA {BASE.lora_name} @ {BASE.lora_strength}" if BASE.lora_name else " (no LoRA)"))
     with ab_models.VramProbe() as probe:
         model = ab_models.load_unet(UNET_NAME)
         vae = ab_models.load_vae(VAE_NAME)
         # No LoRA -> generate from the same patcher the refine uses.
         patched = ab_models.load_lora_model_only(model, BASE.lora_name, BASE.lora_strength) if BASE.lora_name else model
-    print("[base]    loaded  {}".format(probe))
+    print(f"[base]    loaded  {probe}")
     fingerprint_before = ab_models.weight_fingerprint(model)
 
     for image, cached in pending:
-        print("[base]    {:<9} {}x{} seed {} {}/{} steps {} denoise {}".format(
-            image.label, BASE.width, BASE.height, BASE.seed,
-            BASE.sampler, BASE.scheduler, BASE.steps, BASE.denoise))
-        with ab_models.VramProbe() as probe:
-            with torch.inference_mode():
-                pixels = generate_base(patched, vae, conds[image.label], empty)
-        ab_models.require_image_shape(pixels, BASE.height, BASE.width, "base {}".format(image.label))
+        print(f"[base]    {image.label:<9} {BASE.width}x{BASE.height} seed {BASE.seed} {BASE.sampler}/{BASE.scheduler} steps {BASE.steps} denoise {BASE.denoise}")
+        with ab_models.VramProbe() as probe, torch.inference_mode():
+            pixels = generate_base(patched, vae, conds[image.label], empty)
+        ab_models.require_image_shape(pixels, BASE.height, BASE.width, f"base {image.label}")
         # detach() changes no values. The app runs the whole graph inside
         # torch.inference_mode() (execution.py), so its VAEDecode output carries no
         # autograd graph; this harness does not, and caching a grad-tracking tensor would
         # make the upscale model build a backward graph over a 3072x4096 intermediate.
         pixels = pixels.detach().cpu()
         stats = pixels.float()
-        print("[base]    {:<9} done  {}  dtype {}  min {:.4f} max {:.4f} mean {:.4f}".format(
-            image.label, probe, pixels.dtype,
-            float(stats.min()), float(stats.max()), float(stats.mean())))
+        print(f"[base]    {image.label:<9} done  {probe}  dtype {pixels.dtype}  min {float(stats.min()):.4f} max {float(stats.max()):.4f} mean {float(stats.mean()):.4f}")
         if not torch.isfinite(stats).all():
-            raise RuntimeError("base {}: non-finite pixels".format(image.label))
+            raise RuntimeError(f"base {image.label}: non-finite pixels")
         cached.parent.mkdir(parents=True, exist_ok=True)
         torch.save(pixels, cached)
         bases[image.label] = pixels
-        print("[base]    {:<9} cached  {}".format(image.label, cached.name))
+        print(f"[base]    {image.label:<9} cached  {cached.name}")
 
     # The LoRA'd clone shares node 185's nn.Module; dropping it and unloading restores the
     # base weights, exactly as ComfyUI does between the two branches of the graph.
@@ -425,11 +420,10 @@ def stage_base(images, conds, empty, prompts, force):
     ab_models.free_gpu()
     fingerprint_after = ab_models.weight_fingerprint(model)
     drift = abs(fingerprint_after - fingerprint_before)
-    print("[base]    LoRA released; DiT weight fingerprint {:.6e} -> {:.6e} (drift {:.3e})".format(
-        fingerprint_before, fingerprint_after, drift))
+    print(f"[base]    LoRA released; DiT weight fingerprint {fingerprint_before:.6e} -> {fingerprint_after:.6e} (drift {drift:.3e})")
     if drift > 1e-6 * max(abs(fingerprint_before), 1.0):
         raise RuntimeError("the LoRA wrote through to the shared DiT weights; refine would "
-                           "run a patched model (fingerprint drift {:.3e})".format(drift))
+                           f"run a patched model (fingerprint drift {drift:.3e})")
     return bases, model, vae
 
 
@@ -444,21 +438,20 @@ def stage_upscale(images, bases, prompts, force, env_note):
         _, cached = cache_paths(image, prompts)
         if cached.is_file() and not force:
             result = torch.load(cached, map_location="cpu")
-            print("[upscale] {:<9} cache hit  {}".format(image.label, cached.name))
+            print(f"[upscale] {image.label:<9} cache hit  {cached.name}")
         else:
             base = bases[image.label]
-            print("[upscale] {:<9} {}x{} -> 4x {} -> lanczos {}x{}".format(
-                image.label, base.shape[2], base.shape[1], UPSCALE_MODEL_NAME, target_w, target_h))
+            print(f"[upscale] {image.label:<9} {base.shape[2]}x{base.shape[1]} -> 4x {UPSCALE_MODEL_NAME} -> lanczos {target_w}x{target_h}")
             with ab_models.VramProbe() as probe:
                 result = ab_models.upscale_to(base, UPSCALE_MODEL_NAME, target_w, target_h).cpu()
             cached.parent.mkdir(parents=True, exist_ok=True)
             torch.save(result, cached)
-            print("[upscale] {:<9} done  {}  -> {}".format(image.label, probe, cached.name))
-        ab_models.require_image_shape(result, target_h, target_w, "upscale {}".format(image.label))
+            print(f"[upscale] {image.label:<9} done  {probe}  -> {cached.name}")
+        ab_models.require_image_shape(result, target_h, target_w, f"upscale {image.label}")
         upscaled[image.label] = result
 
     ab_models.free_gpu()
-    print("[upscale] upscale model released ({})".format(env_note))
+    print(f"[upscale] upscale model released ({env_note})")
     return upscaled
 
 
@@ -491,11 +484,10 @@ def render(image, run, pixels, conds, empty, model, vae, settings):
 
     # refine_image must be size-preserving; verify before the tensor reaches disk.
     ab_models.require_image_shape(result, target_h, target_w,
-                                  "refine {} {}".format(image.label, run.label))
+                                  f"refine {image.label} {run.label}")
     destination = output_path(image, run)
     written = ab_models.save_png(destination, result.cpu(), settings)
-    print("[render]  {:<9} {:<20} {}  -> {} {}x{}".format(
-        image.label, run.label, probe, destination.name, written[0], written[1]))
+    print(f"[render]  {image.label:<9} {run.label:<20} {probe}  -> {destination.name} {written[0]}x{written[1]}")
     return probe
 
 
@@ -509,11 +501,11 @@ def build_settings(image, run, prompts, pixels, env):
         "base_generation": dataclasses.asdict(BASE),
         "base_note": "regenerated in float from nodes 110/38/112 with the LoRA-patched "
                      "model; no 8-bit PNG round trip between base and upscale",
-        "base_size": "{}x{}".format(BASE.width, BASE.height),
-        "input_size": "{}x{}".format(pixels.shape[2], pixels.shape[1]),
+        "base_size": f"{BASE.width}x{BASE.height}",
+        "input_size": f"{pixels.shape[2]}x{pixels.shape[1]}",
         "upscale_model": UPSCALE_MODEL_NAME,
         "upscale_multiplier": UPSCALE_MULTIPLIER,
-        "upscale_note": "4x with model (tiled 512/32), then lanczos common_upscale to {}x".format(UPSCALE_MULTIPLIER),
+        "upscale_note": f"4x with model (tiled 512/32), then lanczos common_upscale to {UPSCALE_MULTIPLIER}x",
         "unet": UNET_NAME,
         "clip": CLIP_NAME,
         "clip_type": CLIP_TYPE,
@@ -543,32 +535,29 @@ def self_check(images, runs):
     state. Still a closeness check rather than equality — but a much tighter one, and a
     regression here means a real divergence, not quantization."""
     if not any(run.label == REFERENCE_RUN for run in runs):
-        print("[check]   {} not in this render set — skipped".format(REFERENCE_RUN))
+        print(f"[check]   {REFERENCE_RUN} not in this render set — skipped")
         return
     run = next(r for r in runs if r.label == REFERENCE_RUN)
-    print("\n[check]   {} vs the existing ComfyUI outputs".format(REFERENCE_RUN))
+    print(f"\n[check]   {REFERENCE_RUN} vs the existing ComfyUI outputs")
     for image in images:
         if not image.reference:
             continue
         reference = OUTPUT_DIR / image.reference
         produced = output_path(image, run)
         if not reference.is_file() or not produced.is_file():
-            print("[check]   {:<9} missing ({} / {})".format(image.label, reference.name, produced.name))
+            print(f"[check]   {image.label:<9} missing ({reference.name} / {produced.name})")
             continue
         left = np.asarray(Image.open(reference).convert("RGB")).astype(np.int16)
         right = np.asarray(Image.open(produced).convert("RGB")).astype(np.int16)
         if left.shape != right.shape:
-            print("[check]   {:<9} shape mismatch {} vs {}".format(image.label, left.shape, right.shape))
+            print(f"[check]   {image.label:<9} shape mismatch {left.shape} vs {right.shape}")
             continue
         diff = np.abs(left - right)
-        print("[check]   {:<9} vs {}  size {}x{}".format(image.label, reference.name, left.shape[1], left.shape[0]))
+        print(f"[check]   {image.label:<9} vs {reference.name}  size {left.shape[1]}x{left.shape[0]}")
         for index, channel in enumerate("RGB"):
             plane = diff[..., index]
-            print("[check]     {}  mean {:7.4f}/255  max {:3d}/255  p99 {:3.0f}  pct>2 {:5.2f}%".format(
-                channel, plane.mean(), int(plane.max()), np.percentile(plane, 99),
-                100.0 * (plane > 2).mean()))
-        print("[check]     all mean {:.4f}/255 ({:.6f} normalized)  max {}/255".format(
-            diff.mean(), diff.mean() / 255.0, int(diff.max())))
+            print(f"[check]     {channel}  mean {plane.mean():7.4f}/255  max {int(plane.max()):3d}/255  p99 {np.percentile(plane, 99):3.0f}  pct>2 {100.0 * (plane > 2).mean():5.2f}%")
+        print(f"[check]     all mean {diff.mean():.4f}/255 ({diff.mean() / 255.0:.6f} normalized)  max {int(diff.max())}/255")
 
 
 # ------------------------------------------------------------------ main
@@ -605,7 +594,7 @@ def main(argv=None):
 
     root, note = ab_env.bootstrap()
     version = ab_env.version(root)
-    print("[env]     ComfyUI {} at {}  ({})".format(version, root, note))
+    print(f"[env]     ComfyUI {version} at {root}  ({note})")
     forbid_vae_fallback()
     print("[env]     torch {}  cuda {}  device {}".format(
         torch.__version__, torch.version.cuda,
@@ -625,11 +614,11 @@ def main(argv=None):
     del bases
 
     if model is None:
-        print("[unet]    loading {}".format(UNET_NAME))
+        print(f"[unet]    loading {UNET_NAME}")
         with clock.stage("unet load"), ab_models.VramProbe() as probe:
             model = ab_models.load_unet(UNET_NAME)
             vae = ab_models.load_vae(VAE_NAME)
-        print("[unet]    loaded  {}".format(probe))
+        print(f"[unet]    loaded  {probe}")
     else:
         print("[unet]    reusing the base stage's UNPATCHED patcher (node 185 feeds both branches)")
 
@@ -642,7 +631,7 @@ def main(argv=None):
             for run in runs:
                 destination = output_path(image, run)
                 if destination.is_file() and not args.force:
-                    print("[render]  {:<9} {:<20} exists, skipped (--force to redo)".format(image.label, run.label))
+                    print(f"[render]  {image.label:<9} {run.label:<20} exists, skipped (--force to redo)")
                     rendered.append((image, run, None))
                     continue
                 settings = build_settings(image, run, prompts, pixels, (root, version))
@@ -654,18 +643,18 @@ def main(argv=None):
                 rendered.append((image, run, probe))
 
     # Every output is re-measured OFF DISK against the one size the refine may produce.
-    print("\n[done]    {} output(s)".format(len(rendered)))
+    print(f"\n[done]    {len(rendered)} output(s)")
     bad = []
     for image, run, probe in rendered:
         destination = output_path(image, run)
         if not destination.is_file():
-            bad.append("{} MISSING".format(destination.name))
+            bad.append(f"{destination.name} MISSING")
             print("[done]    {:<60} {:<12} {}".format(str(destination), "MISSING", probe or "(skipped)"))
             continue
         width, height = ab_models.png_size(destination)
         verdict = "OK" if (width, height) == (target_w, target_h) else "WRONG SIZE"
         if verdict != "OK":
-            bad.append("{} is {}x{}, expected {}x{}".format(destination.name, width, height, target_w, target_h))
+            bad.append(f"{destination.name} is {width}x{height}, expected {target_w}x{target_h}")
         print("[done]    {:<60} {:>4}x{:<4} {:<10} {}".format(
             str(destination), width, height, verdict, probe or "(skipped)"))
 

@@ -1,4 +1,9 @@
-from .context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL, ContextAnchoredTileUpscaleVLVideo
+from .context_anchored_tile_refine.node import (
+    ContextAnchoredTileRefine,
+    ContextAnchoredTileRefineVL,
+    ContextAnchoredTileUpscaleVL,
+    ContextAnchoredTileUpscaleVLVideo,
+)
 
 NODE_CLASS_MAPPINGS = {
     "ContextAnchoredTileRefine": ContextAnchoredTileRefine,

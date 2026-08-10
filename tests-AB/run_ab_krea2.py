@@ -122,7 +122,7 @@ RUN_TAG = "00676-d035"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 if "COMFYUI_ROOT" not in os.environ:
     if not (KREA2_ROOT / "comfy" / "text_encoders" / "krea2.py").is_file():
-        raise SystemExit("No Krea 2 support at {} — set COMFYUI_ROOT".format(KREA2_ROOT))
+        raise SystemExit(f"No Krea 2 support at {KREA2_ROOT} — set COMFYUI_ROOT")
     os.environ["COMFYUI_ROOT"] = str(KREA2_ROOT)
 import ab_env  # noqa: E402  (must precede every comfy import)
 import ab_models  # noqa: E402
@@ -133,7 +133,7 @@ def _file_sha(path, chars=12):
 
 
 def output_path(arm):
-    return OUTPUT_DIR / "AB_{}__{}.png".format(RUN_TAG, arm)
+    return OUTPUT_DIR / f"AB_{RUN_TAG}__{arm}.png"
 
 
 # ------------------------------------------------------------------ stages
@@ -182,10 +182,9 @@ def stage_upscale(base, force):
 
     if cached.is_file() and not force:
         canvas = torch.load(cached, map_location="cpu")
-        print("[upscale] cache hit  {}".format(cached.name))
+        print(f"[upscale] cache hit  {cached.name}")
     else:
-        print("[upscale] {}x{} -> 4x {} -> lanczos {}x{}".format(
-            base.shape[2], base.shape[1], UPSCALE_MODEL_NAME, target_w, target_h))
+        print(f"[upscale] {base.shape[2]}x{base.shape[1]} -> 4x {UPSCALE_MODEL_NAME} -> lanczos {target_w}x{target_h}")
         upscale_model = load_upscale_model()
         try:
             with ab_models.VramProbe() as probe, torch.inference_mode():
@@ -196,7 +195,7 @@ def stage_upscale(base, force):
         canvas = canvas.detach().float().cpu()
         cached.parent.mkdir(parents=True, exist_ok=True)
         torch.save(canvas, cached)
-        print("[upscale] done  {}  -> {}".format(probe, cached.name))
+        print(f"[upscale] done  {probe}  -> {cached.name}")
     ab_models.require_image_shape(canvas, target_h, target_w, "upscaled canvas")
 
     # Informational cross-check against the app-era refine-input snapshot: same base,
@@ -206,10 +205,9 @@ def stage_upscale(base, force):
         ours = np.asarray(Image.fromarray(ab_models.to_uint8(canvas))).astype(np.float32)
         if snap.shape == ours.shape:
             diff = np.abs(snap - ours)
-            print("[upscale] vs {}: meanabs {:.3f}/255  max {:.0f}/255".format(
-                UPSCALE_SNAPSHOT.name, diff.mean(), diff.max()))
+            print(f"[upscale] vs {UPSCALE_SNAPSHOT.name}: meanabs {diff.mean():.3f}/255  max {diff.max():.0f}/255")
         else:
-            print("[upscale] snapshot size mismatch {} vs {} — check skipped".format(snap.shape, ours.shape))
+            print(f"[upscale] snapshot size mismatch {snap.shape} vs {ours.shape} — check skipped")
     return canvas
 
 
@@ -223,8 +221,7 @@ def solve_tiles(canvas):
     sx = grid.solve_axis(padded.shape[2], REFINE.max_tile_width, REFINE.context_anchor, REFINE.context_overlap)
     sy = grid.solve_axis(padded.shape[1], REFINE.max_tile_height, REFINE.context_anchor, REFINE.context_overlap)
     layout = grid.build_layout(padded.shape[2], padded.shape[1], sx, sy, REFINE.context_anchor, REFINE.context_overlap)
-    print("[layout]  canvas {}x{}  grid {}x{}  ({} tiles)".format(
-        padded.shape[2], padded.shape[1], sx.n, sy.n, len(layout.tiles)))
+    print(f"[layout]  canvas {padded.shape[2]}x{padded.shape[1]}  grid {sx.n}x{sy.n}  ({len(layout.tiles)} tiles)")
     return padded, layout.tiles
 
 
@@ -254,8 +251,7 @@ def generate_caption(clip, vl_input):
     ids = clip.generate(tokens, do_sample=False, max_length=512, repetition_penalty=1.05)
     text = clip.decode(ids).strip()
     if not text:
-        print("[caption] empty answer (raw: {!r}); trying fallbacks".format(
-            clip.decode(ids, skip_special_tokens=False)), flush=True)
+        print(f"[caption] empty answer (raw: {clip.decode(ids, skip_special_tokens=False)!r}); trying fallbacks", flush=True)
         ids = clip.generate(tokens, do_sample=True, max_length=512, temperature=0.7,
                             top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
         text = clip.decode(ids).strip()
@@ -265,8 +261,7 @@ def generate_caption(clip, vl_input):
         ids = clip.generate(retokens, do_sample=False, max_length=512, repetition_penalty=1.05)
         text = clip.decode(ids).strip()
     if not text:
-        raise RuntimeError("caption generation: empty answer after fallbacks (raw: {!r})".format(
-            clip.decode(ids, skip_special_tokens=False)))
+        raise RuntimeError(f"caption generation: empty answer after fallbacks (raw: {clip.decode(ids, skip_special_tokens=False)!r})")
     return text
 
 
@@ -276,14 +271,14 @@ def load_or_generate_captions(clip, padded, tiles, force):
     key = {"base_sha": _file_sha(BASE_PNG), "rects": _rects(tiles),
            "instruction": CAPTION_INSTRUCTION, "clip": CLIP_NAME}
     digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
-    cached = CACHE_DIR / "krea2-00676_captions_{}.json".format(digest)
+    cached = CACHE_DIR / f"krea2-00676_captions_{digest}.json"
 
     if cached.is_file() and not force:
         captions = json.loads(cached.read_text(encoding="utf-8"))["captions"]
-        print("[caption] cache hit  {}".format(cached.name))
+        print(f"[caption] cache hit  {cached.name}")
     else:
         captions = []
-        for tile_idx, tile in enumerate(tiles):
+        for tile in tiles:
             crop = tile.crop_rect
             vl_input = resample_for_vl(padded[:, crop.y0:crop.y1, crop.x0:crop.x1, :])
             with torch.inference_mode():
@@ -291,9 +286,9 @@ def load_or_generate_captions(clip, padded, tiles, force):
             captions.append(caption)
         cached.parent.mkdir(parents=True, exist_ok=True)
         cached.write_text(json.dumps(dict(key, captions=captions), indent=1), encoding="utf-8")
-        print("[caption] generated and cached  {}".format(cached.name))
+        print(f"[caption] generated and cached  {cached.name}")
     for tile_idx, caption in enumerate(captions):
-        print("[caption] tile {}: {}".format(tile_idx, caption))
+        print(f"[caption] tile {tile_idx}: {caption}")
     return captions
 
 
@@ -319,7 +314,7 @@ def build_slice_caption_conds(clip, padded, tiles, captions):
 
     cache = {}
     conds = []
-    for tile, caption in zip(tiles, captions):
+    for tile, caption in zip(tiles, captions, strict=True):  # one caption per tile by construction
         if caption not in cache:
             tokens = clip.tokenize(vl.VISION_BLOCK + caption, images=[copy], llama_template=vl.KREA2_TEMPLATE)
             ids = [t[0] for t in tokens[next(iter(tokens))][0]]
@@ -330,8 +325,7 @@ def build_slice_caption_conds(clip, padded, tiles, captions):
             seq = encoded[0][0].shape[1]
             if seq != expected_seq:
                 raise RuntimeError(
-                    "slice+caption encode has {} rows, expected {} (grid {}x{} + caption/tail {})".format(
-                        seq, expected_seq, grid_h, grid_w, tail_len))
+                    f"slice+caption encode has {seq} rows, expected {expected_seq} (grid {grid_h}x{grid_w} + caption/tail {tail_len})")
             cache[caption] = (encoded, expected_seq)
         encoded, expected_seq = cache[caption]
 
@@ -375,7 +369,7 @@ def stage_conditioning(padded, tiles, force_captions):
     Arm 2's vision encode deliberately stays INSIDE refine_image (production path)."""
     from context_anchored_tile_refine import upscale
 
-    print("[clip]    loading {} ({})".format(CLIP_NAME, CLIP_TYPE))
+    print(f"[clip]    loading {CLIP_NAME} ({CLIP_TYPE})")
     with ab_models.VramProbe() as probe:
         clip = ab_models.load_clip(CLIP_NAME, CLIP_TYPE)
         with torch.inference_mode():
@@ -386,7 +380,7 @@ def stage_conditioning(padded, tiles, force_captions):
         with torch.inference_mode():
             arm3 = build_caption_conds(clip, captions)
             arm4 = build_slice_caption_conds(clip, padded, tiles, captions)
-    print("[clip]    conditioning built  {}".format(probe))
+    print(f"[clip]    conditioning built  {probe}")
     return clip, pos_full, negative, empty, captions, arm3, arm4
 
 
@@ -444,7 +438,7 @@ def render(arm, canvas, tiles, clip, model, vae, pos_full, negative, empty, arm3
     ab_models.require_image_shape(result, canvas.shape[1], canvas.shape[2], "refine " + arm)
     destination = output_path(arm)
     written = ab_models.save_png(destination, result.cpu(), build_settings(arm, captions))
-    print("[render]  {:<20} {}  -> {} {}x{}".format(arm, probe, destination.name, written[0], written[1]))
+    print(f"[render]  {arm:<20} {probe}  -> {destination.name} {written[0]}x{written[1]}")
 
 
 # ------------------------------------------------------------------ reporting
@@ -454,16 +448,15 @@ def fidelity_check():
     the base PNG's 8-bit round trip; a LARGE diff means the pipeline diverged."""
     produced = output_path("2-vl-slices")
     if not (produced.is_file() and REFERENCE_OUTPUT.is_file()):
-        print("[check]   2-vl-slices vs {}: skipped (file missing)".format(REFERENCE_OUTPUT.name))
+        print(f"[check]   2-vl-slices vs {REFERENCE_OUTPUT.name}: skipped (file missing)")
         return
     left = np.asarray(Image.open(REFERENCE_OUTPUT).convert("RGB")).astype(np.int16)
     right = np.asarray(Image.open(produced).convert("RGB")).astype(np.int16)
     if left.shape != right.shape:
-        print("[check]   shape mismatch {} vs {}".format(left.shape, right.shape))
+        print(f"[check]   shape mismatch {left.shape} vs {right.shape}")
         return
     diff = np.abs(left - right)
-    print("[check]   2-vl-slices vs {}: meanabs {:.3f}/255  p99 {:.0f}  max {}/255".format(
-        REFERENCE_OUTPUT.name, diff.mean(), np.percentile(diff, 99), int(diff.max())))
+    print(f"[check]   2-vl-slices vs {REFERENCE_OUTPUT.name}: meanabs {diff.mean():.3f}/255  p99 {np.percentile(diff, 99):.0f}  max {int(diff.max())}/255")
 
 
 def contact_sheet(arms):
@@ -484,12 +477,12 @@ def contact_sheet(arms):
         col, row = index % 2, index // 2
         x = pad + col * (panel_w + pad)
         y = pad + row * (panel_h + bar + pad)
-        draw.text((x + 6, y + 8), "{}  ({})".format(arm, ARMS[arm]), fill=(235, 235, 235), font=font)
+        draw.text((x + 6, y + 8), f"{arm}  ({ARMS[arm]})", fill=(235, 235, 235), font=font)
         with Image.open(source) as handle:
             sheet.paste(handle.convert("RGB").resize((panel_w, panel_h), Image.LANCZOS), (x, y + bar))
-    destination = OUTPUT_DIR / "AB_{}__contact-sheet.jpg".format(RUN_TAG)
+    destination = OUTPUT_DIR / f"AB_{RUN_TAG}__contact-sheet.jpg"
     sheet.save(destination, quality=92)
-    print("[sheet]   {}".format(destination))
+    print(f"[sheet]   {destination}")
 
 
 # ------------------------------------------------------------------ main
@@ -512,11 +505,11 @@ def main(argv=None):
     if args.list:
         for arm in ARMS:
             marker = "*" if arm in selected else " "
-            print("{} {:<20} {}  -> {}".format(marker, arm, ARMS[arm], output_path(arm).name))
+            print(f"{marker} {arm:<20} {ARMS[arm]}  -> {output_path(arm).name}")
         return 0
 
     root, note = ab_env.bootstrap()
-    print("[env]     ComfyUI {} at {}  ({})".format(ab_env.version(root), root, note))
+    print(f"[env]     ComfyUI {ab_env.version(root)} at {root}  ({note})")
     print("[env]     torch {}  cuda {}  device {}".format(
         torch.__version__, torch.version.cuda,
         torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"))
@@ -527,16 +520,16 @@ def main(argv=None):
     clip, pos_full, negative, empty, captions, arm3, arm4 = stage_conditioning(
         padded, tiles, args.force_captions)
 
-    print("[unet]    loading {}".format(UNET_NAME))
+    print(f"[unet]    loading {UNET_NAME}")
     with ab_models.VramProbe() as probe:
         model = ab_models.load_unet(UNET_NAME)
         vae = ab_models.load_vae(VAE_NAME)
-    print("[unet]    loaded  {}".format(probe))
+    print(f"[unet]    loaded  {probe}")
 
     for arm in selected:
         destination = output_path(arm)
         if destination.is_file() and not args.force:
-            print("[render]  {:<20} exists, skipped (--force to redo)".format(arm))
+            print(f"[render]  {arm:<20} exists, skipped (--force to redo)")
             continue
         ab_models.clear_cache()
         render(arm, canvas, tiles, clip, model, vae, pos_full, negative, empty, arm3, arm4, captions)
@@ -548,13 +541,13 @@ def main(argv=None):
     for arm in selected:
         destination = output_path(arm)
         if not destination.is_file():
-            bad.append("{} MISSING".format(destination.name))
+            bad.append(f"{destination.name} MISSING")
             continue
         width, height = ab_models.png_size(destination)
         verdict = "OK" if (width, height) == (canvas.shape[2], canvas.shape[1]) else "WRONG SIZE"
         if verdict != "OK":
-            bad.append("{} is {}x{}".format(destination.name, width, height))
-        print("[done]    {:<44} {:>4}x{:<4} {}".format(destination.name, width, height, verdict))
+            bad.append(f"{destination.name} is {width}x{height}")
+        print(f"[done]    {destination.name:<44} {width:>4}x{height:<4} {verdict}")
     if bad:
         raise SystemExit("[done]    FAILED: " + "; ".join(bad))
     return 0

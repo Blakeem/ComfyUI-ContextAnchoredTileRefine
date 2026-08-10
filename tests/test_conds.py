@@ -1,8 +1,8 @@
 import pytest
 import torch
+from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 from context_anchored_tile_refine import conds, grid, sampling
-from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
 
@@ -274,7 +274,7 @@ def test_each_tile_sees_its_own_hint_crop(comfy_stubs):
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         for key in ("positive", "negative"):
             assert torch.equal(seen[key][0]["control"].cond_hint_original,
@@ -305,7 +305,7 @@ def test_hint_rides_the_same_reflect_pad_as_the_canvas(comfy_stubs):
     assert padded_hint.shape == (1, 3, 88, 80)
     layout = _layout(80, 88, 32, 32)
     assert len(guider.seen_conds) == len(layout.tiles) == 9
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
                            padded_hint[:, :, crop.y0:crop.y1, crop.x0:crop.x1])
@@ -325,7 +325,7 @@ def test_mask_path_hint_takes_the_same_bbox_slice_as_the_image(comfy_stubs):
     sub_hint = hint[:, :, y0:y1, x0:x1]          # the same crop sub_image gets
     layout = _layout(64, 64, 56, 56, ctx=8, overlap=16)
     assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
                            sub_hint[:, :, crop.y0:crop.y1, crop.x0:crop.x1])

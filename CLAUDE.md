@@ -137,6 +137,14 @@ Python 3.12, torch 2.9.
 
 Venv python: `C:\Users\Blake\Documents\ComfyUI\.venv\Scripts\python.exe` (do not `pip install`).
 - Default gate, must be green with **0 skips**: `<venv> -m pytest tests -m "not gpu"`
+- **Lint gate, required before any commit**: `uvx ruff@0.16.2 check .` must report zero
+  findings. The version is pinned (ruff 0.16 changed the default rule set) and the config
+  lives in `pyproject.toml` `[tool.ruff]`: ComfyUI core's own selection (E/W/F/T/N805/
+  S102/S307 — S102/S307/E702 are what `comfy node publish` scans at registry time) plus
+  I/UP/B/C4/SIM/RUF. The `N` family and `PLC0415` stay OFF deliberately: `INPUT_TYPES(s)`
+  is the core node contract and the lazy comfy imports are architecture, not accidents.
+  No formatter (`ruff format` is not adopted; core does not use it). CI runs the same
+  check in `.github/workflows/lint.yml`.
 - GPU tests, real SD1.5 sampling: `<venv> -m pytest tests -m gpu -v`
 - Markers: `comfy`, `gpu`, `slow`. GPU tests load
   `models\checkpoints\v1-5-pruned-emaonly-fp16.safetensors`.

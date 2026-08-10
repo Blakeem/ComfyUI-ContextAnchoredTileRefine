@@ -514,14 +514,11 @@ def _manifest_line(tile_idx, tile, dc_offset=None):
     # produce, and it is invisible in the dumped PNGs (which hold the UNcorrected decode), so
     # it has to be recorded here or it cannot be checked at all.
     def rc(r):
-        return "({},{})-({},{})".format(r.x0, r.y0, r.x1, r.y1)
+        return f"({r.x0},{r.y0})-({r.x1},{r.y1})"
 
     dc = "" if dc_offset is None else " dc=[{}]".format(
-        ",".join("{:+.6f}".format(v) for v in dc_offset.tolist()))
-    return "t{:02d} r{}c{} cls={} kept_top={} kept_left={} core={} paste={} crop={}{}".format(
-        tile_idx, tile.row, tile.col, tile.cls, tile.kept_top, tile.kept_left,
-        rc(tile.core), rc(tile.paste_rect), rc(tile.crop_rect), dc,
-    )
+        ",".join(f"{v:+.6f}" for v in dc_offset.tolist()))
+    return f"t{tile_idx:02d} r{tile.row}c{tile.col} cls={tile.cls} kept_top={tile.kept_top} kept_left={tile.kept_left} core={rc(tile.core)} paste={rc(tile.paste_rect)} crop={rc(tile.crop_rect)}{dc}"
 
 
 def encode_pixels(vae, pixels):
@@ -607,7 +604,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # broadcast the sampler's sigma*noise + latent mix into a fake C-frame temporal
     # axis, which temporal models then fold into the batch (a batch-mismatch crash).
     latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
-    dummy = torch.zeros((batch, vae.latent_channels) + latent_time + (canvas_h // 8, canvas_w // 8), dtype=torch.float32)
+    dummy = torch.zeros((batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
     canvas_noise = noise.generate_noise({"samples": dummy})
 
 
@@ -664,7 +661,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             ix0, ix1 = inner.x0 - crop.x0, inner.x1 - crop.x0
             enc[:, iy0:iy1, ix0:ix1, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
             if debug_dir is not None:
-                _save("t{:02d}_r{}c{}_enc.png".format(tile_idx, tile.row, tile.col), enc)
+                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_enc.png", enc)
             tile_latent = encode_pixels(vae, enc)
         else:
             # Whole-image / n=1 path: crop == core, no anchor ring and no already-
@@ -681,10 +678,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         # otherwise broadcast into a cryptic shape error deep inside the sampler or model.
         if tile_latent.shape != tile_noise.shape:
             raise RuntimeError(
-                "VAE encoded a {}x{} px tile to latent shape {}, but the tile's noise slice is {}. "
+                f"VAE encoded a {crop.x1 - crop.x0}x{crop.y1 - crop.y0} px tile to latent shape {tuple(tile_latent.shape)}, but the tile's noise slice is {tuple(tile_noise.shape)}. "
                 "This VAE's latent layout is not supported (e.g. a video VAE folding an image batch "
-                "into frames, or a non-8x spatial compression).".format(
-                    crop.x1 - crop.x0, crop.y1 - crop.y0, tuple(tile_latent.shape), tuple(tile_noise.shape)))
+                "into frames, or a non-8x spatial compression).")
         # Binary latent denoise_mask: full-strength denoise over core+overlap
         # (== tile.overlap_inner_rect), frozen only through the context_anchor ring.
         # Passing overlap_inner_rect as the "core" arg makes tile_gradient return its
@@ -785,7 +781,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
             if debug_dir is not None:
                 # region is a VIEW into canvas, so dump it BEFORE the composite overwrites it.
-                tag = "t{:02d}_r{}c{}".format(tile_idx, tile.row, tile.col)
+                tag = f"t{tile_idx:02d}_r{tile.row}c{tile.col}"
                 _save(tag + "_decoded.png", decoded)
                 _save(tag + "_alpha.png", alpha[..., 0])
                 _save(tag + "_region_before.png", region)
@@ -795,7 +791,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 debug_manifest.append(_manifest_line(tile_idx, tile, dc_offset))
         else:
             if debug_dir is not None:
-                _save("t{:02d}_r{}c{}_decoded.png".format(tile_idx, tile.row, tile.col), decoded)
+                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_decoded.png", decoded)
                 debug_manifest.append(_manifest_line(tile_idx, tile))
             canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :] = decoded
     if debug_dir is not None:
@@ -834,8 +830,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         if not isinstance(original_conds, dict) or "positive" not in original_conds:
             raise ValueError(
                 "VL refine needs a guider that keeps 'positive' in original_conds "
-                "(the CFGGuider convention); got {}".format(
-                    sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__))
+                f"(the CFGGuider convention); got {sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__}")
         # ControlNet is a BASE-node feature only. Each tile's positive is replaced outright
         # by a fresh vision-slice cond that carries no control chain, so a cropped hint would
         # reach the negative branch alone — asymmetric CFG, with the hint steering only the

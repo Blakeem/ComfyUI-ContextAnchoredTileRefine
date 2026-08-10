@@ -14,6 +14,7 @@ classifiers = [
 test = [
     "pytest>=9.0.0",
     "pytest-cov>=7.0.0",
+    "ruff==0.16.2",
 ]
 
 [project.urls]
@@ -25,6 +26,54 @@ PublisherId = "blake"
 DisplayName = "Context-Anchored Tile Refine"
 Icon = ""
 requires-comfyui = ">=0.3.45"
+
+[tool.ruff]
+# ComfyUI core sets no line-length and ignores E501; length is a formatter concern.
+# 120 matches comfy-cli and only bites if `ruff format` is ever adopted (it is not).
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Explicit select, never ruff's defaults: the default set changed from 59 to 413 rules
+# in ruff 0.16.0 (2026-07-23), so bare defaults are not reproducible across versions.
+select = [
+    # --- ComfyUI core's own selection, verbatim (comfyanonymous/ComfyUI pyproject.toml) ---
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "T",      # flake8-debugger (T10) + flake8-print (T20)
+    "N805",   # first arg of a METHOD must be `self`. Deliberately NOT the "N" prefix:
+              # N802/N804 would reject `@classmethod def INPUT_TYPES(s)`, the node
+              # contract ComfyUI core itself uses, and N999 would reject the hyphenated
+              # `ComfyUI-*` repo directory name every custom node has.
+    "S102",   # exec-builtin           -- `comfy node publish` scans for this
+    "S307",   # suspicious-eval-usage  -- `comfy node publish` scans for this
+    # E702 (semicolons) is the third rule the Registry scans for; covered by "E" above.
+
+    # --- beyond core: cheap, high signal for a small torch library ---
+    "I",      # isort import ordering (autofix)
+    "UP",     # pyupgrade -> py312 idioms (autofix)
+    "B",      # flake8-bugbear: mutable defaults, loop-variable capture
+    "C4",     # flake8-comprehensions (autofix)
+    "SIM",    # flake8-simplify
+    "RUF",    # Ruff-specific, incl. RUF100 unused-noqa
+]
+
+# Core's ignore list minus E402: this repo suppresses E402 with documented per-line
+# `# noqa: E402` in tests-AB (bootstrap must run before comfy imports), and a global
+# ignore would turn those into RUF100 unused-noqa findings.
+ignore = [
+    "E501",   # line-too-long
+    "E722",   # bare-except
+    "E731",   # lambda-assignment
+    "E712",   # true-false-comparison
+    "E741",   # ambiguous-variable-name -- `l`/`L` are grid/tensor-axis idioms here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The A/B harness is a console tool, excluded from the registry archive by
+# .comfyignore; printing is its interface.
+"tests-AB/*" = ["T201"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

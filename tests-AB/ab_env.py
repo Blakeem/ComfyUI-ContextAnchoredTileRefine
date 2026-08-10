@@ -97,7 +97,7 @@ def resolve_root():
     if env_root:
         root = Path(env_root).resolve()
         if not (root / "comfy").is_dir():
-            raise SystemExit("COMFYUI_ROOT={} has no 'comfy' directory".format(env_root))
+            raise SystemExit(f"COMFYUI_ROOT={env_root} has no 'comfy' directory")
         return root, "COMFYUI_ROOT env var"
 
     checked = list(_candidates())
@@ -109,7 +109,7 @@ def resolve_root():
             return root, "WARNING: no z-image-capable root found; falling back (model load will likely fail)"
     raise SystemExit(
         "No ComfyUI root found. Checked:\n"
-        + "\n".join("  - {} (comfy={}, z_image={})".format(r, c, z) for r, c, z in checked)
+        + "\n".join(f"  - {r} (comfy={c}, z_image={z})" for r, c, z in checked)
     )
 
 
@@ -124,8 +124,8 @@ def _enable_dynamic_vram():
     load branches (model_management.py), every --fast-disk staging path (ops.py,
     model_prefetch.py) and VAE offload (sd.py). Without it the harness runs a different
     memory path than the app it is supposed to reproduce."""
-    from comfy.cli_args import args, enables_dynamic_vram
     import comfy_aimdo.control
+    from comfy.cli_args import args, enables_dynamic_vram
 
     # main.py module level: control.init() before any torch device init.
     if enables_dynamic_vram():
@@ -151,7 +151,7 @@ def _enable_dynamic_vram():
                                          and not comfy.model_management.is_wsl())):
         return False, "not enabled for this device/flags (main.py's own condition)"
     if (not args.enable_dynamic_vram) and (comfy.model_management.torch_version_numeric < (2, 8)):
-        return False, "torch {} < 2.8".format(comfy.model_management.torch_version_numeric)
+        return False, f"torch {comfy.model_management.torch_version_numeric} < 2.8"
 
     try:
         aimdo_initialized = comfy_aimdo.control.init_devices(
@@ -190,8 +190,8 @@ def bootstrap():
     origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
     if origin is None or origin.parent != (root / "comfy").resolve():
         raise SystemExit(
-            "A different 'comfy' package shadows the ComfyUI source at {} "
-            "(comfy.samplers resolved to: {}).".format(root, origin)
+            f"A different 'comfy' package shadows the ComfyUI source at {root} "
+            f"(comfy.samplers resolved to: {origin})."
         )
 
     # folder_paths reads comfy.cli_args.args at import; cli_args only parses argv
@@ -218,16 +218,14 @@ def bootstrap():
 
     if parsed_args.base_directory != str(MODEL_BASE_DIR):
         raise SystemExit(
-            "comfy.cli_args was parsed before bootstrap(): --base-directory is {!r}, "
-            "expected {!r}. Nothing may import comfy/folder_paths first.".format(
-                parsed_args.base_directory, str(MODEL_BASE_DIR)))
+            f"comfy.cli_args was parsed before bootstrap(): --base-directory is {parsed_args.base_directory!r}, "
+            f"expected {str(MODEL_BASE_DIR)!r}. Nothing may import comfy/folder_paths first.")
     for flag in MEMORY_ARGS:
         attribute = flag.lstrip("-").replace("-", "_")
         if not getattr(parsed_args, attribute, False):
             raise SystemExit(
-                "comfy.cli_args was parsed before bootstrap(): {} never took effect "
-                "(args.{} is not set). Nothing may import comfy/folder_paths first.".format(
-                    flag, attribute))
+                f"comfy.cli_args was parsed before bootstrap(): {flag} never took effect "
+                f"(args.{attribute} is not set). Nothing may import comfy/folder_paths first.")
 
     # Attempted once per process — main.py runs these stages once, and bootstrap()
     # must stay safe to call twice.
@@ -236,13 +234,13 @@ def bootstrap():
         try:
             _DYNAMIC_VRAM = _enable_dynamic_vram()
         except Exception as exc:   # comfy_aimdo missing, or any init raising
-            _DYNAMIC_VRAM = (False, "{}: {}".format(type(exc).__name__, exc))
+            _DYNAMIC_VRAM = (False, f"{type(exc).__name__}: {exc}")
     dynamic_vram, why = _DYNAMIC_VRAM
     if dynamic_vram:
-        print("DynamicVRAM (comfy_aimdo) enabled, as main.py does: {}".format(why))
+        print(f"DynamicVRAM (comfy_aimdo) enabled, as main.py does: {why}")
     else:
         print("WARNING: DynamicVRAM (comfy_aimdo) NOT enabled — legacy ModelPatcher, "
-              "estimate-based VRAM accounting, --fast-disk inert: {}".format(why))
+              f"estimate-based VRAM accounting, --fast-disk inert: {why}")
     return root, note
 
 

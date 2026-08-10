@@ -4,7 +4,6 @@ import pytest
 
 from context_anchored_tile_refine import grid
 
-
 # --- The 12 simulator SELF_TESTS (docs/tile-simulator.html:494-656), pinned verbatim.
 # Signature: solve_axis(L, cap, ctx, overlap); build_layout(W, H, sx, sy, ctx, overlap).
 

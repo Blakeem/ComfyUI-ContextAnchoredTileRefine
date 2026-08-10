@@ -155,7 +155,7 @@ class Noise_RandomNoise:
         import comfy.sample
 
         latent_image = input_latent["samples"]
-        batch_inds = input_latent["batch_index"] if "batch_index" in input_latent else None
+        batch_inds = input_latent.get("batch_index", None)
         return comfy.sample.prepare_noise(latent_image, self.seed, batch_inds)
 
 

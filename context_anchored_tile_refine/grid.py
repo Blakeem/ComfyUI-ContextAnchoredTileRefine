@@ -13,10 +13,8 @@ class GridConfigError(ValueError):
     # context_anchor per seam side. Carries the simulator's failure fields as attributes.
     def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason):
         super().__init__(
-            "caps too small for overlap + context: L={} cap={} ctx={} overlap={} "
-            "(fails at n={} with base={}, reason={})".format(
-                L, cap, ctx, overlap, fail_n, fail_base, reason
-            )
+            f"caps too small for overlap + context: L={L} cap={cap} ctx={ctx} overlap={overlap} "
+            f"(fails at n={fail_n} with base={fail_base}, reason={reason})"
         )
         self.r = r
         self.fail_n = fail_n

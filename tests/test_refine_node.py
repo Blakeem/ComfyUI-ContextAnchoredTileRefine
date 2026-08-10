@@ -1,8 +1,8 @@
 import pytest
 import torch
+from test_sampling import FakeGuider, FakeNoise, FakeVAE
 
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine
-from test_sampling import FakeGuider, FakeNoise, FakeVAE
 
 
 def _refine(image, sigmas=None, mask=None):

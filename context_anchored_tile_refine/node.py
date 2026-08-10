@@ -1,4 +1,3 @@
-import torch
 
 # Mirrors core nodes.MAX_RESOLUTION (importing it would pull comfy in at module scope).
 MAX_RESOLUTION = 16384
@@ -6,9 +5,9 @@ MAX_RESOLUTION = 16384
 
 def _validate_image(image):
     if image.ndim != 4:
-        raise ValueError("image must be a [B,H,W,C] IMAGE tensor, got {} dimensions".format(image.ndim))
+        raise ValueError(f"image must be a [B,H,W,C] IMAGE tensor, got {image.ndim} dimensions")
     if image.shape[1] < 8 or image.shape[2] < 8:
-        raise ValueError("image must be at least 8x8 pixels, got {}x{}".format(image.shape[1], image.shape[2]))
+        raise ValueError(f"image must be at least 8x8 pixels, got {image.shape[1]}x{image.shape[2]}")
 
 
 def _unpack_av_latent(av_latent):
@@ -25,7 +24,7 @@ def _unpack_av_latent(av_latent):
         raise ValueError("av_latent must be the MiniMax H3 sampler's AV LATENT — a LATENT whose samples are a nested (video, audio) pair. Connect the sampler's LATENT output, or leave this input unconnected.")
     streams = list(unbind())
     if len(streams) != 2:
-        raise ValueError("av_latent holds {} latent stream(s); the MiniMax H3 sampler's AV LATENT holds exactly 2 (video, audio). Connect that output, or leave this input unconnected.".format(len(streams)))
+        raise ValueError(f"av_latent holds {len(streams)} latent stream(s); the MiniMax H3 sampler's AV LATENT holds exactly 2 (video, audio). Connect that output, or leave this input unconnected.")
     # .cpu() because the frozen soundtrack is only ever re-uploaded per tile (video.py pairs
     # it onto the tile encode's device): parking it in VRAM would hold ~megabytes hostage for
     # the whole run beside the canvases.
@@ -37,13 +36,13 @@ def _normalize_mask(mask, image):
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
     if mask.ndim != 3:
-        raise ValueError("mask must be a [H,W] or [B,H,W] MASK tensor, got {} dimensions".format(mask.ndim))
+        raise ValueError(f"mask must be a [H,W] or [B,H,W] MASK tensor, got {mask.ndim} dimensions")
     # Strict spatial match (no resample — a resized mask would misalign the region).
     if mask.shape[1] != image.shape[1] or mask.shape[2] != image.shape[2]:
-        raise ValueError("mask size {}x{} must match image size {}x{}".format(mask.shape[1], mask.shape[2], image.shape[1], image.shape[2]))
+        raise ValueError(f"mask size {mask.shape[1]}x{mask.shape[2]} must match image size {image.shape[1]}x{image.shape[2]}")
     # Batch must be 1 (broadcast to every image) or exactly the image batch.
     if mask.shape[0] not in (1, image.shape[0]):
-        raise ValueError("mask batch {} must be 1 or match image batch {}".format(mask.shape[0], image.shape[0]))
+        raise ValueError(f"mask batch {mask.shape[0]} must be 1 or match image batch {image.shape[0]}")
     if mask.shape[0] == 1 and image.shape[0] != 1:
         mask = mask.expand(image.shape[0], -1, -1)
     return mask
@@ -90,9 +89,9 @@ class ContextAnchoredTileRefine:
             if value is None:
                 continue
             if value % 8 != 0:
-                return "{} must be a multiple of 8, got {}".format(name, value)
+                return f"{name} must be a multiple of 8, got {value}"
             if value < minimum or value > maximum:
-                return "{} must be between {} and {}, got {}".format(name, minimum, maximum, value)
+                return f"{name} must be between {minimum} and {maximum}, got {value}"
         return True
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
@@ -176,6 +175,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, negative=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
+
         from . import sampling, upscale
 
         empty_cond = None
@@ -193,8 +193,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # small image can leave here below 8px on an axis — where the /8 reflect pad (which
         # needs pad < dim) would raise naming neither this node nor the widget that did it.
         if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
-            raise ValueError("upscale_by {} takes the {}x{} input to {}x{}; the upscaled image must be at least 8x8 pixels".format(
-                upscale_by, image.shape[1], image.shape[2], upscaled.shape[1], upscaled.shape[2]))
+            raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}; the upscaled image must be at least 8x8 pixels")
 
         # One empty encode serves as the positive placeholder (vl.py replaces every tile's
         # positive with its slice of the whole-image vision encode) and, unless the optional
@@ -267,14 +266,15 @@ class ContextAnchoredTileUpscaleVLVideo(ContextAnchoredTileRefine):
             if value is None:
                 continue
             if value % 32 != 0:
-                return "{} must be a multiple of 32, got {}".format(name, value)
+                return f"{name} must be a multiple of 32, got {value}"
             if value < minimum or value > maximum:
-                return "{} must be between {} and {}, got {}".format(name, minimum, maximum, value)
+                return f"{name} must be between {minimum} and {maximum}, got {value}"
         return True
 
     def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, av_latent=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
+
         from . import sampling, upscale, video, vl_video
 
         audio_latent = None
@@ -294,8 +294,7 @@ class ContextAnchoredTileUpscaleVLVideo(ContextAnchoredTileRefine):
         # (which needs pad < dim) would raise naming neither this node nor upscale_by.
         target_width, target_height = upscale.scale_target(int(image.shape[2]), int(image.shape[1]), upscale_by)
         if target_height < video.CANVAS_MULTIPLE or target_width < video.CANVAS_MULTIPLE:
-            raise ValueError("upscale_by {} takes the {}x{} input to {}x{}; the upscaled clip must be at least {}x{} pixels".format(
-                upscale_by, image.shape[1], image.shape[2], target_height, target_width, video.CANVAS_MULTIPLE, video.CANVAS_MULTIPLE))
+            raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {target_height}x{target_width}; the upscaled clip must be at least {video.CANVAS_MULTIPLE}x{video.CANVAS_MULTIPLE} pixels")
         audio_latent = _unpack_av_latent(av_latent)
 
         # STAGE ORDER IS THE HARD CONSTRAINT HERE, not a preference: the 32B text encoder

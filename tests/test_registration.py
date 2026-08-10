@@ -25,12 +25,12 @@ def test_loads_via_comfyui_directory_mechanism():
         assert isinstance(vl_class, type)
         assert isinstance(upscale_class, type)
         assert isinstance(video_class, type)
-        assert module.NODE_CLASS_MAPPINGS == {
+        assert {
             "ContextAnchoredTileRefine": node_class,
             "ContextAnchoredTileRefineVL": vl_class,
             "ContextAnchoredTileUpscaleVL": upscale_class,
             "ContextAnchoredTileUpscaleVLVideo": video_class,
-        }
+        } == module.NODE_CLASS_MAPPINGS
         assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefine"]

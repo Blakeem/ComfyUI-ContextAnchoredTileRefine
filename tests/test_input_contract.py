@@ -63,7 +63,7 @@ def test_int_widget_options_exact():
     for name, expected in INT_WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
+            assert options[key] == value, f"{name}[{key}]"
 
 
 def test_seam_behaviour_is_not_exposed_as_widgets():
@@ -122,7 +122,7 @@ def test_validate_inputs_rejects_below_min():
 
 def test_vl_required_order_is_base_plus_clip():
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(input_types["required"]) == REQUIRED_ORDER + ["clip"]
+    assert list(input_types["required"]) == [*REQUIRED_ORDER, "clip"]
     assert input_types["required"]["clip"][0] == "CLIP"
 
 
@@ -258,7 +258,7 @@ def test_upscale_widget_options_exact(comfy_stubs):
     for name, expected in UPSCALE_WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
+            assert options[key] == value, f"{name}[{key}]"
 
 
 def test_upscale_every_input_has_a_tooltip(comfy_stubs):
@@ -292,7 +292,7 @@ def test_upscale_refine_signature_matches_input_names(comfy_stubs):
 
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     parameters = list(inspect.signature(ContextAnchoredTileUpscaleVL.refine).parameters)
-    expected = ["self"] + list(input_types["required"]) + list(input_types["optional"])
+    expected = ["self", *input_types["required"], *input_types["optional"]]
     assert parameters == expected
 
 
@@ -304,5 +304,5 @@ def test_upscale_input_types_does_not_leak_into_the_other_nodes(comfy_stubs):
     assert list(base["optional"]) == ["mask"]
 
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(vl["required"]) == REQUIRED_ORDER + ["clip"]
+    assert list(vl["required"]) == [*REQUIRED_ORDER, "clip"]
     assert list(vl["optional"]) == ["mask"]

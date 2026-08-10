@@ -63,7 +63,7 @@ class FakeVAE:
         self.encode_calls += 1
         batch, height, width, channels = pixels.shape
         assert height % 8 == 0 and width % 8 == 0, "encode received non-/8 dims"
-        assert channels == 3, "encode received {} channels".format(channels)
+        assert channels == 3, f"encode received {channels} channels"
         self.encoded = torch.zeros(batch, 4, height // 8, width // 8)
         return self.encoded
 
@@ -284,7 +284,7 @@ class FakeVideoVAE:
         self.encoded = None
 
     def encode(self, pixels):
-        batch, height, width, channels = pixels.shape
+        batch, height, width, _channels = pixels.shape
         self.encoded = torch.zeros(batch, 4, 1, height // 8, width // 8)
         return self.encoded
 
@@ -322,7 +322,7 @@ def test_video_vae_tiled_noise_and_mask_are_5d(comfy_stubs):
         assert call["latent_image"].ndim == 5
         assert call["noise"].shape == call["latent_image"].shape
         if call["denoise_mask"] is not None:
-            assert call["denoise_mask"].shape == (1, 1, 1) + call["latent_image"].shape[-2:]
+            assert call["denoise_mask"].shape == (1, 1, 1, *call["latent_image"].shape[-2:])
 
 
 def test_sample_latent_normalizes_denoise_mask_for_5d_latent(comfy_stubs):

@@ -19,18 +19,17 @@ from pathlib import Path
 
 faulthandler.enable()
 
-import spike_h3 as poc  # module import runs the ComfyUI bootstrap
-import spike_h3_stress as stress
-
-import torch
-
-import ab_models
+import ab_models  # noqa: E402
+import spike_h3 as poc  # noqa: E402  (module import runs the ComfyUI bootstrap)
+import spike_h3_stress as stress  # noqa: E402
+import torch  # noqa: E402
 
 REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVLVideo
+# The node package resolves only once REPO_ROOT is on sys.path, above.
+from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVLVideo  # noqa: E402
 
 SETTINGS = dict(stress.STRESS_KEY, denoise=0.22, refine_steps=8,
                 refine_seed=poc.REFINE_SEED, up_w=stress.UP_W, up_h=stress.UP_H,
@@ -41,7 +40,7 @@ SETTINGS = dict(stress.STRESS_KEY, denoise=0.22, refine_steps=8,
 def main():
     import comfy.nested_tensor
 
-    print("ComfyUI root: {} version {}".format(poc.ROOT, poc.ab_env.version(poc.ROOT)),
+    print(f"ComfyUI root: {poc.ROOT} version {poc.ab_env.version(poc.ROOT)}",
           flush=True)
 
     base_video, base_audio = stress.render_base_full(None, force=False)
@@ -70,7 +69,7 @@ def main():
 
     for index in (0, refined.shape[0] // 2, refined.shape[0] - 1):
         ab_models.save_png(
-            stress.OUTPUT_DIR / "H3N_refined_vl_d22_f{:03d}.png".format(index),
+            stress.OUTPUT_DIR / f"H3N_refined_vl_d22_f{index:03d}.png",
             refined[index:index + 1], SETTINGS)
     stress.save_video_atomic("node_refined_vl_d22", refined, SETTINGS)
     print("done. compare H3N_refined_vl_d22_f*.png vs H3S_refined_vl_d22_f*.png",

@@ -88,7 +88,7 @@ def pad_frames_to_grid(frames):
     target = align_frame_count(count)
     if target == count:
         return frames, count
-    tail = frames[-1:].expand((target - count,) + tuple(frames.shape[1:]))
+    tail = frames[-1:].expand(target - count, *frames.shape[1:])
     return torch.cat([frames, tail], dim=0), target
 
 
@@ -119,10 +119,9 @@ def audio_stream(audio_latent, frame_count):
     length = int(audio_latent.shape[-1])
     if length != expected:
         raise ValueError(
-            "AV latent audio length {} does not match this clip: {} frames need {} audio "
-            "latent rows (round(frames / {} * {})). Connect the AV latent from the same H3 "
-            "sampler run as the frames.".format(
-                length, frame_count, expected, FPS, AUDIO_LATENT_FPS))
+            f"AV latent audio length {length} does not match this clip: {frame_count} frames need {expected} audio "
+            f"latent rows (round(frames / {FPS} * {AUDIO_LATENT_FPS})). Connect the AV latent from the same H3 "
+            "sampler run as the frames.")
     return audio_latent
 
 
@@ -245,12 +244,9 @@ def refine_video(frames, guider, sampler, sigmas, vae, seed, max_tile_width, max
                                  crop.x0 // VAE_SPATIAL:crop.x1 // VAE_SPATIAL].contiguous()
         if tile_latent.shape != tile_noise.shape:
             raise RuntimeError(
-                "VAE encoded a {}x{} px x {} frame tile to latent shape {}, but the tile's "
-                "noise slice is {}. This VAE's latent layout is not the MiniMax H3 one "
-                "(video [1,{},T,H/{},W/{}] on the {}k+{} frame grid).".format(
-                    crop.x1 - crop.x0, crop.y1 - crop.y0, grid_frames,
-                    tuple(tile_latent.shape), tuple(tile_noise.shape), VIDEO_LATENT_CHANNELS,
-                    VAE_SPATIAL, VAE_SPATIAL, FRAME_GRID_PERIOD, FRAME_GRID_PHASE))
+                f"VAE encoded a {crop.x1 - crop.x0}x{crop.y1 - crop.y0} px x {grid_frames} frame tile to latent shape {tuple(tile_latent.shape)}, but the tile's "
+                f"noise slice is {tuple(tile_noise.shape)}. This VAE's latent layout is not the MiniMax H3 one "
+                f"(video [1,{VIDEO_LATENT_CHANNELS},T,H/{VAE_SPATIAL},W/{VAE_SPATIAL}] on the {FRAME_GRID_PERIOD}k+{FRAME_GRID_PHASE} frame grid).")
         # The audio latent and its noise are COPIED per tile: they are the sampler's input
         # buffers, and one shared tensor would let a sampler's in-place write leak from tile
         # to tile (and back into the caller's AV latent). The latent's copy lands on the

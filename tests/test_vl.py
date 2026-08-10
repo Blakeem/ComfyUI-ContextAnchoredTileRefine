@@ -7,11 +7,11 @@ import logging
 
 import pytest
 import torch
+from test_conds import FakeControl
+from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 from context_anchored_tile_refine import sampling, vl
 from context_anchored_tile_refine.grid import Rect
-from test_conds import FakeControl
-from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
 
@@ -36,8 +36,8 @@ def test_left_and_right_tiles_share_the_boundary_cell_column():
     right = vl.slice_indices(Rect(96, 0, CANVAS_W, CANVAS_H), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ)
     # 96 px is 1.5 cells into the 3-wide grid: floor/ceil intersection keeps the
     # partly-covered middle column in BOTH tiles (the row-space overlap band).
-    assert left == [0, 1, 2, 4, 5, 7] + TAIL
-    assert right == [0, 2, 3, 5, 6, 7] + TAIL
+    assert left == [0, 1, 2, 4, 5, 7, *TAIL]
+    assert right == [0, 2, 3, 5, 6, 7, *TAIL]
     shared_rows = set(left) & set(right) - {0, 7} - set(TAIL)
     assert shared_rows == {2, 5}
     # Together the tiles cover every grid row.
@@ -47,7 +47,7 @@ def test_left_and_right_tiles_share_the_boundary_cell_column():
 def test_rows_are_in_raster_order_and_delimiters_bracket_them():
     indices = vl.slice_indices(Rect(96, 64, CANVAS_W, CANVAS_H), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ)
     # Bottom-right quadrant: grid row 1, columns 1..2 -> sequence rows 1+3+1=5, 1+3+2=6.
-    assert indices == [0, 5, 6, 7] + TAIL
+    assert indices == [0, 5, 6, 7, *TAIL]
     rows = indices[1:indices.index(1 + N_ROWS)]
     assert rows == sorted(rows)
 
@@ -57,14 +57,14 @@ def test_offset_places_region_tiles_in_the_full_canvas_frame():
     # cells the equivalent full-canvas rect selects.
     shifted = vl.slice_indices(Rect(0, 0, 96, 64), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ, offset_x=96, offset_y=64)
     direct = vl.slice_indices(Rect(96, 64, CANVAS_W, CANVAS_H), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ)
-    assert shifted == direct == [0, 5, 6, 7] + TAIL
+    assert shifted == direct == [0, 5, 6, 7, *TAIL]
 
 
 def test_offset_overreach_from_padding_clamps_to_the_grid():
     # The region crop is padded to /8 before tiling, so a tile rect can overreach the
     # full canvas by up to 7px; the cell range must clamp instead of indexing past it.
     indices = vl.slice_indices(Rect(0, 0, 96 + 7, 64 + 7), CANVAS_H, CANVAS_W, ENC_H, ENC_W, EXPECTED_SEQ, offset_x=96, offset_y=64)
-    assert indices == [0, 5, 6, 7] + TAIL
+    assert indices == [0, 5, 6, 7, *TAIL]
 
 
 # --- fake clip: build_global_slices end to end (comfy-free) -------------------------
@@ -132,8 +132,8 @@ def test_build_global_slices_selects_each_tiles_rows(stubbed_vl):
     tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
     positives = stubbed_vl.build_global_slices(FakeVLClip(), source, tiles)
     assert len(positives) == 2
-    expected = [[0, 1, 2, 4, 5, 7] + TAIL, [0, 2, 3, 5, 6, 7] + TAIL]
-    for positive, indices in zip(positives, expected):
+    expected = [[0, 1, 2, 4, 5, 7, *TAIL], [0, 2, 3, 5, 6, 7, *TAIL]]
+    for positive, indices in zip(positives, expected, strict=True):
         tensor, extras = positive[0]
         assert tensor.shape == (1, len(indices), 8)
         assert tensor[0, :, 0].tolist() == indices
@@ -191,7 +191,7 @@ def test_build_global_slices_rejects_wrong_encoder_seq(stubbed_vl):
         def __init__(self, rect):
             self.crop_rect = rect
 
-    with pytest.raises(RuntimeError, match="expected {}".format(EXPECTED_SEQ)):
+    with pytest.raises(RuntimeError, match=f"expected {EXPECTED_SEQ}"):
         stubbed_vl.build_global_slices(FakeVLClip(seq_override=EXPECTED_SEQ + 3), source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))])
 
 
@@ -297,7 +297,7 @@ def test_each_tile_samples_its_own_vision_slice(comfy_stubs, pipeline_clip):
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         expected = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_SEQ)
         assert seen["positive"][0]["cross_attn"][0, :, 0].tolist() == expected
         assert seen["negative"] is negative        # only the positive is swapped
@@ -337,7 +337,7 @@ def test_mask_path_encodes_the_full_image_at_the_bbox_offset(comfy_stubs, pipeli
     monkeypatch.setattr(vl, "build_global_slices", recording_build)
     _run_vl(image, VLGuider(), pipeline_clip, ctx=8, mask=mask)
 
-    y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
+    y0, _y1, x0, _x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
     assert (y0, x0) == (8, 8)
     assert seen["source"] is image                 # the FULL image, not the bbox crop
     assert seen["offsets"] == (x0, y0)
