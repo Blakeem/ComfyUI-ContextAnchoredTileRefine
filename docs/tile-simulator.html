@@ -297,8 +297,13 @@ footer {
           <input id="in-overlap" type="number" min="0" max="512" step="8" value="32"></div>
         <div class="ctl"><label for="in-ctx">context_anchor</label>
           <input id="in-ctx" type="number" min="0" max="512" step="8" value="32"></div>
+        <div class="ctl"><label for="in-multiple">grid multiple</label>
+          <select id="in-multiple">
+            <option value="8" selected>8 — image nodes</option>
+            <option value="32">32 — VL Video (MiniMax H3)</option>
+          </select></div>
       </div>
-      <p class="hint">The caps are the largest crop the model ever sees, rings included.</p>
+      <p class="hint">The caps are the largest crop the model ever sees, rings included. The grid multiple is the pixel granularity every crop lands on: 8 for the image nodes, 32 for the video node (VAE 16&times; &times; DiT patch 2).</p>
     </div>
 
     <div class="panel" id="readouts">
@@ -360,9 +365,14 @@ function round8(x) {
   return roundHalfEven(x / 8) * 8;
 }
 
+/** Smallest multiple of `multiple` that is >= x — matches grid.round_up_multiple(). */
+function roundUpMultiple(x, multiple) {
+  return Math.ceil(x / multiple) * multiple;
+}
+
 /** Smallest multiple of 8 that is >= x — matches grid.round8_up(). */
 function round8Up(x) {
-  return Math.ceil(x / 8) * 8;
+  return roundUpMultiple(x, 8);
 }
 
 /**
@@ -378,27 +388,30 @@ function round8Up(x) {
  * frozen halo). The per-seam ring width r is their sum. There is no
  * overlap floor: a base is judged on the cap constraint alone.
  *
- * @param {number} L       axis canvas length, already a multiple of 8
- * @param {number} cap     max tile size on this axis (M)
- * @param {number} ctx     context_anchor
- * @param {number} overlap context_overlap (default 0 — no feather)
+ * @param {number} L        axis canvas length, already a multiple of `multiple`
+ * @param {number} cap      max tile size on this axis (M)
+ * @param {number} ctx      context_anchor
+ * @param {number} overlap  context_overlap (default 0 — no feather)
+ * @param {number} multiple pixel granularity every crop lands on — matches
+ *                          grid.solve_axis(multiple=): 8 for the image nodes,
+ *                          32 for the VL Video node (MiniMax H3)
  * @returns {{ok:true,n:number,base:number,last:number,overhead:number,r:number}
  *         | {ok:false,r:number,failN:number,failBase:number,reason:string}}
  */
-function solveAxis(L, cap, ctx, overlap = 0) {
+function solveAxis(L, cap, ctx, overlap = 0, multiple = 8) {
   var r = ctx + overlap;
-  var maxN = Math.max(1, Math.ceil(L / 8)) + 1; /* defensive bound; base(maxN) = 8 */
+  var maxN = Math.max(1, Math.ceil(L / multiple)) + 1; /* defensive bound; base(maxN) = multiple */
 
   for (var n = 1; n <= maxN; n++) {
-    var base = round8Up(Math.ceil(L / n));
+    var base = roundUpMultiple(Math.ceil(L / n), multiple);
     var overhead = (n === 1) ? 0 : (n === 2) ? r : 2 * r;
 
     if (base + overhead <= cap) {
       return { ok: true, n: n, base: base, last: L - (n - 1) * base, overhead: overhead, r: r };
     }
   }
-  /* Unreachable unless the cap is smaller than the minimum base 8 + overhead. */
-  return { ok: false, r: r, failN: maxN, failBase: 8, reason: "exhausted" };
+  /* Unreachable unless the cap is smaller than the minimum base `multiple` + overhead. */
+  return { ok: false, r: r, failN: maxN, failBase: multiple, reason: "exhausted" };
 }
 
 /** Expand a core rect by `amount` on each side that has a neighbor, clamped to the canvas. */
@@ -569,6 +582,30 @@ var SELF_TESTS = [
     }
   },
   {
+    name: "roundUpMultiple(x, 32): 854 -> 864; 1344 -> 1344 — matches grid.round_up_multiple()",
+    run: function () {
+      return expect({ a: roundUpMultiple(854, 32), b: roundUpMultiple(1344, 32) }, { a: 864, b: 1344 });
+    }
+  },
+  {
+    name: "solveAxis multiple=32, VL Video 2x case: L=2688 cap 1408 ctx=32 overlap=32 -> n=2 base 1344 (the H3 2x2 X-axis)",
+    run: function () {
+      var s = solveAxis(2688, 1408, 32, 32, 32);
+      /* n=1: base 2688 > 1408. n=2: base roundUpMultiple(1344,32)=1344, overhead r=64, 1408<=1408. */
+      return expect({ ok: s.ok, n: s.n, base: s.base, last: s.last },
+                    { ok: true, n: 2, base: 1344, last: 1344 });
+    }
+  },
+  {
+    name: "solveAxis multiple=32 snaps a non-/32 base up: L=2560 cap 1000 ctx=0 overlap=0 -> n=3 base 864",
+    run: function () {
+      var s = solveAxis(2560, 1000, 0, 0, 32);
+      /* n=2: base 1280 > 1000. n=3: ceil(2560/3)=854 -> roundUpMultiple=864 <= 1000; last=2560-2*864=832. */
+      return expect({ ok: s.ok, n: s.n, base: s.base, last: s.last },
+                    { ok: true, n: 3, base: 864, last: 832 });
+    }
+  },
+  {
     name: "buildLayout interior: symmetric cropRect all sides vs directional pasteRect top+left only. L=2048 cap 1024 ctx=64 overlap=64 (r=128): 3x3, core 688, crop 944, overlapInner 816, paste 752 (top/left)",
     run: function () {
       var sx = solveAxis(2048, 1024, 64, 64);
@@ -733,6 +770,7 @@ function readInputs() {
   state.maxH = clampSnap(parseFloat(els.mh.value), 256, 16384, 8);
   state.ctx = clampSnap(parseFloat(els.ctxIn.value), 0, 512, 8);
   state.overlap = clampSnap(parseFloat(els.overlap.value), 0, 512, 8);
+  state.multiple = parseInt(els.multiple.value, 10) === 32 ? 32 : 8;
 }
 
 function normalizeInputs() {
@@ -755,12 +793,13 @@ function axisErrorMessage(axisName, capName, cap) {
 function recompute() {
   readInputs();
 
-  /* The node never upscales: the factor models whatever ran before it, then the node
-     reflect-pads up to /8 (pad_image_to_multiple) and crops back at the end. */
+  /* The refine stage never resamples: the factor models the upscale that ran before
+     tiling, then the pipeline reflect-pads up to the grid multiple
+     (pad_image_to_multiple: /8 image, /32 video) and crops back at the end. */
   state.inputW = Math.max(8, Math.round(state.srcW * state.factor));
   state.inputH = Math.max(8, Math.round(state.srcH * state.factor));
-  state.canvasW = round8Up(state.inputW);
-  state.canvasH = round8Up(state.inputH);
+  state.canvasW = roundUpMultiple(state.inputW, state.multiple);
+  state.canvasH = roundUpMultiple(state.inputH, state.multiple);
   state.errors = [];
   state.solX = null;
   state.solY = null;
@@ -769,8 +808,8 @@ function recompute() {
   state.pinnedTile = -1;
   state.pinPos = null;
 
-  state.solX = solveAxis(state.canvasW, state.maxW, state.ctx, state.overlap);
-  state.solY = solveAxis(state.canvasH, state.maxH, state.ctx, state.overlap);
+  state.solX = solveAxis(state.canvasW, state.maxW, state.ctx, state.overlap, state.multiple);
+  state.solY = solveAxis(state.canvasH, state.maxH, state.ctx, state.overlap, state.multiple);
   if (!state.solX.ok) state.errors.push(axisErrorMessage("Width", "max_tile_width", state.maxW));
   if (!state.solY.ok) state.errors.push(axisErrorMessage("Height", "max_tile_height", state.maxH));
   if (state.solX.ok && state.solY.ok) {
@@ -1361,6 +1400,7 @@ function init() {
   els.mh = document.getElementById("in-mh");
   els.ctxIn = document.getElementById("in-ctx");
   els.overlap = document.getElementById("in-overlap");
+  els.multiple = document.getElementById("in-multiple");
   els.inputSize = document.getElementById("input-size");
   els.readoutsBody = document.getElementById("readouts-body");
   els.feather = document.getElementById("feather");

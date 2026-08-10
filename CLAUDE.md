@@ -1,8 +1,11 @@
 # Context-Anchored Tile Refine, project guide
 
-Single-node ComfyUI custom node. It refines an already-upscaled IMAGE by dynamic tiling,
-or refines only a masked region of a large image without processing the rest. Upscaling happens
-outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.9.
+ComfyUI custom node package, one tiling engine behind four nodes. The image nodes refine an
+already-upscaled IMAGE by dynamic tiling (or only a masked region, leaving the rest untouched;
+upscaling happens outside the node). The video node (`ContextAnchoredTileUpscaleVLVideo`,
+MiniMax H3) upscales a whole clip in-node and then tile-refines it the same way.
+Target: ComfyUI 0.3.45+ (video node needs an H3-capable tree), V1 node schema,
+Python 3.12, torch 2.9.
 
 ## Prime directives (highest priority, override convenience)
 
@@ -38,18 +41,26 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   all-in-one variant (widgets replace the NOISE/SAMPLER/SIGMAS/GUIDER inputs, optional
   UPSCALE_MODEL + negative, no mask) — it runs `upscale.prepare_upscaled` on the whole
   image, builds the sampling objects via `upscale.py`, and calls the same
-  `refine_image(vl_clip=...)`. Comfy-free at module scope (the combo lists come from a
-  lazy `import comfy.samplers` inside `INPUT_TYPES`).
+  `refine_image(vl_clip=...)`; `ContextAnchoredTileUpscaleVLVideo` is the MiniMax H3
+  all-in-one (IMAGE frames of ONE clip in, optional UPSCALE_MODEL + av_latent, no cfg /
+  negative / prompt — H3 is CFG-free) — it runs the RAM-safe stage order (2 fps picks
+  upscaled and VL-encoded BEFORE the full-clip canvases exist; the guider placeholder IS
+  the global encode, no second CLIP load) and calls `video.refine_video`. Comfy-free at
+  module scope (the combo lists come from a lazy `import comfy.samplers` inside
+  `INPUT_TYPES`).
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
-  **Stdlib only**, no torch, no comfy.
+  `solve_axis(multiple=)` sets the pixel granularity crops land on: 8 default (image,
+  bit-identical), 32 for H3 (VAE 16x x DiT patch 2). **Stdlib only**, no torch, no comfy.
 - `context_anchored_tile_refine/sampling.py`: the pipeline. `refine_image` is the entry point.
   Without a mask it delegates to `_refine_tiles` (pad to /8, solve the grid, per-tile
   encode/sample/decode from a live canvas, directional-feather composite, crop back). With a mask
   it crops to the mask bbox plus `context_anchor`, gates every tile's denoise mask to the region,
   and composites back through a 1px anti-aliased edge, leaving everything outside byte-identical.
   **torch-only at module scope**; `comfy` / `latent_preview` are imported lazily inside functions
-  (a subprocess test pins this).
+  (a subprocess test pins this). `make_tile_progress` guards a nested x0 before previewing
+  (core hands nested-latent callbacks a NestedTensor; the guard previews stream 0, a no-op
+  for image latents).
 - `context_anchored_tile_refine/conds.py`: per-tile ControlNet support. `refine_image` validates
   every control hint against the full input size (hard error on mismatch) and bbox-slices it on
   the mask path; `_refine_tiles` pads the hints like the canvas and, per tile, swaps
@@ -76,16 +87,41 @@ outside the node. Target: ComfyUI 0.3.45+, V1 node schema, Python 3.12, torch 2.
   the FULL image is encoded and each region tile's rect is offset by the bbox origin
   (`slice_indices` offsets), so a masked refine stays globally informed. **torch-only at
   module scope**, comfy lazy (subprocess test pins it).
-- `context_anchored_tile_refine/upscale.py`: the all-in-one node's internals. Whole-image
+- `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
   exact `upscale_by` target; a same-size resize is skipped because core's lanczos is an 8-bit
-  PIL round trip, so it would be a quality loss, not a no-op) plus in-process builders
+  PIL round trip, so it would be a quality loss, not a no-op; `prepare_upscaled_video` runs
+  the same stage in 8-frame chunks into a preallocated fp16 canvas — a whole-clip lanczos
+  would materialize ~15 GB fp32 at once) plus in-process builders
   mirroring the core custom-sampling nodes (`Noise_RandomNoise`, `build_sigmas` ==
   BasicScheduler incl. denoise<=0 -> empty sigmas -> refine returns the upscale untouched,
   `build_guider` == core CFGGuider — required, its `original_conds` convention is what the VL
-  positive swap keys on — and `encode_empty` for the placeholder positive / default negative).
-  **torch-only at module scope**, comfy lazy (subprocess test pins it).
+  positive swap keys on — `build_basic_guider` == core Guider_Basic for the CFG-free H3 path,
+  same `original_conds` convention — and `encode_empty` for the placeholder positive /
+  default negative). **torch-only at module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/vl_video.py`: the video node's conditioning, the H3 analogue
+  of `vl.py`. Core's ref-video presentation mirrored VERBATIM (every 12th frame, sequential
+  half-second timestamps, empty prompt); ONE `clip.tokenize("", minimax_ref_items=[...])`
+  encode bracketed by an 8 GiB `EXTRA_RESERVED_VRAM` raise (restored in try/finally — the
+  24k-token forward otherwise runs ~0.6 GiB of margin on a 24 GB card); the row layout is
+  derived by WALKING the token stream (per-block strides vary), never assumed, and asserted
+  against the encoder output; per tile `slice_rows` keeps every text row plus the 32px grid
+  cells the crop intersects with `minimax_token_tags` index-selected in lockstep (the DiT's
+  AdaLN modality runs key on them). Picks are pre-resampled only above the tokenizer's
+  per-frame `max_pixels=12845056` cap so its own bilinear resize never fires. **torch-only
+  at module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/video.py`: the video pipeline, `refine_video` entry point.
+  Frames repeat-padded onto H3's 17k+5 grid (trimmed back at the end), reflect-padded /32;
+  fp16 raw/live canvases with the image path's discipline (bands + core encode from RAW,
+  anchor ring from LIVE); nested AV latents per tile with the audio stream ALWAYS present
+  and frozen (`(video mask, zeros_like(audio))` — a missing stream mask defaults to ones
+  and would REGENERATE the audio); audio-length fail-fast against core's `temporal_shape`
+  formula; ONE nested canvas noise draw sliced per tile at /16; per-tile positive swap in
+  the same pristine-map try/finally; the production composite (plateau/falloff feather,
+  min-error routing, DC match — reductions run over the frame axis, one offset and one cut
+  per clip, temporally stable) blended fp32 in 16-frame chunks. **torch-only at module
+  scope**, comfy lazy (subprocess test pins it).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. `sample_latent` hands it over pre-normalized to the canonical float32 form on
@@ -125,8 +161,9 @@ published archive.
 ## Conventions
 
 - Match ComfyUI core naming and comment style; comment only non-obvious constraints.
-- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` / `conds.py` / `vl.py` module scopes
-  comfy-free (lazy imports; `conds.py` never imports comfy anywhere — control objects are
-  duck-typed, and `vl.py` duck-types the CLIP the same way).
+- Keep `grid.py` stdlib-only, and `node.py` / `sampling.py` / `conds.py` / `vl.py` /
+  `vl_video.py` / `video.py` module scopes comfy-free (lazy imports; `conds.py` never imports
+  comfy anywhere — control objects are duck-typed, and `vl.py` duck-types the CLIP the same
+  way).
 - Prefer views over copies and slice noise rather than redrawing it, but only after the prime
   directives above are satisfied.
