@@ -17,9 +17,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Comfy Desktop's bundled source tree, tried after the standard custom_nodes layout.
-# Ordered newest-install-first: the @comfyorgcomfyui-electron path is a pre-rename desktop
-# build (0.3.45, no z-image) that may not exist any more, so it is only a last resort.
+# Ordered newest-install-first: ComfyUI-Installs holds the current source install (the
+# only H3-capable tree on this machine); the @comfyorgcomfyui-electron path is a
+# pre-rename desktop build (0.3.45, no z-image) that may not exist any more, so it is
+# only a last resort.
 DESKTOP_COMFYUI_ROOTS = (
+    Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI"),
     Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),
     Path(r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"),
 )

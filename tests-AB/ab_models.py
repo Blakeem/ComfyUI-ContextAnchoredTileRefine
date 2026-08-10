@@ -46,7 +46,9 @@ def to_uint8(image):
     """SaveImage's quantization, exactly: truncate, do NOT round.
     (nodes.py SaveImage: np.clip(255. * image, 0, 255).astype(np.uint8).)
     Matching it matters — the self-check diffs our PNG against ComfyUI's."""
-    scaled = 255.0 * image[0].detach().cpu().numpy()
+    # .float() after .cpu(): fp16 canvases would otherwise scale IN fp16 (spacing 0.125
+    # near 255), rounding before the truncation and biasing ~3% of pixels +1 vs SaveImage.
+    scaled = 255.0 * image[0].detach().cpu().float().numpy()
     return np.clip(scaled, 0, 255).astype(np.uint8)
 
 
@@ -302,7 +304,9 @@ def weight_fingerprint(model, samples=4):
         tensor = state[name]
         if tensor.numel() < 4096:
             continue
-        total += float(tensor.detach().double().abs().sum().item())
+        # One float64 copy, abs in place on it: .double().abs() keeps both alive at once.
+        # Cast first, never abs() first — these state_dicts carry int8/float8 weights.
+        total += float(tensor.detach().to(torch.float64).abs_().sum().item())
         samples -= 1
         if samples <= 0:
             break
@@ -320,10 +324,12 @@ def free_gpu():
     re-upload of the 11.5 GB UNET across PCIe on the next sample, per run."""
     import comfy.model_management
 
+    # Cache-empty LAST: the collect that reaps the cycle-held patchers unload_all_models()
+    # dropped has to run before the blocks they hold can be returned to the allocator.
     gc.collect()
     comfy.model_management.unload_all_models()
-    comfy.model_management.soft_empty_cache()
     gc.collect()
+    comfy.model_management.soft_empty_cache()
 
 
 def clear_cache():

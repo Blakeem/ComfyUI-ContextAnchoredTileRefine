@@ -106,6 +106,13 @@ Venv python: `C:\Users\Blake\Documents\ComfyUI\.venv\Scripts\python.exe` (do not
   `models\checkpoints\v1-5-pruned-emaonly-fp16.safetensors`.
 - The no-mask path is pinned byte-for-byte by hand-computed value tests. Treat them as the
   regression net for any change to `_refine_tiles`.
+- **One GPU sampling job at a time** on this machine (24 GB 3090 Ti): a single 3x-canvas
+  refine peaks ~19-20 GiB reserved, so a second concurrent sampler (another harness process,
+  or the ComfyUI app with models resident) spills into the Windows sysmem fallback — an
+  order of magnitude slower, and it can end a run as a SILENT native crash with no Python
+  traceback. Check `nvidia-smi` is idle before launching. At 3x+ also render one config per
+  process (`tests-AB\... --only <label>`): a long multi-config process dies the same silent
+  way even alone (allocator-state accumulation; seen on Z-Image 2026-07 and Krea 2 2026-08-09).
 - Final judgement on seams is always the owner's visual A/B in ComfyUI, not a metric.
 
 ## Release
