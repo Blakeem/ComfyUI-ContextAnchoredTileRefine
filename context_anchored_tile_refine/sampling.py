@@ -37,6 +37,116 @@ from . import conds, grid, vl
 FEATHER_PLATEAU = 0.10
 FEATHER_FALLOFF = 2.0
 
+# The frozen context_anchor ring is re-presented to the model at EVERY step: comfy
+# samplers.py:639 rebuilds the model's input as
+#     x*denoise_mask + scale_latent_inpaint(x, sigma, noise, latent_image)*(1 - denoise_mask)
+# and core's default scale_latent_inpaint (comfy model_base.py:408) re-noises the frozen
+# region to the CURRENT sigma. At denoise 0.35 the first sigma is 0.63, so the ring reaches
+# the model as ~63% noise exactly while composition is being decided — the anchor is barely
+# legible when it matters most. That default is principled (one consistent noise level across
+# the latent), not a bug; the video families deliberately trade it away instead, overriding
+# scale_latent_inpaint to return the clean latent ("Hold anchor constant across all sigmas",
+# comfy model_base.py:2058 WAN22, also WAN21 :1919 / HunyuanVideo :1391 / LTXAV :1237).
+# Those models are LEFT ALONE — holding clean is the endpoint this schedule approaches.
+#
+# For every model on core's default, the ring is instead presented at
+# `sigma * anchor_ring_factor(r)`, r = sigma/sigma_first:
+#
+#   r  1.00 ...... 0.33  0.28  0.23  0.18  0.12  0.06  0.00
+#   f  1.00 ...... 0.33  0.28  0.23  0.18  0.21  0.65  1.00
+#      \___ the ring LEADS the core ___/    \__ released __/
+#
+# Down to r == RELEASE the ring leads: matched to the core at step 0, so there is no noise
+# discontinuity while structure forms, then denoising faster so it resolves FIRST and the core
+# follows it. Below RELEASE it smoothstep-rejoins the core (continuous by construction: the
+# blend weight is 0 at r == RELEASE), so the last steps generate their own texture instead of
+# copying the neighbour's.
+#
+# Settled by owner A/B at production scale (2304x3072, 4 tiles, context_anchor 256,
+# context_overlap 32, denoise 0.35, 28 steps) against core's plain re-noised default and five
+# other curves. Against the default this removes freckle amplification and a white spotting
+# artifact, improves foliage texture, and holds the joint at 0.17x the seam-free control's own
+# column-to-column variation. Two neighbours measured worse and are not shipped: releasing at
+# 0.30 (drifts, because the reference is withdrawn while structure is still settling) and a
+# gentler sqrt lead across the whole schedule (moves the subject 4x as much for less texture —
+# coherence is bought in the EARLY steps). 0.15 is where fine detail starts arriving on a
+# 28-step schedule.
+#
+# This changes only what the model SEES. comfy samplers.py:642 restores the frozen pixels in
+# the sampler's OUTPUT unconditionally, so no finished pixel is ever re-diffused.
+ANCHOR_RING_RELEASE = 0.15
+
+
+def anchor_ring_factor(r):
+    # Ring sigma as a fraction of the core's, at denoising progress r = sigma/sigma_first.
+    # 1.0 == the ring carries the same noise as the core (core's own default); 0.0 == clean.
+    # Clamped because an SDE/ancestral sampler may evaluate at a sigma_hat above sigma_first,
+    # and the ring must never be noisier than the core it is anchoring.
+    # Blending the still-falling lead against 1.0 with a smoothstep (zero slope at the
+    # handover) makes the factor dip fractionally below the lead line for the first part of the
+    # release window before climbing — 0.00224 at worst, 1.5% of RELEASE, and part of the curve
+    # the owner's A/B picked, so it stands. tests/test_anchor_ring.py pins its size.
+    r = min(1.0, max(0.0, r))
+    if r > ANCHOR_RING_RELEASE:
+        return r
+    u = 1.0 - r / ANCHOR_RING_RELEASE
+    return r + (1.0 - r) * (u * u * (3.0 - 2.0 * u))     # smoothstep: flat slope at both ends
+
+
+def _model_re_noises_anchor(model):
+    # True only for models on core's DEFAULT scale_latent_inpaint. Walking __mro__ keeps this
+    # comfy-free (module scope stays torch-only) and needs no list of model classes: anything
+    # that overrides the method already manages the frozen region itself, and anything without
+    # the method has no frozen-region behaviour to schedule.
+    for cls in type(model).__mro__:
+        if "scale_latent_inpaint" in vars(cls):
+            return cls.__name__ == "BaseModel"
+    return False
+
+
+def anchor_ring_schedule(guider, sigmas, enabled=True):
+    # Applies anchor_ring_factor for the duration of ONE sampler run. Patches the model
+    # INSTANCE, never the class: core caches model objects for the whole session, so a class
+    # patch would follow the model into every other node in the graph. Restored in `finally`.
+    # `enabled` is the per-node gate — see the ANCHOR RING gate in _refine_tiles.
+    import contextlib
+
+    @contextlib.contextmanager
+    def noop():
+        yield
+
+    model = getattr(getattr(guider, "model_patcher", None), "model", None)
+    if not enabled or model is None or sigmas.numel() == 0 or not _model_re_noises_anchor(model):
+        return noop()
+    sigma_first = float(sigmas.reshape(-1)[0])
+    if sigma_first <= 0.0:
+        return noop()
+
+    @contextlib.contextmanager
+    def patched():
+        def scale_latent_inpaint(sigma, noise, latent_image, **kwargs):
+            # anchor_ring_factor is resolved through the module at call time, so an A/B
+            # harness can swap the curve at one point without patching comfy at all.
+            factor = anchor_ring_factor(float(sigma.reshape(-1)[0]) / sigma_first)
+            scaled = sigma * factor
+            # core's own reshape (comfy model_base.py:409): sigma is per-batch-item and has to
+            # broadcast over the latent's trailing dims.
+            shape = [scaled.shape[0]] + [1] * (len(noise.shape) - 1)
+            return model.model_sampling.noise_scaling(scaled.reshape(shape), noise, latent_image)
+
+        had_own = "scale_latent_inpaint" in vars(model)
+        saved = vars(model).get("scale_latent_inpaint")
+        model.scale_latent_inpaint = scale_latent_inpaint
+        try:
+            yield
+        finally:
+            if had_own:
+                model.scale_latent_inpaint = saved
+            else:
+                del model.scale_latent_inpaint
+
+    return patched()
+
 
 def pad_image_to_multiple(image, multiple=8):
     # [B,H,W,C] → reflect-pad right/bottom onto the /multiple grid; returns the image
@@ -233,7 +343,7 @@ def _path_displacement(err, band, plateau, k):
     return u50 - u_path
 
 
-def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None):
+def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None, anchor_ring=True):
     # The per-tile reuse seam. Mirrors SamplerCustomAdvanced.sample with three deliberate
     # deviations: no fix_empty_latent_channels (the latent always comes from a real
     # vae.encode), no x0_output dict (the denoised output is unused; previews work
@@ -264,7 +374,9 @@ def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, d
         mask_shape = (-1, 1) + (1,) * (latent_samples.ndim - 4) + denoise_mask.shape[-2:]
         denoise_mask = denoise_mask.reshape(mask_shape).to(device=guider.model_patcher.load_device, dtype=torch.float32)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    # anchor_ring is False for the non-VL node — see the ANCHOR RING gate in _refine_tiles.
+    with anchor_ring_schedule(guider, sigmas, enabled=anchor_ring):
+        samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())
 
 
@@ -730,7 +842,14 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 swapped_conds["positive"] = tile_positives[tile_idx]
             guider.original_conds = swapped_conds
         try:
-            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
+            # ANCHOR RING gate: the schedule runs for the VL nodes only. Settled by the
+            # owner's visual A/B (2026-08-13, tests-AB/run_ab_matrix.py, scene `portrait`):
+            # with VL slices it is a win across scenes, but on the plain-conditioning node it
+            # was consistently worse — a distorted ear and duller colour/texture at the seam.
+            # The mechanism fits: the ring resolves ahead of the core so the core follows it,
+            # and only the VL positive tells a tile what its neighbourhood actually contains.
+            # Without that, the tile is pulled toward a ring it cannot interpret.
+            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx), anchor_ring=vl_clip is not None)
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds

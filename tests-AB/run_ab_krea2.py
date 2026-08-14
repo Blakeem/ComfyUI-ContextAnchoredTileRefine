@@ -113,6 +113,80 @@ ARMS = {
     "2-vl-slices": "production VL path: per-tile vision slices, no text",
     "3-tile-captions": "per-tile VLM caption as plain-text positive; no VL slices",
     "4-vl-plus-captions": "per-tile vision slices + the same caption as text rows",
+    # ---- RING SCHEDULE sweep, production geometry (anchor 256, 2x2 tiles, 2304x3072) ----
+    # All use the production VL path. `ring` picks how the frozen context_anchor ring is
+    # presented to the DiT at each step; `overlap` overrides REFINE.context_overlap.
+    "R0-control-o32": "VL slices, ring re-noised (SHIPPING behaviour) — the reference",
+    "R1-lead1-o0": "ring LEADS the core (sigma^2/sigma0), overlap 0",
+    "R2-lead1-o32": "ring LEADS the core, overlap 32",
+    "R3-ramp-o0": "ring starts QUIET and ramps UP to the base sigma by the end, overlap 0",
+    "R4-ramp-o32": "ring starts QUIET and ramps UP to the base sigma, overlap 32",
+    # R2 (lead1 + overlap 32) is the owner's pick: ultra coherent, freckle amplification
+    # gone, zero seam, most vivid colour — only "a little smooth". These two attack the
+    # smoothness from opposite ends, both keeping overlap 32.
+    "R5-lead05-o32": "GENTLER lead (sqrt) — less reference pull, more independent detail",
+    "R6-lead1r15-o32": "lead1 for 85% of the schedule, then the ring REJOINS for the last 15%",
+    # R6 read as a real gain (more background detail, better overall) but subtle, so the
+    # release point becomes the dial. R7 doubles the free window; the target is the earliest
+    # release that starts adding SKIN TEXTURE without giving back R2's coherency.
+    "R7-lead1r30-o32": "lead1 for 70% of the schedule, then the ring REJOINS for the last 30%",
+    # R6 WON the sweep and becomes the shipped default. These two re-run the per-tile caption
+    # arms under it, against the already-rendered ringless 3-/4- arms at the same geometry and
+    # seed: the ring is the ONLY variable, so the question "does a stronger anchor suppress
+    # the deviation captions introduce" is answerable by pairing 3 vs R8 and 4 vs R9.
+    "R8-captions-r15": "arm 3 (per-tile captions, no VL slices) under R6's ring schedule",
+    "R9-vl-captions-r15": "arm 4 (VL slices + caption in the same encode) under R6's ring",
+    # Verification, not a variant: R6's exact configuration driven by the SHIPPED default
+    # instead of a harness override. Must match AB_00676-d035__R6-lead1r15-o32.png, which is
+    # the image the owner approved; a divergence means production does not do what was picked.
+    "R6P-production": "R6's config through the shipped anchor_ring_schedule (no override)",
+    # Identical to R6 above the release point; below it the ring rejoins from the release
+    # VALUE instead of from the still-falling lead, so it never dips below the lead line. The
+    # ring therefore carries slightly MORE noise through the two released steps — the owner's
+    # question is whether a noisier neighbourhood there costs detail.
+    "R10-nodip-r15": "R6 with a dip-free rejoin: ring keeps pace with the lead, never under it",
+    # The OTHER shipping surface. ContextAnchoredTileRefine has no VL and no captions — a plain
+    # text positive shared by every tile — and the ring is on there too. Pairs with the already
+    # rendered `1-text-prompt` (identical, ringless) to test the ring on its own, with no VL
+    # conditioning in the picture. Configurations that mix captions WITHOUT VL are deliberately
+    # absent: the VL node cannot disable VL, so they can never ship.
+    "R11-base-ring": "base node's mode (shared text prompt, no VL, no captions) + the ring",
+}
+
+# arm -> what positive conditioning each tile gets. Anything unlisted is the production VL
+# path, which is every ring-sweep arm. Declarative so a new arm needs no new branch:
+#   "text"        one shared full-prompt text encode, no VL slices (the pre-VL baseline)
+#   "vl"          per-tile vision slices, no text (production)
+#   "captions"    per-tile VLM caption as plain text, no VL slices
+#   "vl+captions" per-tile vision slices with the caption riding inside the same encode
+ARM_CONDS = {
+    "1-text-prompt": "text",
+    "3-tile-captions": "captions",
+    "4-vl-plus-captions": "vl+captions",
+    "R8-captions-r15": "captions",
+    "R9-vl-captions-r15": "vl+captions",
+    "R11-base-ring": "text",
+}
+
+
+def arm_conds(arm):
+    return ARM_CONDS.get(arm, "vl")
+
+# arm -> (ring schedule, context_overlap override). ring: None | "lead1" | "ramp".
+RING_ARMS = {
+    "R0-control-o32": (None, 32),
+    "R1-lead1-o0": ("lead1", 0),
+    "R2-lead1-o32": ("lead1", 32),
+    "R3-ramp-o0": ("ramp", 0),
+    "R4-ramp-o32": ("ramp", 32),
+    "R5-lead05-o32": ("lead05", 32),
+    "R6-lead1r15-o32": ("lead1r15", 32),
+    "R7-lead1r30-o32": ("lead1r30", 32),
+    "R8-captions-r15": ("lead1r15", 32),
+    "R9-vl-captions-r15": ("lead1r15", 32),
+    "R6P-production": ("production", 32),
+    "R10-nodip-r15": ("lead1r15nodip", 32),
+    "R11-base-ring": ("production", 32),
 }
 
 RUN_TAG = "00676-d035"
@@ -395,14 +469,85 @@ def build_settings(arm, captions):
         "unet": UNET_NAME, "clip": CLIP_NAME, "clip_type": CLIP_TYPE, "vae": VAE_NAME,
         "upscale_model": UPSCALE_MODEL_NAME,
         "guider": "CFGGuider",
-        "positive_prompt": POSITIVE_PROMPT if arm == "1-text-prompt" else "",
+        "positive_prompt": POSITIVE_PROMPT if arm_conds(arm) == "text" else "",
         "negative_prompt": NEGATIVE_PROMPT,
-        "caption_instruction": CAPTION_INSTRUCTION if arm in ("3-tile-captions", "4-vl-plus-captions") else "",
-        "tile_captions": captions if arm in ("3-tile-captions", "4-vl-plus-captions") else [],
+        "caption_instruction": CAPTION_INSTRUCTION if "captions" in arm_conds(arm) else "",
+        "tile_captions": captions if "captions" in arm_conds(arm) else [],
         "harness": "tests-AB/run_ab_krea2.py",
         "rendered_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
     return payload
+
+
+@contextlib.contextmanager
+def ring_schedule(kind):
+    """Override the SHIPPED anchor-ring curve for one arm.
+
+    `sampling.anchor_ring_schedule` now applies `sampling.anchor_ring_factor` by default and
+    does it by patching the model INSTANCE, so an arm must express itself as a different
+    factor curve at that one seam — patching `comfy.model_base.Krea2` (what this used to do)
+    would be silently shadowed by the instance patch.
+
+    factor is the ring's sigma as a fraction of the core's:
+        1.0  ring carries the same noise as the core == comfy's plain default
+        0.0  ring fully clean
+
+    kind None       core's default, the pre-ring reference: re-noised to the current sigma
+                    every step (comfy/samplers.py:639 -> CONST.noise_scaling, since Krea2 at
+                    model_base.py:2456 has no scale_latent_inpaint override). Principled — one
+                    consistent noise level across the latent — but it hands the DiT a ring that
+                    is ~76% noise at step 0 (d0.5), when structure is decided. The model DOES
+                    read the ring: filling a held ring with flat grey moves the neighbouring
+                    tile 15.092/255 while the already-rendered tile stays bit-identical. So the
+                    default is a legibility problem, not indifference.
+    "production"    whatever the node ships — leaves anchor_ring_factor alone.
+    "lead1"         factor = r. Matched to the core at step 0 (no discontinuity while
+                    structure forms), then denoising faster so the ring resolves first and the
+                    core follows it.
+    "lead05"        gentler sqrt lead. Rejected: moves the subject 4x more than lead1r15 for
+                    less texture — the pull that buys coherence lives in the EARLY steps.
+    "lead1rNN"      lead1, then smoothstep-rejoin below r = NN/100. NN is parsed, so any rung
+                    is one word. NN=15 is what ships.
+    "ramp"          the inverse: ring quiet early, ramping UP to the core's sigma by the end.
+                    Rejected: no reference exactly when texture is decided -> visible seam.
+    """
+    from context_anchored_tile_refine import sampling
+
+    if kind == "production":
+        yield
+        return
+
+    def factor(r):
+        r = min(1.0, max(0.0, r))
+        if kind is None:
+            return 1.0
+        if kind == "lead1":
+            return r
+        if kind == "lead05":
+            return r ** 0.5
+        if kind.startswith("lead1r"):
+            # "lead1r15" rejoins from the STILL-FALLING lead, "lead1r15nodip" from the lead's
+            # value AT the release point. Both are continuous there and both reach 1.0 at r=0;
+            # the first dips fractionally below the lead line first (smoothstep has zero slope
+            # at the handover while the lead keeps falling), the second cannot.
+            spec = kind[len("lead1r"):]
+            nodip = spec.endswith("nodip")
+            release = int(spec.removesuffix("nodip")) / 100.0
+            if r > release:
+                return r
+            u = 1.0 - r / release
+            origin = release if nodip else r
+            return origin + (1.0 - origin) * (u * u * (3.0 - 2.0 * u))
+        t = 1.0 - r                             # ramp
+        return t * t * (3.0 - 2.0 * t)
+
+    saved = sampling.anchor_ring_factor
+    sampling.anchor_ring_factor = factor
+    print(f"[render]  ring curve '{kind}' overrides the shipped anchor_ring_factor")
+    try:
+        yield
+    finally:
+        sampling.anchor_ring_factor = saved
 
 
 def render(arm, canvas, tiles, clip, model, vae, pos_full, negative, empty, arm3, arm4, captions):
@@ -412,26 +557,29 @@ def render(arm, canvas, tiles, clip, model, vae, pos_full, negative, empty, arm3
 
     from context_anchored_tile_refine import sampling, upscale
 
-    positive = pos_full if arm == "1-text-prompt" else empty
+    conds = arm_conds(arm)
+    positive = pos_full if conds == "text" else empty
     guider = upscale.build_guider(model, positive, negative, REFINE.cfg)
     sigmas = upscale.build_sigmas(model, REFINE.scheduler, REFINE.steps, REFINE.denoise)
     sampler = comfy.samplers.sampler_object(REFINE.sampler)
     noise = upscale.Noise_RandomNoise(REFINE.seed)
 
-    vl_clip = None if arm == "1-text-prompt" else clip
+    vl_clip = None if conds == "text" else clip
     hook = contextlib.nullcontext()
-    if arm == "3-tile-captions":
+    if conds == "captions":
         hook = override_tile_positives(arm3, tiles)
-    elif arm == "4-vl-plus-captions":
+    elif conds == "vl+captions":
         hook = override_tile_positives(arm4, tiles)
 
-    with hook, ab_models.VramProbe() as probe, torch.inference_mode():
+    ring_kind, overlap = RING_ARMS.get(arm, (None, REFINE.context_overlap))
+    with hook, ring_schedule(ring_kind), ab_models.VramProbe() as probe, \
+            torch.inference_mode():
         result = sampling.refine_image(
             canvas, guider, sampler, sigmas, vae, noise,
             max_tile_width=REFINE.max_tile_width,
             max_tile_height=REFINE.max_tile_height,
             context_anchor=REFINE.context_anchor,
-            context_overlap=REFINE.context_overlap,
+            context_overlap=overlap,
             vl_clip=vl_clip,
         )
 
