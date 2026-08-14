@@ -22,6 +22,7 @@ Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304
   - [Tile Refine](#tile-refine)
   - [Tile Refine (VL)](#tile-refine-vl)
   - [Tile Upscale (VL)](#tile-upscale-vl)
+- [Conditioning surfaces](#conditioning-surfaces)
 - [Shared behavior](#shared-behavior)
   - [How seams are hidden](#how-seams-are-hidden)
   - [Masked refine](#masked-refine)
@@ -41,7 +42,7 @@ git clone https://github.com/blakeem/ComfyUI-ContextAnchoredTileRefine
 
 ## The nodes
 
-Four nodes share one tiling engine. Pick by model and workflow shape:
+Three nodes share one tiling engine. Pick by model and workflow shape:
 
 | Node | Use when |
 |---|---|
@@ -49,13 +50,20 @@ Four nodes share one tiling engine. Pick by model and workflow shape:
 | Tile Refine (VL) | A vision-language model (Krea 2). Same wiring, no positive prompt needed. |
 | Tile Upscale (VL) | A vision-language model, everything in one node: upscale, then refine. |
 
-These four inputs appear on every node and are the ones worth explaining. Everything else (models, sampler wiring, seed, steps) behaves exactly as it does in the standard ComfyUI sampling nodes.
+These inputs appear on every node and are the ones worth explaining. Everything else (models, sampler wiring, seed, steps) behaves exactly as it does in the standard ComfyUI sampling nodes.
 
 | Input | Type | What it does |
 |---|---|---|
 | `max_tile_width` / `max_tile_height` | INT | Largest pixel size the model sees per tile, including the context rings. Set to the largest size your model handles well. |
 | `context_anchor` | INT | Width of the frozen border each tile sees but never changes. Holds already-refined neighbors, and the area around a mask, steady. |
 | `context_overlap` | INT | Width of the band shared with an already-processed neighbor. 0 gives hard seams. |
+
+The two VL nodes carry two more, both defaulting to today's behavior so an existing workflow reopens unchanged:
+
+| Input | Type | What it does |
+|---|---|---|
+| `context_anchor_type` | COMBO | How the frozen anchor ring is presented. `leading` resolves the ring ahead of the tile core, so the tile follows the source more closely — best when the source detail is good. `adjacent` denoises the ring alongside the tile, which adds more close-up skin texture and makes cluttered backgrounds coherent, because it will not anchor to bad source content. |
+| `vlm_method` | COMBO | What the model is told about each tile: `vision tokens` (default), `vision tokens and captions`, or `captions`. See [Conditioning surfaces](#conditioning-surfaces). |
 
 Tuning notes from real use:
 
@@ -86,6 +94,18 @@ The whole flow in one node: image in, refined image out. It upscales the entire 
 
 Noise, sampler, schedule, and CFG guidance are built inside the node from widgets (`seed`, `sampler_name`, `scheduler`, `steps`, `denoise`, `cfg`), so no custom-sampling nodes are needed. There is no positive prompt. The optional `negative` input is the one text channel that applies; left unconnected it behaves as an empty prompt. `denoise 0.0` skips diffusion and returns the pure upscale. No mask input: for a region pass, use Tile Refine (VL).
 
+## Conditioning surfaces
+
+`vlm_method` picks what fills each tile's positive conditioning. All three use the same VL model already wired to `clip` — no second loader.
+
+| Method | What the tile is told | Speed |
+|---|---|---|
+| `vision tokens` | Its slice of ONE whole-image vision encode. Carries the original style, what is in that tile, and global coherence. Invents nothing, so it preserves the source faithfully. | Fastest — one encode for the whole image, sliced per tile |
+| `captions` | A short description of that tile, written by the same VL model and used as its prompt. More creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. | One VL text generation per tile |
+| `vision tokens and captions` | Both: the caption rides inside the tile's own vision encode. | Slowest — one VL generation AND one whole-canvas re-encode per tile, because each tile's caption must sit inside its own encode |
+
+The caption methods scale with tile count, so a large image with many tiles pays proportionally more. `vision tokens` does not — its single encode is shared by every tile.
+
 ## Shared behavior
 
 Everything below applies to all the nodes.
@@ -112,7 +132,7 @@ The `guider` input takes NAG (Normalized Attention Guidance) or any other guider
 
 The VL nodes ignore ControlNet entirely (a warning is logged if one is wired): every tile's positive is replaced by its vision slice, so there is nothing for a control hint to attach to. Use the base node for control.
 
-Image batches work on all three nodes, including with video-family VAEs (Krea 2): each image in the batch is encoded and conditioned on its own picture.
+Image batches work on all three nodes, including with video-family VAEs (Krea 2). Each picture is refined on its own, one after another, so peak VRAM stays at one tile regardless of batch size and every picture gets its own conditioning, its own seam placement and its own DC match — measured against that picture, not pooled across the batch.
 
 ### Model support
 

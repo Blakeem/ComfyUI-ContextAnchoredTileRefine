@@ -3,7 +3,7 @@ import math
 
 import torch
 
-from . import conds, grid, vl
+from . import captions, conds, grid, vl
 
 # How a seam is hidden is not configurable, by design: the node exposes only the geometry
 # that genuinely depends on the image (the tile caps, context_anchor, context_overlap) and
@@ -374,20 +374,26 @@ def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, d
         mask_shape = (-1, 1) + (1,) * (latent_samples.ndim - 4) + denoise_mask.shape[-2:]
         denoise_mask = denoise_mask.reshape(mask_shape).to(device=guider.model_patcher.load_device, dtype=torch.float32)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    # anchor_ring is False for the non-VL node — see the ANCHOR RING gate in _refine_tiles.
+    # anchor_ring is False for the non-VL node, and for the VL nodes' "adjacent" select —
+    # see the ANCHOR RING gate in _refine_tiles.
     with anchor_ring_schedule(guider, sigmas, enabled=anchor_ring):
         samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())
 
 
-def make_tile_progress(model_patcher, steps, n_tiles):
+def make_tile_progress(model_patcher, steps, n_tiles, batch_size=1, batch_index=0):
     # latent_preview.prepare_callback replicated at aggregate scale: one ProgressBar
-    # spanning steps * n_tiles so the UI shows a single run across every tile.
+    # spanning steps * n_tiles * batch_size so the UI shows a single run across every tile of
+    # every picture. batch_size/batch_index come from refine_image's picture loop: every
+    # picture reports on the SAME total and starts where the previous picture ended, so the
+    # bar advances once across the whole run instead of restarting at each picture.
     import comfy.utils
     import latent_preview
 
     previewer = latent_preview.get_previewer(model_patcher.load_device, model_patcher.model.latent_format)
-    total = steps * n_tiles
+    per_picture = steps * n_tiles
+    total = per_picture * batch_size
+    offset = per_picture * batch_index
     pbar = comfy.utils.ProgressBar(total)
 
     def for_tile(tile_idx):
@@ -402,7 +408,7 @@ def make_tile_progress(model_patcher, steps, n_tiles):
                 if x0.is_nested:
                     x0 = x0.tensors[0]
                 preview = previewer.decode_latent_to_preview_image("JPEG", x0)
-            pbar.update_absolute(tile_idx * steps + step + 1, total, preview)
+            pbar.update_absolute(offset + tile_idx * steps + step + 1, total, preview)
         return callback
 
     return for_tile
@@ -411,7 +417,9 @@ def make_tile_progress(model_patcher, steps, n_tiles):
 def _mask_bbox(mask_bin):
     # Union bounding box over the whole batch of a [B,H,W] boolean mask, as
     # (y0, y1, x0, x1) with EXCLUSIVE y1/x1 (max + 1); None when the mask is empty.
-    # The batch-union keeps one shared crop for every row. The row extent and the column
+    # The union still runs, but no node reaches it with more than one row: refine_image's
+    # picture loop hands each picture its OWN mask row, so every picture gets its own crop
+    # and none is widened to cover another picture's region. The row extent and the column
     # extent are INDEPENDENT reductions, so each axis is collapsed to a [H] / [W] boolean
     # first: a 2-D torch.nonzero would materialize an [N,2] int64 row per masked pixel
     # (~200 MB on half a 4096x6144 canvas) to yield the same four integers.
@@ -652,7 +660,7 @@ def encode_pixels(vae, pixels):
     return vae.encode(pixels)
 
 
-def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None, vl_context=None):
+def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, vl_clip=None, vl_context=None, anchor_type=None, vlm_method=captions.VLM_METHOD_VISION, batch_size=1, batch_index=0):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
     # composite by a directional feather → crop back.
@@ -668,7 +676,26 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # (full_image, bbox_x0, bbox_y0): the encode then reads the FULL image and each
     # region tile's rect is offset into its frame, so a masked refine stays globally
     # informed instead of only seeing its own crop.
+    # anchor_type (optional) is the VL nodes' explicit select for the ANCHOR RING gate
+    # below. vlm_method is the VL nodes' conditioning-surface select, read by the VL
+    # pre-pass below; it is inert without vl_clip.
+    # batch_size/batch_index name this call's picture inside refine_image's picture loop
+    # (batch == 1 there). They reach the noise draw, the progress bar and the caption
+    # pre-pass only; 1/0 — a direct call, or a single-picture IMAGE — changes nothing.
     import comfy.model_management
+
+    # ANCHOR RING gate. "leading" runs anchor_ring_schedule (the frozen ring resolves ahead
+    # of the tile core, which the core then follows); "adjacent" leaves core's default, which
+    # re-noises the ring to the CURRENT sigma alongside the core. anchor_type is None for
+    # every caller that predates the select — the base node and the mask/whole-image
+    # internals — and keeps the shipped rule: the schedule is for the VL path only.
+    # Settled by the owner's visual A/B (2026-08-13, tests-AB/run_ab_matrix.py, scene
+    # `portrait`): with VL slices the schedule is a win across scenes, but on the
+    # plain-conditioning node it was consistently worse — a distorted ear and duller
+    # colour/texture at the seam. The mechanism fits: the ring resolves ahead of the core so
+    # the core follows it, and only the VL positive tells a tile what its neighbourhood
+    # actually contains. Without that, the tile is pulled toward a ring it cannot interpret.
+    anchor_ring = (vl_clip is not None) if anchor_type is None else anchor_type == "leading"
 
     # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
     # nothing below changes the output — only side-effect PNGs and a manifest are written.
@@ -722,12 +749,20 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # broadcast the sampler's sigma*noise + latent mix into a fake C-frame temporal
     # axis, which temporal models then fold into the batch (a batch-mismatch crash).
     latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
-    dummy = torch.zeros((batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
+    # Rows the draw covers. Under refine_image's picture loop this call holds ONE picture of a
+    # batch_size-picture run, and the dummy is still built at the FULL batch so picture b gets
+    # the row it would have drawn in one shared call: prepare_noise draws a SINGLE torch.randn
+    # over the whole latent size, so a [1,...] dummy would hand every picture the same noise.
+    # batch_size == 1 (no loop, or a direct _refine_tiles call) draws at `batch` and takes no
+    # slice — byte-for-byte the pre-loop path.
+    draw_batch = batch_size if batch_size > 1 else batch
+    dummy = torch.zeros((draw_batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
     canvas_noise = noise.generate_noise({"samples": dummy})
-
+    if batch_size > 1:
+        canvas_noise = canvas_noise[batch_index:batch_index + 1]
 
     steps = sigmas.shape[-1] - 1
-    for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles))
+    for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles), batch_size, batch_index)
     # Live canvas: tiles paste into it in raster order, so a later tile's frozen
     # context_anchor ring encodes its already-refined neighbors (seam conditioning).
     # The clone is mandatory — pad_image_to_multiple returns the caller's tensor (a
@@ -739,18 +774,36 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # refinements of the same raw band, never a serial re-diffusion of a neighbor's
     # already-decoded output (see the encode site for the full argument).
     source = padded
-    # VL pre-pass: ONE vision encode, sliced per tile in the loop. Runs before the
-    # first tile so the text encoder is resident exactly once, before the diffusion
-    # model loads. Whole-image path: the tiles' crop_rects index the padded canvas,
-    # so the rect -> vision-cell mapping needs no offset. Mask path (vl_context): the
-    # FULL image is encoded and each region tile's rect is offset by the bbox origin.
+    # VL pre-pass. Runs before the first tile so the text encoder is resident exactly
+    # once, before the diffusion model loads. Whole-image path: the tiles' crop_rects
+    # index the padded canvas, so the rect -> vision-cell mapping needs no offset. Mask
+    # path (vl_context): the FULL image is encoded and each region tile's rect is offset
+    # by the bbox origin. Captions always describe THIS call's own canvas — on the mask
+    # path, the region crop each tile actually samples — while the vision encode still
+    # reads the whole image, so a masked refine stays globally informed either way.
+    #
+    # Cost is NOT the same across the three surfaces and this is the only place that says
+    # so: "vision tokens" is ONE encode for the whole run, "captions" is one clip.generate
+    # plus one cheap text encode per tile, and "vision tokens and captions" is one
+    # clip.generate plus one WHOLE-CANVAS vision encode per tile (the caption rides inside
+    # the encode, so tiles captioned differently cannot share one). The whole pre-pass runs
+    # once per PICTURE, because refine_image's picture loop is outside it;
+    # captions.generate_tile_captions owns the interrupt check and the ProgressBar that keeps
+    # that pre-pass cancellable.
     tile_positives = None
     if vl_clip is not None:
-        if vl_context is None:
-            tile_positives = vl.build_global_slices(vl_clip, source, layout.tiles)
+        if vlm_method not in captions.VLM_METHODS:
+            raise ValueError(f"vlm_method must be one of {captions.VLM_METHODS}, got {vlm_method!r}")
+        encode_source, offset_x, offset_y = (source, 0, 0) if vl_context is None else vl_context
+        if vlm_method == captions.VLM_METHOD_VISION:
+            tile_positives = vl.build_global_slices(vl_clip, encode_source, layout.tiles, offset_x=offset_x, offset_y=offset_y)
         else:
-            full_image, bbox_x0, bbox_y0 = vl_context
-            tile_positives = vl.build_global_slices(vl_clip, full_image, layout.tiles, offset_x=bbox_x0, offset_y=bbox_y0)
+            instruction, max_length = captions.CAPTION_INSTRUCTIONS[vlm_method]
+            tile_captions = captions.generate_tile_captions(vl_clip, source, layout.tiles, instruction, max_length, batch_size, batch_index)
+            if vlm_method == captions.VLM_METHOD_VISION_CAPTIONS:
+                tile_positives = captions.build_slice_caption_conds(vl_clip, encode_source, layout.tiles, tile_captions, offset_x=offset_x, offset_y=offset_y)
+            else:
+                tile_positives = captions.build_caption_conds(vl_clip, tile_captions)
     for tile_idx, tile in enumerate(layout.tiles):
         comfy.model_management.throw_exception_if_processing_interrupted()
         crop = tile.crop_rect
@@ -842,14 +895,8 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 swapped_conds["positive"] = tile_positives[tile_idx]
             guider.original_conds = swapped_conds
         try:
-            # ANCHOR RING gate: the schedule runs for the VL nodes only. Settled by the
-            # owner's visual A/B (2026-08-13, tests-AB/run_ab_matrix.py, scene `portrait`):
-            # with VL slices it is a win across scenes, but on the plain-conditioning node it
-            # was consistently worse — a distorted ear and duller colour/texture at the seam.
-            # The mechanism fits: the ring resolves ahead of the core so the core follows it,
-            # and only the VL positive tells a tile what its neighbourhood actually contains.
-            # Without that, the tile is pulled toward a ring it cannot interpret.
-            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx), anchor_ring=vl_clip is not None)
+            # anchor_ring was resolved once at the top of this function (the ANCHOR RING gate).
+            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx), anchor_ring=anchor_ring)
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds
@@ -931,10 +978,21 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     return crop_image_to(canvas, height, width)
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None):
+def _mask_row(mask, batch_index):
+    # One picture's row of the mask, for the picture loop below. A single-row mask applies to
+    # every picture — node.py already expands one to the image batch, but refine_image is also
+    # called directly (the A/B harnesses) and must broadcast the same way — which is what the
+    # clamp keeps: row batch_index of a B-row mask, row 0 of a single-row one.
+    if mask is None:
+        return None
+    row = min(batch_index, mask.shape[0] - 1)
+    return mask[row:row + 1]
+
+
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, anchor_type=None, vlm_method=captions.VLM_METHOD_VISION, batch_size=1, batch_index=0):
     # Entry point. Without a mask this is the whole-image / multi-tile refine, byte-for-
-    # byte the extracted _refine_tiles body. With a mask: harden (>=0.5) → union bbox over
-    # the batch → crop to bbox + context_anchor (frozen-background halo) → tile-refine the
+    # byte the extracted _refine_tiles body. With a mask: harden (>=0.5) → bbox of THIS
+    # picture's mask row → crop to bbox + context_anchor (frozen-background halo) → tile-refine the
     # crop with every tile's denoise_mask gated to the masked region → composite the
     # refined crop back through a 1px anti-aliased edge. The mask=0 background survives from
     # the ORIGINAL pixels (never the VAE-decoded crop), so it is never re-diffused.
@@ -943,11 +1001,30 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # 1px anti-alias (mask-boundary-conditioning-not-feather). The DC measurement is gated to
     # the masked region for the same reason — it is a tile-to-tile correction, and the
     # background outside the region is never shaded at all.
+    # batch_size/batch_index name this call's picture inside the picture loop below; a caller
+    # always starts at the 1/0 defaults.
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         # Narrowed to RGB like every sampled path, so the output channel count never depends
-        # on a widget value; on a 3-channel input the slice is the whole tensor.
+        # on a widget value; on a 3-channel input the slice is the whole tensor. Batch-safe
+        # already, so it sits ABOVE the picture loop and stays one pure clone.
         return image[..., :3].clone()
+
+    # PICTURE loop: a batched IMAGE is refined ONE PICTURE AT A TIME, then concatenated back.
+    # Everything below is a per-picture quantity that a shared call silently pools across
+    # unrelated pictures: seam_dc_offset's median over [B,h,w,C] band pixels yields one offset
+    # correct for none of them, seam_displacements' mean over dim 0 routes one cut around
+    # averaged content, and _mask_bbox unions every row's region into one oversized crop. Peak
+    # VRAM stops scaling with the batch as well (a tile latent is [1,C,h,w], not [B,C,h,w]).
+    # Recursion, so there is exactly ONE implementation of everything downstream; a
+    # single-picture IMAGE never enters the loop, so its path is untouched.
+    if image.shape[0] > 1:
+        pictures = [
+            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, anchor_type=anchor_type, vlm_method=vlm_method, batch_size=image.shape[0], batch_index=b)
+            for b in range(image.shape[0])
+        ]
+        return torch.cat(pictures, dim=0)
+
     # ControlNet prep happens HERE because this is the last place the FULL input size is in
     # hand: the hints are validated against it, and on the mask path they take the same bbox
     # slice the image does. _refine_tiles pads them and cuts them per tile. Without a control
@@ -976,7 +1053,11 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         control_active = False
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
-        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, vl_clip=vl_clip)
+        # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped
+        # entirely for a single-picture run, which keeps the caller's own hint tensors.
+        if batch_size > 1 and hint_canvas is not None:
+            hint_canvas = conds.slice_hint_row(hint_canvas, batch_index)
+        return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, vl_clip=vl_clip, anchor_type=anchor_type, vlm_method=vlm_method, batch_size=batch_size, batch_index=batch_index)
 
     # Region-mask path. Harden a soft input at 0.5 — a fractional denoise mask would leave
     # the under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
@@ -991,8 +1072,10 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     sub_image = image[:, y0:y1, x0:x1, :]
     sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
     hint_canvas = conds.prepare_hint_canvas(original_conds, (height, width), (y0, y1, x0, x1)) if control_active else None
+    if batch_size > 1 and hint_canvas is not None:
+        hint_canvas = conds.slice_hint_row(hint_canvas, batch_index)
     vl_context = (image, x0, y0) if vl_clip is not None else None
-    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas, vl_clip=vl_clip, vl_context=vl_context)
+    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas, vl_clip=vl_clip, vl_context=vl_context, anchor_type=anchor_type, vlm_method=vlm_method, batch_size=batch_size, batch_index=batch_index)
     # Composite the refined crop back through the anti-aliased mask edge. Outside the crop,
     # and wherever aa == 0 inside it, the output is the byte-identical original image.
     # Narrow to RGB: _refine_tiles decodes a 3-channel refined_sub (as the no-mask path does,

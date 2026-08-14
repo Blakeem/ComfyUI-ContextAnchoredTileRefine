@@ -86,6 +86,20 @@ def pad_hint_canvas(hint_canvas, size, padded_size):
     }
 
 
+def slice_hint_row(hint_canvas, batch_index):
+    # One picture's row of every prepared hint, for `refine_image`'s picture loop. Core builds
+    # ONE working hint and then `broadcast_image_to`s it onto the latent's batch, which
+    # TRUNCATES a taller hint — so against this pass's [1,...] latent a [B,...] hint would
+    # serve row 0 to every picture. A single-row hint applies to every picture, which is what
+    # the clamp keeps. Views, never copies: core only ever reads the hint.
+    sliced = {}
+
+    for key, tensor in hint_canvas.items():
+        row = min(batch_index, tensor.shape[0] - 1)
+        sliced[key] = tensor[row:row + 1]
+    return sliced
+
+
 def crop_tile_conds(original_conds, hint_canvas, crop_rect):
     # Per-tile transform: a NEW conds map whose every `control` chain is a fresh copy carrying
     # the `crop_rect` slice of the prepared hint. Nothing the caller owns is mutated — the cond

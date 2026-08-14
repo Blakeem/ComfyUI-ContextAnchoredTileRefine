@@ -47,8 +47,10 @@ without that doc's temporal design.
   all-in-one variant (widgets replace the NOISE/SAMPLER/SIGMAS/GUIDER inputs, optional
   UPSCALE_MODEL + negative, no mask) — it runs `upscale.prepare_upscaled` on the whole
   image, builds the sampling objects via `upscale.py`, and calls the same
-  `refine_image(vl_clip=...)`. Comfy-free at
-  module scope (the combo lists come from a lazy `import comfy.samplers` inside
+  `refine_image(vl_clip=...)`. Both VL nodes carry two selects, defined ONCE each as
+  `_context_anchor_type()` / `_vlm_method()` so their option lists and tooltips cannot drift
+  apart, and both APPENDED after `context_overlap` (see the ANCHOR RING invariant for why
+  never mid-list). Comfy-free at module scope (the combo lists come from a lazy `import comfy.samplers` inside
   `INPUT_TYPES`).
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
@@ -57,7 +59,17 @@ without that doc's temporal design.
   granularity is a property of the model family (32 = VAE 16x x DiT patch 2), so any
   coarser-grid model reuses this solver rather than forking it.
   **Stdlib only**, no torch, no comfy.
-- `context_anchored_tile_refine/sampling.py`: the pipeline. `refine_image` is the entry point.
+- `context_anchored_tile_refine/sampling.py`: the pipeline. `refine_image` is the entry point
+  and the ONE place all three nodes meet, which is why every cross-cutting behaviour belongs
+  here rather than in a node. **A batched IMAGE is refined ONE PICTURE AT A TIME**: `B > 1`
+  recurses per row and cats the results, so a tile latent is always `[1,C,h,w]` and peak VRAM
+  never scales with batch size. That is a correctness fix, not just a memory one — the seam
+  DC offset (`seam_dc_offset`) and the min-error cut (`seam_displacements`) both REDUCE over
+  the batch axis, so before this every picture in a batch shared one offset and one cut
+  measured across unrelated content. The canvas noise dummy is still drawn at the FULL batch
+  and row `batch_index` selected from it, so each picture keeps the noise it always had;
+  ControlNet hints take the matching row (`conds.slice_hint_row`). `B == 1` is byte-identical
+  throughout and is what the hand-computed value tests pin.
   Without a mask it delegates to `_refine_tiles` (pad to /8, solve the grid, per-tile
   encode/sample/decode from a live canvas, directional-feather composite, crop back). With a mask
   it crops to the mask bbox plus `context_anchor`, gates every tile's denoise mask to the region,
@@ -68,8 +80,16 @@ without that doc's temporal design.
   for image latents). `anchor_ring_schedule` wraps the sampler call — see the ANCHOR RING
   invariant below.
 - **The frozen region is presented on a SCHEDULE, not re-noised** (`anchor_ring_factor` /
-  `anchor_ring_schedule` in `sampling.py`, **VL nodes only**, not a widget). The gate is
-  `anchor_ring=vl_clip is not None` at `_refine_tiles`' `sample_latent` call. Settled by
+  `anchor_ring_schedule` in `sampling.py`). Since 2026-08-13 this is the **`context_anchor_type`
+  widget** on the two VL nodes — `leading` (the schedule) or `adjacent` (comfy's default, the
+  ring re-noised to the current sigma) — because the owner's v3 renders showed lead wins on the
+  market scene and LOSES on the portrait scene, where the source has mangled background detail
+  and adhering to it is a liability. `refine_image(anchor_type=...)` resolves it; `anchor_type
+  is None` (the base node, every non-node caller) keeps the old implicit gate
+  `anchor_ring=vl_clip is not None`. The widget is APPENDED after `context_overlap`, never
+  inserted mid-list: the ComfyUI frontend restores `widgets_values` positionally and
+  `migrateWidgetsValues` no-ops when the length changes, so a mid-list insert silently shifts
+  every saved workflow's tuned values. Originally settled by
   the owner's visual A/B 2026-08-13
   (`tests-AB/run_ab_matrix.py`, scene `portrait`, baseline vs Lead x {d0.35, d0.50} x
   {seed 42, 1234}): with VL slices the schedule wins across scenes, but on the plain-
@@ -117,6 +137,21 @@ without that doc's temporal design.
   the FULL image is encoded and each region tile's rect is offset by the bbox origin
   (`slice_indices` offsets), so a masked refine stays globally informed. **torch-only at
   module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/captions.py`: the `vlm_method` surfaces that are not pure
+  vision rows. Per-tile VLM captions generated from the tile's own crop by the SAME CLIP that
+  encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
+  `clip.generate(do_sample=False, repetition_penalty=1.05)` -> `strip_thinking` (mandatory —
+  core's plain `TextGenerate` does NOT strip, and an unstripped `<think>` block reaches the
+  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. Two settled
+  instructions, A/B-decided 2026-08-13 and **character-for-character frozen, EU spelling
+  included** (US spelling measurably dropped detail in the owner's A/B):
+  `SETTLED_POSITION_INSTRUCTION` (512) rides WITH the vision rows, `RICH_GROUPED_INSTRUCTION`
+  (768) is the captions-only surface. The caption input is an area-resampled COPY at 384^2
+  total px — never the sampled tile (prime directive 1). `build_caption_conds` encodes the
+  caption as plain text; `build_slice_caption_conds` puts it INSIDE the whole-canvas vision
+  encode and slices the tile's rows, which costs one canvas encode PER TILE (vision-only
+  costs one for the whole image). **torch-only at module scope**, comfy lazy (subprocess test
+  pins it). Search history: `tests-AB/vlm_prompt_lab.py`, 7 rounds.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the

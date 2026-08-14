@@ -168,6 +168,38 @@ def test_single_tile_matches_whole_image_sequence(comfy_stubs):
     assert out.shape == (1, 32, 24, 3)
 
 
+def test_each_picture_gets_its_own_row_of_the_whole_batch_noise_draw(comfy_stubs):
+    # The dummy is still built at the FULL batch and row b selected from that draw: comfy's
+    # prepare_noise draws ONE torch.randn over the whole latent size, so a [1,...] dummy would
+    # hand every picture of the batch the SAME noise. GridNoise is position-sensitive (arange
+    # over numel), so taking the wrong row is visible; FakeNoise's zeros would pass vacuously.
+    image = torch.rand(2, 80, 80, 3)
+
+    _out, guider, _vae, noise = _run(image)
+
+    assert [tuple(call["samples"].shape) for call in noise.calls] == [(2, 3, 10, 10)] * 2
+    canvas_noise = torch.arange(600, dtype=torch.float32).reshape(2, 3, 10, 10)
+    layout = _layout(80, 80, 32, 32)
+    assert len(guider.calls) == 2 * len(layout.tiles) == 18
+    for b in range(2):
+        for i, tile in enumerate(layout.tiles):
+            crop = tile.crop_rect
+            expected = canvas_noise[b:b + 1, :, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
+            assert torch.equal(guider.calls[b * len(layout.tiles) + i]["noise"], expected)
+
+
+def test_progress_spans_every_picture_of_a_batch(comfy_stubs):
+    # One bar across the whole run, not one per picture: every picture reports on the SAME
+    # total and starts where the previous picture stopped.
+    image = torch.rand(2, 80, 80, 3)
+
+    _run(image, cap_w=56, cap_h=56, overlap=16)
+
+    bars = comfy_stubs["progress_bars"]
+    assert [bar.total for bar in bars] == [32, 32]   # 4 steps * 4 tiles * 2 pictures
+    assert [update[0] for bar in bars for update in bar.updates] == list(range(1, 33))
+
+
 def test_interrupt_checked_once_per_tile(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
@@ -216,16 +248,19 @@ class SecondCallRaisesGuider(GridGuider):
         return super().sample(noise, latent_image, sampler, sigmas, **kwargs)
 
 
-def _decode_tile(canvas, source, layout, idx):
+def _decode_tile(canvas, source, layout, idx, batch=1, batch_index=0):
     # The fakes' VAE round-trip for a single tile, mirroring refine_image's encode-source
     # split exactly: the DIFFUSED core+overlap band (overlap_inner_rect) is taken from the
     # FROZEN raw `source`, the frozen context_anchor ring (crop \ inner) from the live
     # `canvas`. Then encode = stride-8 downsample, sample = + canvas_noise slice, decode =
     # 8x nearest upsample. Returns the full decoded crop.
+    # `canvas` holds ONE picture; batch/batch_index are the run's picture count and this
+    # picture's index, because production draws the canvas noise at the FULL batch and takes
+    # row batch_index from it (sampling._refine_tiles' draw_batch).
     tile = layout.tiles[idx]
     crop, inner = tile.crop_rect, tile.overlap_inner_rect
-    batch, height, width = canvas.shape[0], canvas.shape[1], canvas.shape[2]
-    canvas_noise = torch.arange(batch * 3 * (height // 8) * (width // 8), dtype=torch.float32).reshape(batch, 3, height // 8, width // 8)
+    height, width = canvas.shape[1], canvas.shape[2]
+    canvas_noise = torch.arange(batch * 3 * (height // 8) * (width // 8), dtype=torch.float32).reshape(batch, 3, height // 8, width // 8)[batch_index:batch_index + 1]
     enc = canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :].clone()
     enc[:, inner.y0 - crop.y0:inner.y1 - crop.y0, inner.x0 - crop.x0:inner.x1 - crop.x0, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
     latent = enc[:, ::8, ::8, :].movedim(-1, 1)
@@ -250,22 +285,30 @@ def _simulate_feather_canvas(image, layout, n_tiles=None, displace=True):
     # the VAE round trip, the raster order, the encode-source split, and the paste geometry —
     # including that the DC offset is subtracted BEFORE the routing surface is built.
     # displace=False gives the undisplaced composite, used to show what routing changed.
-    source = image
-    canvas = image.clone()
+    #
+    # The PICTURE loop is the outer one, exactly as production runs it (refine_image recurses
+    # per picture and concatenates): each picture gets its own live canvas, and therefore its
+    # own DC offset and its own routed cut, instead of one pooled over the whole batch.
+    batch = image.shape[0]
     tiles = layout.tiles if n_tiles is None else layout.tiles[:n_tiles]
-    for i, tile in enumerate(tiles):
-        crop, core, paste = tile.crop_rect, tile.core, tile.paste_rect
-        decoded = _decode_tile(canvas, source, layout, i)
-        sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
-        region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
-        dc_offset = sampling.seam_dc_offset(tile, sub, region)
-        if dc_offset is not None:
-            sub = sub - dc_offset
-        disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
-        alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
-                                       disp_top=disp_top, disp_left=disp_left)[..., None]
-        canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
-    return canvas
+    pictures = []
+    for b in range(batch):
+        source = image[b:b + 1]
+        canvas = source.clone()
+        for i, tile in enumerate(tiles):
+            crop, core, paste = tile.crop_rect, tile.core, tile.paste_rect
+            decoded = _decode_tile(canvas, source, layout, i, batch=batch, batch_index=b)
+            sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
+            region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
+            dc_offset = sampling.seam_dc_offset(tile, sub, region)
+            if dc_offset is not None:
+                sub = sub - dc_offset
+            disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
+            alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
+                                           disp_top=disp_top, disp_left=disp_left)[..., None]
+            canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
+        pictures.append(canvas)
+    return torch.cat(pictures, dim=0)
 
 
 def test_overlap_masks_forwarded_per_tile(comfy_stubs):

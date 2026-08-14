@@ -1,8 +1,14 @@
+import inspect
+
 import pytest
 import torch
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
 
-from context_anchored_tile_refine.node import ContextAnchoredTileRefine
+from context_anchored_tile_refine import sampling
+from context_anchored_tile_refine.node import (
+    ContextAnchoredTileRefine,
+    ContextAnchoredTileRefineVL,
+)
 
 
 def _refine(image, sigmas=None, mask=None):
@@ -19,6 +25,56 @@ def _refine(image, sigmas=None, mask=None):
         context_overlap=8,
         mask=mask,
     )
+
+
+def test_no_vl_selects_on_the_base_node():
+    # Both VL selects are conditioning decisions this node cannot act on: the lead schedule
+    # was consistently worse on its plain conditioning in the owner's A/B, and there is no VL
+    # CLIP here to slice or to caption with. Absent from the widget list AND from refine(),
+    # so nothing can pass either in by accident.
+    input_types = ContextAnchoredTileRefine.INPUT_TYPES()
+    all_inputs = {**input_types["required"], **input_types["optional"]}
+    parameters = inspect.signature(ContextAnchoredTileRefine.refine).parameters
+    for widget in ("context_anchor_type", "vlm_method"):
+        assert widget not in all_inputs, widget
+        assert widget not in parameters, widget
+
+
+@pytest.mark.parametrize("choice", ["leading", "adjacent"])
+@pytest.mark.parametrize("method", ["vision tokens", "vision tokens and captions", "captions"])
+def test_vl_node_forwards_its_widgets(monkeypatch, choice, method):
+    # The VL refine node's own refine() is driven nowhere else in the suite, so a parameter
+    # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
+    recorded = {}
+
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, anchor_type=None, vlm_method=None):
+        recorded.update(context_anchor=context_anchor, vl_clip=vl_clip, anchor_type=anchor_type,
+                        vlm_method=vlm_method)
+        return image
+
+    monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+    clip = object()
+
+    result = ContextAnchoredTileRefineVL().refine(
+        image=torch.rand(1, 96, 104, 3),
+        guider=FakeGuider(),
+        sampler=object(),
+        sigmas=torch.linspace(1.0, 0.0, 5),
+        vae=FakeVAE(),
+        noise=FakeNoise(),
+        max_tile_width=1024,
+        max_tile_height=1024,
+        context_anchor=64,
+        context_overlap=8,
+        context_anchor_type=choice,
+        vlm_method=method,
+        clip=clip,
+        mask=None,
+    )
+
+    assert isinstance(result, tuple) and len(result) == 1
+    assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_type": choice,
+                        "vlm_method": method}
 
 
 def test_connected_mask_refines(comfy_stubs):

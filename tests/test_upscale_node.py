@@ -21,6 +21,8 @@ WIDGETS = {
     "max_tile_height": 2048,
     "context_anchor": 32,
     "context_overlap": 32,
+    "context_anchor_type": "leading",
+    "vlm_method": "vision tokens",
 }
 
 
@@ -62,7 +64,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         recorded["build_sigmas"] = (model, scheduler, steps, denoise)
         return recorded["sigmas"]
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, anchor_type=None, vlm_method=None):
         recorded["refine_image"] = {
             "image": image,
             "guider": guider,
@@ -76,6 +78,8 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
             "context_overlap": context_overlap,
             "mask": mask,
             "vl_clip": vl_clip,
+            "anchor_type": anchor_type,
+            "vlm_method": vlm_method,
         }
         return recorded["refined"]
 
@@ -147,6 +151,24 @@ def test_geometry_widgets_pass_through_unchanged(comfy_stubs, monkeypatch):
     assert call["context_anchor"] == 32
     assert call["context_overlap"] == 32
     assert call["sigmas"] is recorded["sigmas"]
+
+
+@pytest.mark.parametrize("choice", ["leading", "adjacent"])
+def test_anchor_type_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice):
+    # The widget is inert unless it arrives as refine_image's anchor_type; sampling.py
+    # resolves the ring gate from that name alone.
+    recorded, _ = _drive(monkeypatch, context_anchor_type=choice)
+
+    assert recorded["refine_image"]["anchor_type"] == choice
+
+
+@pytest.mark.parametrize("choice", ["vision tokens", "vision tokens and captions", "captions"])
+def test_vlm_method_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice):
+    # Same wiring rule as the anchor select: the widget is inert unless it arrives as
+    # refine_image's vlm_method, which is the only name the VL pre-pass branches on.
+    recorded, _ = _drive(monkeypatch, vlm_method=choice)
+
+    assert recorded["refine_image"]["vlm_method"] == choice
 
 
 def test_builders_receive_the_model_and_their_widgets(comfy_stubs, monkeypatch):

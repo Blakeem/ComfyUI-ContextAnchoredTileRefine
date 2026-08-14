@@ -13,11 +13,13 @@ def _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0, guider=None):
     return out, guider, vae, noise
 
 
-def _refine_tiles_direct(sub_image, sub_mask, cap_w, cap_h, ctx, overlap):
+def _refine_tiles_direct(sub_image, sub_mask, cap_w, cap_h, ctx, overlap, batch_size=1, batch_index=0):
     # Fresh position-aware fakes reproduce refined_sub bit-for-bit (all deterministic), so
     # the AA composite can be asserted against the SAME expression production uses.
+    # batch_size/batch_index place this picture in the run, because the canvas noise is drawn
+    # at the full batch and row batch_index taken from it.
     guider, vae, noise = GridGuider(), GridVAE(), GridNoise()
-    return sampling._refine_tiles(sub_image, guider, object(), SIGMAS, vae, noise, cap_w, cap_h, ctx, overlap, region_pixel=sub_mask)
+    return sampling._refine_tiles(sub_image, guider, object(), SIGMAS, vae, noise, cap_w, cap_h, ctx, overlap, region_pixel=sub_mask, batch_size=batch_size, batch_index=batch_index)
 
 
 # ---- bbox / crop geometry -------------------------------------------------
@@ -188,15 +190,18 @@ def test_aa_composite_matches_hand_assembled_bitwise(comfy_stubs):
 
     out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
+    # One picture at a time, so the AA composite is asserted per picture against that
+    # picture's OWN bbox — the two rows' regions no longer share one crop.
     mask_bin = mask >= 0.5
-    y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin), 8, 48, 48)
-    sub_image = image[:, y0:y1, x0:x1, :]
-    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    refined_sub = _refine_tiles_direct(sub_image, sub_mask, 64, 64, 8, 0)
-    aa = sampling._aa_alpha(sub_mask)[..., None]
-    expected_crop = aa * refined_sub + (1.0 - aa) * image[:, y0:y1, x0:x1, :]
+    for b in range(2):
+        y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin[b:b + 1]), 8, 48, 48)
+        sub_image = image[b:b + 1, y0:y1, x0:x1, :]
+        sub_mask = mask_bin[b:b + 1, y0:y1, x0:x1].to(image.dtype)
+        refined_sub = _refine_tiles_direct(sub_image, sub_mask, 64, 64, 8, 0, batch_size=2, batch_index=b)
+        aa = sampling._aa_alpha(sub_mask)[..., None]
+        expected_crop = aa * refined_sub + (1.0 - aa) * image[b:b + 1, y0:y1, x0:x1, :]
 
-    assert torch.equal(out[:, y0:y1, x0:x1, :], expected_crop)
+        assert torch.equal(out[b:b + 1, y0:y1, x0:x1, :], expected_crop)
 
 
 # ---- batch, edge cases, locality ------------------------------------------
@@ -208,16 +213,21 @@ def test_batch_per_row_masks(comfy_stubs):
     mask[0, 8:24, 8:24] = 1.0
     mask[1, 24:40, 24:40] = 1.0
 
-    _out, guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    _out, guider, vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
-    # One shared union crop for both rows (expands+snaps to the full image here).
-    assert sampling._mask_bbox(mask >= 0.5) == (8, 40, 8, 40)
-    assert sampling._expand_snap_clamp((8, 40, 8, 40), 8, 48, 48) == (0, 48, 0, 48)
-    # Per-row region gate differs.
-    assert len(guider.calls) == 1
-    dm = guider.calls[0]["denoise_mask"]
-    assert dm.shape[0] == 2
-    assert not torch.equal(dm[0], dm[1])
+    # Each picture's crop comes from its OWN mask row. The union of the two rows expands to
+    # the whole image, which would drag BOTH pictures' crops out to it.
+    mask_bin = mask >= 0.5
+    assert sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin), 8, 48, 48) == (0, 48, 0, 48)
+    boxes = [sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin[b:b + 1]), 8, 48, 48) for b in range(2)]
+    assert boxes == [(0, 32, 0, 32), (16, 48, 16, 48)]
+    # One sample call per picture, each encoding its own crop of its own picture and gated by
+    # a single-picture region mask.
+    assert len(guider.calls) == 2
+    assert len(vae.encode_calls) == 2
+    for b, (y0, y1, x0, x1) in enumerate(boxes):
+        assert guider.calls[b]["denoise_mask"].shape[0] == 1
+        assert torch.equal(vae.encode_calls[b], image[b:b + 1, y0:y1, x0:x1, :])
 
 
 def test_empty_mask_returns_clone_no_side_effects():

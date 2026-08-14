@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from test_sampling import FakeGuider, FakeNoise, FakeVAE
 
 from context_anchored_tile_refine import sampling
 
@@ -274,11 +275,29 @@ def test_sample_latent_forwards_the_gate(comfy_stubs, monkeypatch):
     assert seen == [True, False]
 
 
-def test_refine_tiles_gates_the_ring_on_vl_clip(comfy_stubs, monkeypatch):
-    # The SHIPPING rule: ring on for the VL nodes (vl_clip present), off for the base node.
-    # Asserted through refine_image so a future re-wiring of the argument cannot pass.
-    from test_sampling import FakeGuider, FakeNoise, FakeVAE
+class PatchableModel(BaseModel):
+    """BaseModel plus what make_tile_progress reads off a model behind a real refine_image."""
 
+    latent_format = object()
+
+
+class ProbingGuider(FakeGuider):
+    """FakeGuider on a real patchable model, recording whether the patch is live per tile."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model_patcher.model = model
+        self.patched_during = []
+
+    def sample(self, *args, **kwargs):
+        # Runs INSIDE anchor_ring_schedule's context, which is the only window in which the
+        # instance patch exists — after the run every path restores the model.
+        self.patched_during.append("scale_latent_inpaint" in vars(self.model_patcher.model))
+        return super().sample(*args, **kwargs)
+
+
+def ring_flags(monkeypatch, guider=None, **refine_kwargs):
+    """Drive refine_image end to end with fakes; return the anchor_ring flag per tile."""
     from context_anchored_tile_refine import vl
 
     seen = []
@@ -292,14 +311,43 @@ def test_refine_tiles_gates_the_ring_on_vl_clip(comfy_stubs, monkeypatch):
     monkeypatch.setattr(vl, "build_global_slices",
                         lambda clip, source, tiles, offset_x=0, offset_y=0: [None] * len(tiles))
 
-    def run(**kwargs):
-        seen.clear()
-        guider = FakeGuider()
-        # The VL path requires the CFGGuider conds convention before it will sample at all.
-        guider.original_conds = {"positive": [], "negative": []}
-        sampling.refine_image(torch.zeros(1, 64, 64, 3), guider, object(), SIGMAS,
-                              FakeVAE(), FakeNoise(), 64, 64, 8, 8, **kwargs)
-        return seen
+    guider = FakeGuider() if guider is None else guider
+    # The VL path requires the CFGGuider conds convention before it will sample at all.
+    guider.original_conds = {"positive": [], "negative": []}
+    sampling.refine_image(torch.zeros(1, 64, 64, 3), guider, object(), SIGMAS,
+                          FakeVAE(), FakeNoise(), 64, 64, 8, 8, **refine_kwargs)
+    return seen
 
-    assert run() and all(flag is False for flag in run()), "base node must not get the ring"
-    assert all(flag is True for flag in run(vl_clip=object())), "VL node must get the ring"
+
+def test_refine_tiles_gates_the_ring_on_vl_clip(comfy_stubs, monkeypatch):
+    # The LEGACY rule, still in force wherever no anchor_type is passed (the base node, and
+    # every caller that predates the select): ring on for a VL run, off for the base node.
+    # Asserted through refine_image so a future re-wiring of the argument cannot pass.
+    base = ring_flags(monkeypatch)
+    assert base and all(flag is False for flag in base), "base node must not get the ring"
+    assert all(flag is True for flag in ring_flags(monkeypatch, vl_clip=object())), "VL node must get the ring"
+
+
+@pytest.mark.parametrize("anchor_type,expected", [("leading", True), ("adjacent", False)])
+def test_anchor_type_decides_the_ring(comfy_stubs, monkeypatch, anchor_type, expected):
+    # The VL nodes' select, which is what the widget feeds. Both nodes always pass a CLIP;
+    # the no-CLIP arm pins that the select is read on its own, never ANDed with the old rule,
+    # and the masked arm pins the OTHER _refine_tiles call site in refine_image.
+    mask = torch.zeros(1, 64, 64)
+    mask[:, 16:48, 16:48] = 1.0
+    for extra in ({}, {"vl_clip": object()}, {"vl_clip": object(), "mask": mask}):
+        flags = ring_flags(monkeypatch, anchor_type=anchor_type, **extra)
+        assert flags and all(flag is expected for flag in flags), extra
+
+
+@pytest.mark.parametrize("anchor_type,patched", [("leading", True), ("adjacent", False)])
+def test_adjacent_leaves_the_model_unpatched_while_sampling(comfy_stubs, monkeypatch, anchor_type, patched):
+    # "adjacent" IS core's own behaviour, so it must not install a schedule at all — an
+    # identity-valued patch would still be a patch on a session-cached model object.
+    model = PatchableModel()
+    guider = ProbingGuider(model)
+
+    ring_flags(monkeypatch, guider=guider, vl_clip=object(), anchor_type=anchor_type)
+
+    assert guider.patched_during and all(flag is patched for flag in guider.patched_during)
+    assert "scale_latent_inpaint" not in vars(model)

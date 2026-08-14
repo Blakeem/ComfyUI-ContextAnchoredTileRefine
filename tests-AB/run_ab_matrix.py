@@ -163,12 +163,17 @@ SETTLED_RICH_INSTRUCTION = (
     "its surface is made of.")
 SETTLED_RICH_MAX_TOKENS = 768
 
-# The rich prompt WITH the grouping clause. Not shipped and not recommended — round 7
-# measured it at 7/9 -> 4/9 across the lab tiles, because it brings back the uniform-crop
-# repeat that "giving each part its own description" exists to prevent. It exists here for
-# exactly one render: it is the only wording that cleared the false "Two massive, glowing
-# red moons" on the face canvas's tile 1, so cell 17 shows what that trade looks like in a
-# picture rather than in a score.
+# The rich prompt WITH the grouping clause. SHIPPED as the captions-only surface of the
+# nodes' vlm_method select (context_anchored_tile_refine/captions.py RICH_GROUPED_INSTRUCTION)
+# — the owner's explicit decision on 2026-08-13, taken against the lab score. Cell 17
+# (1-face/17_CaptionOnly+Group_Lead_s42_v3) was judged "better across the board" against cell
+# 14 (ungrouped, which drew a phantom second moon), and region repeats were ruled acceptable
+# on this surface: "Repeating may be fine, it often does that only for predominate stuff and
+# that just increases weight when it's caption only. This was only an issue with VL method
+# combined." The contrary evidence stands on the record: round 7 measured this wording at
+# 7/9 -> 4/9 across the lab tiles, because it brings back the uniform-crop repeat that
+# "giving each part its own description" exists to prevent, and it was rendered on the face
+# scene ONLY.
 RICH_GROUPED_INSTRUCTION = f"{SETTLED_RICH_INSTRUCTION} {GROUP_CLAUSE}"
 
 

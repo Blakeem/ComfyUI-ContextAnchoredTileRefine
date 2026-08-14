@@ -3,6 +3,25 @@
 MAX_RESOLUTION = 16384
 
 
+def _context_anchor_type():
+    # The anchor-ring select, defined once so both VL nodes' wording cannot drift, and built
+    # fresh per call like every other widget here so no caller can poison a shared object.
+    # VL nodes ONLY: on the plain-conditioning base node the schedule was consistently worse
+    # in the owner's A/B, so there it stays permanently off (sampling.py's ANCHOR RING gate).
+    return (["leading", "adjacent"], {"default": "leading", "tooltip": "How the frozen context_anchor ring is presented to the model. leading resolves the ring ahead of the tile core, which makes the anchor stronger so the tile follows the base image more closely — best when the source detail is good. adjacent denoises the ring along with the tile, letting it add more close-up skin texture and make cluttered backgrounds coherent, because it will not anchor to bad source content."})
+
+
+def _vlm_method():
+    # The conditioning-surface select, defined once so both VL nodes' wording cannot drift.
+    # The options come from captions.py, so the strings the widget offers and the strings
+    # sampling.py's pre-pass branches on cannot diverge; the list is copied per call like
+    # every other widget here, so no caller can poison a shared object. Lazy import:
+    # node.py's module scope stays comfy-free (pinned by a subprocess test).
+    from . import captions
+
+    return (list(captions.VLM_METHODS), {"default": captions.VLM_METHOD_VISION, "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile: it carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt: more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. Speed: vision tokens is the fastest — the canvas is encoded ONCE and each tile takes a slice. The caption methods add one VL text generation per tile, and vision tokens and captions additionally re-encodes the whole canvas once per tile, because each tile's caption has to ride inside its own encode. Both scale with the tile count."})
+
+
 def _validate_image(image):
     if image.ndim != 4:
         raise ValueError(f"image must be a [B,H,W,C] IMAGE tensor, got {image.ndim} dimensions")
@@ -95,6 +114,8 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     its negative still applies. No prompt input exists because none is needed.
     ControlNet is ignored on this node (the per-tile positive carries no control chain);
     use the base Context-Anchored Tile Refine node for control.
+    vlm_method picks WHICH surface fills that positive: the vision slice (default), a
+    per-tile VLM caption of the tile's own crop, or both (see captions.py).
     With a mask, the WHOLE image is still encoded and the region's tiles slice their
     true place in it, so a masked refine stays aware of the image around the region.
     """
@@ -102,15 +123,23 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     @classmethod
     def INPUT_TYPES(s):
         input_types = ContextAnchoredTileRefine.INPUT_TYPES()
+        # Appended past context_overlap, never spliced in beside the ring it describes: dict
+        # order IS widget order, and the frontend restores a saved workflow's widgets_values
+        # POSITIONALLY, so a widget added mid-list shifts every value after it (the shipped
+        # Krea 2 workflows would load context_anchor 256 into this combo and drop to 32).
+        # Past the end of a legacy array the restore loop stops, leaving these widgets at
+        # their defaults — which is the pre-select behaviour.
+        input_types["required"]["context_anchor_type"] = _context_anchor_type()
+        input_types["required"]["vlm_method"] = _vlm_method()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode; the guider's positive prompt is ignored, the negative still applies."})
         return input_types
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, clip, mask=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, context_anchor_type, vlm_method, clip, mask=None):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
         from . import sampling
-        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip),)
+        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, anchor_type=context_anchor_type, vlm_method=vlm_method),)
 
 
 class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
@@ -123,6 +152,8 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     the positive is a placeholder that every tile's vision slice replaces, so a prompt
     here would only re-admit the phantom objects the VL path exists to remove. The
     optional negative is the one text channel that still applies.
+    vlm_method picks WHICH surface fills that positive: the vision slice (default), a
+    per-tile VLM caption of the tile's own crop, or both (see captions.py).
     """
 
     @classmethod
@@ -147,6 +178,12 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
                 "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge then cropped away. Always additive: the ring outside a tile core is context_overlap + context_anchor. 32-256 is the useful range; 32 suits most scenes."}),
                 "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width (multi-tile runs only). Each tile is sampled oversized; on sides bordering an already-processed neighbor (top/left) this band is fully diffused and feathered into that neighbor (100% at the seam → 0% over the band); elsewhere it's context, then cropped. 32-256 is the useful range: DETAILED scenes need LESS (32 is invisible even when you know where the seam is), while a large smooth gradient (an open night sky) wants 128+. 0 = hard seams."}),
+                # Last, never beside the ring it describes: the frontend restores a saved
+                # workflow's widgets_values POSITIONALLY, so a widget added mid-list shifts
+                # every value after it. Past the end of a legacy array the restore loop stops
+                # and these keep their defaults — the pre-select behaviour.
+                "context_anchor_type": _context_anchor_type(),
+                "vlm_method": _vlm_method(),
             },
             "optional": {
                 "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model run over the whole image before tiling. Its fixed integer scale rarely lands on upscale_by, so a single lanczos pass then takes the result to the exact target."}),
@@ -154,7 +191,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             },
         }
 
-    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, upscale_model=None, negative=None):
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, context_anchor_type, vlm_method, upscale_model=None, negative=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
@@ -186,4 +223,4 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         sampler = comfy.samplers.sampler_object(sampler_name)
         noise = upscale.Noise_RandomNoise(seed)
 
-        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip),)
+        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, anchor_type=context_anchor_type, vlm_method=vlm_method),)
