@@ -98,11 +98,18 @@ Noise, sampler, schedule, and CFG guidance are built inside the node from widget
 
 `vlm_method` picks what fills each tile's positive conditioning. All three use the same VL model already wired to `clip` — no second loader.
 
+Two different operations are involved, and it helps to keep them apart:
+
+- **Writing a caption** — the VL model looks at **one tile's crop** and writes a short description of it. Nothing else is in view; the caption describes that tile and only that tile.
+- **Building the conditioning** — the whole image is run through the VL model's vision path, and each tile keeps its own rows of that encode. This is what makes tiles agree with each other: they are all reading slices of one shared picture.
+
+`vision tokens` does only the second. `captions` does only the first. `vision tokens and captions` does both, and puts the tile's caption inside its own copy of the second — which is where the cost comes from, since a per-tile caption means a per-tile encode rather than one shared across all tiles.
+
 | Method | What the tile is told | Speed |
 |---|---|---|
-| `vision tokens` | Its slice of ONE whole-image vision encode. Carries the original style, what is in that tile, and global coherence. Invents nothing, so it preserves the source faithfully. | Fastest — one encode for the whole image, sliced per tile |
-| `captions` | A short description of that tile, written by the same VL model and used as its prompt. More creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. | One VL text generation per tile |
-| `vision tokens and captions` | Both: the caption rides inside the tile's own vision encode. | Slowest — one VL generation AND one whole-canvas re-encode per tile, because each tile's caption must sit inside its own encode |
+| `vision tokens` | Its slice of ONE whole-image vision encode. Carries the original style, what is in that tile, and global coherence. Invents nothing, so it preserves the source faithfully. | Fastest — one encode for the whole image, shared by every tile |
+| `captions` | A short description of that tile — written from that tile's pixels alone — used as its prompt. More creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. | One caption written per tile; no whole-image encode at all |
+| `vision tokens and captions` | Both. The tile's caption is placed inside the tile's own copy of the whole-image encode, so the caption and the picture are read together. | Slowest — per tile: one caption written, plus one whole-image conditioning encode. The shared single encode is what a per-tile caption gives up |
 
 The caption methods scale with tile count, so a large image with many tiles pays proportionally more. `vision tokens` does not — its single encode is shared by every tile.
 
