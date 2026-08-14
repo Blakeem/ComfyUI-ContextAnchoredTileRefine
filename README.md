@@ -22,7 +22,6 @@ Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304
   - [Tile Refine](#tile-refine)
   - [Tile Refine (VL)](#tile-refine-vl)
   - [Tile Upscale (VL)](#tile-upscale-vl)
-  - [Tile Upscale (VL Video)](#tile-upscale-vl-video)
 - [Shared behavior](#shared-behavior)
   - [How seams are hidden](#how-seams-are-hidden)
   - [Masked refine](#masked-refine)
@@ -49,7 +48,6 @@ Four nodes share one tiling engine. Pick by model and workflow shape:
 | Tile Refine | Any model that samples through a GUIDER. You wire the sampling nodes yourself. |
 | Tile Refine (VL) | A vision-language model (Krea 2). Same wiring, no positive prompt needed. |
 | Tile Upscale (VL) | A vision-language model, everything in one node: upscale, then refine. |
-| Tile Upscale (VL Video) | MiniMax H3 audio-video clips: upscale and refine a whole video, seam-free in space and time. |
 
 These four inputs appear on every node and are the ones worth explaining. Everything else (models, sampler wiring, seed, steps) behaves exactly as it does in the standard ComfyUI sampling nodes.
 
@@ -88,16 +86,6 @@ The whole flow in one node: image in, refined image out. It upscales the entire 
 
 Noise, sampler, schedule, and CFG guidance are built inside the node from widgets (`seed`, `sampler_name`, `scheduler`, `steps`, `denoise`, `cfg`), so no custom-sampling nodes are needed. There is no positive prompt. The optional `negative` input is the one text channel that applies; left unconnected it behaves as an empty prompt. `denoise 0.0` skips diffusion and returns the pure upscale. No mask input: for a region pass, use Tile Refine (VL).
 
-### Tile Upscale (VL Video)
-
-The video counterpart of Tile Upscale (VL), for MiniMax H3. Feed it the frames of one clip (from VAE Decode or Get Video Components), the H3 model, its text encoder, and its video VAE; it upscales the whole clip, then refines it tile by tile with the same seam machinery as the image nodes — each tile is the full clip's depth, so motion crosses tile boundaries untouched.
-
-Conditioning is the VL method on video: the upscaled clip is sampled at 2 fps and encoded once through H3's own vision path with an empty prompt, and each tile's positive is its row slice of that encode. There is no prompt input because any text re-adds phantom objects at tile boundaries; the vision slice stays faithful across the whole useful denoise range.
-
-The optional `av_latent` input takes the H3 sampler's AV LATENT for the clip. Connected, its audio stream rides along frozen as context, so the refine sees the real soundtrack; connect it whenever the frames came from the H3 sampler. Unconnected, a silent stand-in is used. Audio is never modified either way — wire your audio to CreateVideo as usual.
-
-Practical notes: H3 wants /32 tile geometry, so the geometry widgets step by 32. Defaults (denoise 0.22, 8 steps, res_multistep) are the A/B-settled working point for a 2x refine; a 2x upscale of a 1344x768x124f clip runs as four tiles at the validated VRAM ceiling of a 24 GB card. Frame counts off H3's 17k+5 grid are repeat-padded internally and trimmed back.
-
 ## Shared behavior
 
 Everything below applies to all the nodes.
@@ -128,7 +116,7 @@ Image batches work on all three nodes, including with video-family VAEs (Krea 2)
 
 ### Model support
 
-Any model that samples through a GUIDER works with Tile Refine, including models whose VAE uses video-style 5-D latents, such as Krea 2 with the Qwen image VAE. Tiles are encoded, sampled, and decoded in the VAE's native latent layout. The image VL nodes additionally need a vision-language text encoder and are verified with Krea 2. Tile Upscale (VL Video) is built for MiniMax H3 specifically: nested audio-video latents with the audio stream always frozen, /32 tile geometry, and H3's video-reference conditioning presentation.
+Any model that samples through a GUIDER works with Tile Refine, including models whose VAE uses video-style 5-D latents, such as Krea 2 with the Qwen image VAE. Tiles are encoded, sampled, and decoded in the VAE's native latent layout. The VL nodes additionally need a vision-language text encoder and are verified with Krea 2.
 
 ## The VL method: RoI token slicing
 

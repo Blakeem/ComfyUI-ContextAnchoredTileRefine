@@ -20,16 +20,13 @@ def test_loads_via_comfyui_directory_mechanism():
         node_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
         vl_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
         upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
-        video_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVLVideo"]
         assert isinstance(node_class, type)
         assert isinstance(vl_class, type)
         assert isinstance(upscale_class, type)
-        assert isinstance(video_class, type)
         assert {
             "ContextAnchoredTileRefine": node_class,
             "ContextAnchoredTileRefineVL": vl_class,
             "ContextAnchoredTileUpscaleVL": upscale_class,
-            "ContextAnchoredTileUpscaleVLVideo": video_class,
         } == module.NODE_CLASS_MAPPINGS
         assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
         assert (
@@ -43,10 +40,6 @@ def test_loads_via_comfyui_directory_mechanism():
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
             == "Context-Anchored Tile Upscale (VL)"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVLVideo"]
-            == "Context-Anchored Tile Upscale (VL Video)"
         )
         assert "NODE_CLASS_MAPPINGS" in module.__all__
         assert "NODE_DISPLAY_NAME_MAPPINGS" in module.__all__
@@ -132,42 +125,6 @@ def test_upscale_module_never_imports_comfy():
         "import context_anchored_tile_refine.upscale\n"
         "assert 'comfy' not in sys.modules, 'upscale.py imported comfy at module scope'\n"
         "assert 'latent_preview' not in sys.modules, 'upscale.py imported latent_preview at module scope'\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_video_module_never_imports_comfy():
-    # video.py holds the same lazy-import contract as sampling.py / vl.py: torch at module
-    # scope, comfy (incl. comfy.nested_tensor) only inside functions.
-    code = (
-        "import sys\n"
-        "import context_anchored_tile_refine.video\n"
-        "assert 'comfy' not in sys.modules, 'video.py imported comfy at module scope'\n"
-        "assert 'latent_preview' not in sys.modules, 'video.py imported latent_preview at module scope'\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_vl_video_module_never_imports_comfy():
-    # vl_video.py holds the same lazy-import contract as vl.py: torch at module scope, comfy
-    # only inside functions.
-    code = (
-        "import sys\n"
-        "import context_anchored_tile_refine.vl_video\n"
-        "assert 'comfy' not in sys.modules, 'vl_video.py imported comfy at module scope'\n"
-        "assert 'latent_preview' not in sys.modules, 'vl_video.py imported latent_preview at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

@@ -300,7 +300,7 @@ footer {
         <div class="ctl"><label for="in-multiple">grid multiple</label>
           <select id="in-multiple">
             <option value="8" selected>8 — image nodes</option>
-            <option value="32">32 — VL Video (MiniMax H3)</option>
+            <option value="32">32 — coarse-grid models (VAE 16x x DiT patch 2)</option>
           </select></div>
       </div>
       <p class="hint">The caps are the largest crop the model ever sees, rings included. The grid multiple is the pixel granularity every crop lands on: 8 for the image nodes, 32 for the video node (VAE 16&times; &times; DiT patch 2).</p>
@@ -394,7 +394,7 @@ function round8Up(x) {
  * @param {number} overlap  context_overlap (default 0 — no feather)
  * @param {number} multiple pixel granularity every crop lands on — matches
  *                          grid.solve_axis(multiple=): 8 for the image nodes,
- *                          32 for the VL Video node (MiniMax H3)
+ *                          32 for coarse-grid models (VAE 16x x DiT patch 2)
  * @returns {{ok:true,n:number,base:number,last:number,overhead:number,r:number}
  *         | {ok:false,r:number,failN:number,failBase:number,reason:string}}
  */
@@ -598,7 +598,7 @@ var SELF_TESTS = [
     }
   },
   {
-    name: "solveAxis multiple=32, VL Video 2x case: L=2688 cap 1408 ctx=32 overlap=32 -> n=2 base 1344 (the H3 2x2 X-axis)",
+    name: "solveAxis multiple=32, coarse-grid 2x case: L=2688 cap 1408 ctx=32 overlap=32 -> n=2 base 1344 (the H3 2x2 X-axis)",
     run: function () {
       var s = solveAxis(2688, 1408, 32, 32, 32);
       /* n=1: base 2688 > 1408. n=2: base roundUpMultiple(1344,32)=1344, overhead r=64, 1408<=1408. */
