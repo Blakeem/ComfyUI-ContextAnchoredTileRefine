@@ -1,4 +1,8 @@
-from .context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL
+from .context_anchored_tile_refine.node import (
+    ContextAnchoredTileRefine,
+    ContextAnchoredTileRefineVL,
+    ContextAnchoredTileUpscaleVL,
+)
 
 NODE_CLASS_MAPPINGS = {
     "ContextAnchoredTileRefine": ContextAnchoredTileRefine,
@@ -12,4 +16,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ContextAnchoredTileUpscaleVL": "Context-Anchored Tile Upscale (VL)",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = [
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+]

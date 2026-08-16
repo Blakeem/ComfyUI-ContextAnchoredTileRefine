@@ -1,8 +1,8 @@
 import pytest
 import torch
+from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 from context_anchored_tile_refine import conds, grid, sampling
-from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
 
@@ -105,6 +105,28 @@ def test_pad_hint_canvas_on_an_aligned_canvas_is_the_same_map():
     canvas = {id(hint): hint}
 
     assert conds.pad_hint_canvas(canvas, (48, 40), (48, 40)) is canvas
+
+
+# ---- slice_hint_row --------------------------------------------------------
+
+
+def test_slice_hint_row_keeps_the_picture_its_own_row():
+    hint = torch.rand(3, 3, 16, 16)
+
+    sliced = conds.slice_hint_row({id(hint): hint}, 2)[id(hint)]
+
+    assert sliced.shape == (1, 3, 16, 16)
+    assert torch.equal(sliced, hint[2:3])
+
+
+def test_slice_hint_row_serves_a_single_row_hint_to_every_picture():
+    # A B==1 hint describes every picture, so the row index clamps instead of indexing past
+    # the end (core broadcasts such a hint up to the latent batch itself).
+    hint = torch.rand(1, 3, 16, 16)
+
+    for batch_index in range(3):
+        sliced = conds.slice_hint_row({id(hint): hint}, batch_index)[id(hint)]
+        assert torch.equal(sliced, hint)
 
 
 # ---- crop_tile_conds -------------------------------------------------------
@@ -274,7 +296,7 @@ def test_each_tile_sees_its_own_hint_crop(comfy_stubs):
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         for key in ("positive", "negative"):
             assert torch.equal(seen[key][0]["control"].cond_hint_original,
@@ -305,7 +327,7 @@ def test_hint_rides_the_same_reflect_pad_as_the_canvas(comfy_stubs):
     assert padded_hint.shape == (1, 3, 88, 80)
     layout = _layout(80, 88, 32, 32)
     assert len(guider.seen_conds) == len(layout.tiles) == 9
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
                            padded_hint[:, :, crop.y0:crop.y1, crop.x0:crop.x1])
@@ -325,10 +347,47 @@ def test_mask_path_hint_takes_the_same_bbox_slice_as_the_image(comfy_stubs):
     sub_hint = hint[:, :, y0:y1, x0:x1]          # the same crop sub_image gets
     layout = _layout(64, 64, 56, 56, ctx=8, overlap=16)
     assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds):
+    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
         crop = tile.crop_rect
         assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
                            sub_hint[:, :, crop.y0:crop.y1, crop.x0:crop.x1])
+
+
+def test_each_picture_is_conditioned_on_its_own_hint_row(comfy_stubs):
+    # refine_image refines one picture at a time, so a [B,...] hint against this pass's
+    # [1,...] latent would be truncated by core's broadcast to row 0 for EVERY picture. The
+    # hint takes the picture's row before the tile crop, so picture b sees hint row b.
+    image = torch.rand(2, 80, 80, 3)
+    hint = torch.rand(2, 3, 80, 80)
+    guider = ControlGuider(FakeControl(hint))
+
+    _run_control(image, guider)
+
+    layout = _layout(80, 80, 56, 56, overlap=16)
+    assert len(guider.seen_conds) == 2 * len(layout.tiles) == 8
+    for b in range(2):
+        for i, tile in enumerate(layout.tiles):
+            crop = tile.crop_rect
+            seen = guider.seen_conds[b * len(layout.tiles) + i]
+            assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
+                               hint[b:b + 1, :, crop.y0:crop.y1, crop.x0:crop.x1])
+
+
+def test_a_single_row_hint_serves_every_picture_of_a_batch(comfy_stubs):
+    image = torch.rand(2, 80, 80, 3)
+    hint = torch.rand(1, 3, 80, 80)
+    guider = ControlGuider(FakeControl(hint))
+
+    _run_control(image, guider)
+
+    layout = _layout(80, 80, 56, 56, overlap=16)
+    assert len(guider.seen_conds) == 8
+    for b in range(2):
+        for i, tile in enumerate(layout.tiles):
+            crop = tile.crop_rect
+            seen = guider.seen_conds[b * len(layout.tiles) + i]
+            assert torch.equal(seen["positive"][0]["control"].cond_hint_original,
+                               hint[:, :, crop.y0:crop.y1, crop.x0:crop.x1])
 
 
 def test_hint_that_is_not_the_input_size_raises_before_any_sampling(comfy_stubs):

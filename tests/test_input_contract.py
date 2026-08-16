@@ -17,6 +17,22 @@ REQUIRED_ORDER = [
     "context_overlap",
 ]
 
+VL_REQUIRED_ORDER = [
+    "image",
+    "guider",
+    "sampler",
+    "sigmas",
+    "vae",
+    "noise",
+    "max_tile_width",
+    "max_tile_height",
+    "context_anchor",
+    "context_overlap",
+    "anchor_source",
+    "vlm_method",
+    "clip",
+]
+
 TYPE_BY_NAME = {
     "image": "IMAGE",
     "guider": "GUIDER",
@@ -30,6 +46,12 @@ TYPE_BY_NAME = {
     "context_overlap": "INT",
     "mask": "MASK",
 }
+
+# The ring-source and conditioning-surface selects live on the VL nodes ONLY, so they are
+# pinned against them below rather than through TYPE_BY_NAME / INT_WIDGET_OPTIONS (both read
+# the base node).
+ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
+VLM_METHOD_OPTIONS = ["vision tokens", "vision tokens and captions", "captions"]
 
 INT_WIDGET_OPTIONS = {
     "max_tile_width": {"default": 1024, "min": 256, "max": 16384, "step": 8},
@@ -63,7 +85,7 @@ def test_int_widget_options_exact():
     for name, expected in INT_WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
+            assert options[key] == value, f"{name}[{key}]"
 
 
 def test_seam_behaviour_is_not_exposed_as_widgets():
@@ -120,9 +142,12 @@ def test_validate_inputs_rejects_below_min():
     assert "max_tile_width" in result
 
 
-def test_vl_required_order_is_base_plus_clip():
+def test_vl_required_order_is_pinned():
+    # The base order unchanged, then the anchor-ring select, then the required CLIP. Dict
+    # order is widget order and the frontend restores widgets_values POSITIONALLY, so the
+    # select must stay AFTER every pre-existing widget or saved workflows shift by one.
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(input_types["required"]) == REQUIRED_ORDER + ["clip"]
+    assert list(input_types["required"]) == VL_REQUIRED_ORDER
     assert input_types["required"]["clip"][0] == "CLIP"
 
 
@@ -141,6 +166,73 @@ def test_vl_every_input_has_a_tooltip():
         assert isinstance(tooltip, str) and tooltip, name
 
 
+def test_vl_method_widget_is_pinned(comfy_stubs):
+    # Both VL nodes offer the SAME select with the SAME default, and the default is the
+    # pre-select surface: a saved workflow re-opened after the update must sample identically.
+    # The option strings are the ones sampling.py branches on, so a typo here is a dead widget.
+    from context_anchored_tile_refine import captions
+
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        definition = node.INPUT_TYPES()["required"]["vlm_method"]
+        assert definition[0] == VLM_METHOD_OPTIONS, node.__name__
+        assert definition[1]["default"] == "vision tokens and captions", node.__name__
+        assert definition[1]["default"] in definition[0], node.__name__
+    assert captions.VLM_METHODS == VLM_METHOD_OPTIONS
+
+
+def test_vl_anchor_source_widget_is_pinned(comfy_stubs):
+    # Both VL nodes offer the SAME select with the SAME default; "source image" is the mode
+    # the campaign's four-scene sweep ran on, so a changed default silently changes every
+    # shipped workflow. The strings are the engine's own modes, never a second copy of them.
+    # (comfy_stubs is for the upscale node's INPUT_TYPES, which reads comfy.samplers.)
+    from context_anchored_tile_refine import sync
+
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        definition = node.INPUT_TYPES()["required"]["anchor_source"]
+        assert definition[0] == ANCHOR_SOURCE_OPTIONS, node.__name__
+        assert definition[1]["default"] == "source image", node.__name__
+        assert definition[1]["default"] in definition[0], node.__name__
+    assert list(sync.ANCHOR_SOURCES) == ANCHOR_SOURCE_OPTIONS
+    assert sync.ANCHOR_SOURCE_IMAGE == "source image"
+
+
+def test_vl_refine_signature_matches_input_names():
+    # ComfyUI calls FUNCTION with the input names as keywords: a rename on either side
+    # is a TypeError at execution time, which this catches at test time instead. HIDDEN
+    # inputs arrive the same way (execution.py:218 puts them in input_data_all by name),
+    # so they belong in the expected list beside the required and optional ones.
+    import inspect
+
+    input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    parameters = list(inspect.signature(ContextAnchoredTileRefineVL.refine).parameters)
+    expected = ["self", *input_types["required"], *input_types["optional"],
+                *input_types.get("hidden", {})]
+    assert parameters == expected
+
+
+def test_only_the_vl_nodes_carry_the_hidden_node_id(comfy_stubs):
+    # The node id is what the progress ledger writes its live status line against, so it
+    # exists on exactly the two nodes that build a ledger. On the base node the ABSENCE is
+    # the contract: it emits no text at all, and a hidden section there would be a silent
+    # input nothing reads. (comfy_stubs is for the upscale node's INPUT_TYPES.)
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        assert node.INPUT_TYPES()["hidden"] == {"unique_id": "UNIQUE_ID"}, node.__name__
+    assert "hidden" not in ContextAnchoredTileRefine.INPUT_TYPES()
+
+
+def test_the_hidden_node_id_adds_no_socket_and_no_widget(comfy_stubs):
+    # A hidden input must not reach the visible interface: the required/optional sections
+    # are what the frontend draws and what widgets_values restores positionally, so an
+    # extra name in either one would shift every saved workflow's tuned values.
+    vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    assert list(vl["required"]) == VL_REQUIRED_ORDER
+    assert list(vl["optional"]) == ["mask"]
+
+    upscale = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
+    assert list(upscale["required"]) == UPSCALE_REQUIRED_ORDER
+    assert list(upscale["optional"]) == ["upscale_model", "negative"]
+
+
 def test_vl_node_class_attributes():
     assert ContextAnchoredTileRefineVL.RETURN_TYPES == ("IMAGE",)
     assert ContextAnchoredTileRefineVL.FUNCTION == "refine"
@@ -149,8 +241,8 @@ def test_vl_node_class_attributes():
 
 
 def test_vl_input_types_does_not_leak_into_base():
-    # The subclass edits the dict the base INPUT_TYPES call returned; a cached/shared
-    # dict would silently grow 'clip' and lose 'mask' on the base node.
+    # The subclass edits the dict the base INPUT_TYPES call returned; a cached/shared dict
+    # would silently grow 'clip'/'anchor_source' and lose 'mask' on the base node.
     ContextAnchoredTileRefineVL.INPUT_TYPES()
     base = ContextAnchoredTileRefine.INPUT_TYPES()
     assert list(base["required"]) == REQUIRED_ORDER
@@ -177,6 +269,10 @@ UPSCALE_REQUIRED_ORDER = [
     "max_tile_height",
     "context_anchor",
     "context_overlap",
+    # Last: widgets_values restores positionally, so a new widget only stays backward
+    # compatible past the end of a legacy saved array. Same rule as VL_REQUIRED_ORDER.
+    "anchor_source",
+    "vlm_method",
 ]
 
 UPSCALE_TYPE_BY_NAME = {
@@ -191,6 +287,9 @@ UPSCALE_TYPE_BY_NAME = {
     "upscale_by": "FLOAT",
     "max_tile_width": "INT",
     "max_tile_height": "INT",
+    # A combo's "type" is its option list, not a type string.
+    "anchor_source": ANCHOR_SOURCE_OPTIONS,
+    "vlm_method": VLM_METHOD_OPTIONS,
     "context_anchor": "INT",
     "context_overlap": "INT",
     "upscale_model": "UPSCALE_MODEL",
@@ -208,6 +307,8 @@ UPSCALE_WIDGET_OPTIONS = {
     # default suits the portrait crops the VL path was settled on.
     "max_tile_width": {"default": 1536, "min": 256, "max": 16384, "step": 8},
     "max_tile_height": {"default": 2048, "min": 256, "max": 16384, "step": 8},
+    "anchor_source": {"default": "source image"},
+    "vlm_method": {"default": "vision tokens and captions"},
     "context_anchor": {"default": 32, "min": 0, "max": 512, "step": 8},
     "context_overlap": {"default": 32, "min": 0, "max": 512, "step": 8},
 }
@@ -258,7 +359,7 @@ def test_upscale_widget_options_exact(comfy_stubs):
     for name, expected in UPSCALE_WIDGET_OPTIONS.items():
         options = required[name][1]
         for key, value in expected.items():
-            assert options[key] == value, "{}[{}]".format(name, key)
+            assert options[key] == value, f"{name}[{key}]"
 
 
 def test_upscale_every_input_has_a_tooltip(comfy_stubs):
@@ -287,12 +388,15 @@ def test_upscale_node_class_attributes(comfy_stubs):
 
 def test_upscale_refine_signature_matches_input_names(comfy_stubs):
     # ComfyUI calls FUNCTION with the input names as keywords: a rename on either side
-    # is a TypeError at execution time, which this catches at test time instead.
+    # is a TypeError at execution time, which this catches at test time instead. HIDDEN
+    # inputs arrive the same way (execution.py:218 puts them in input_data_all by name),
+    # so they belong in the expected list beside the required and optional ones.
     import inspect
 
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     parameters = list(inspect.signature(ContextAnchoredTileUpscaleVL.refine).parameters)
-    expected = ["self"] + list(input_types["required"]) + list(input_types["optional"])
+    expected = ["self", *input_types["required"], *input_types["optional"],
+                *input_types.get("hidden", {})]
     assert parameters == expected
 
 
@@ -304,5 +408,5 @@ def test_upscale_input_types_does_not_leak_into_the_other_nodes(comfy_stubs):
     assert list(base["optional"]) == ["mask"]
 
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(vl["required"]) == REQUIRED_ORDER + ["clip"]
+    assert list(vl["required"]) == VL_REQUIRED_ORDER
     assert list(vl["optional"]) == ["mask"]

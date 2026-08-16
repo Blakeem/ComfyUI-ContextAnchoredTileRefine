@@ -1,8 +1,8 @@
 import pytest
 import torch
+from test_sampling import fake_model_patcher
 
 from context_anchored_tile_refine import grid, sampling
-from test_sampling import fake_model_patcher
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
 
@@ -88,7 +88,7 @@ def _layout(w, h, cap_w, cap_h, ctx=0, overlap=0):
 def test_noise_drawn_once_for_whole_canvas(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image)
+    _out, _guider, _vae, noise = _run(image)
 
     assert len(noise.calls) == 1
     assert set(noise.calls[0].keys()) == {"samples"}
@@ -101,12 +101,12 @@ def test_noise_drawn_once_for_whole_canvas(comfy_stubs):
 def test_each_tile_gets_its_canvas_noise_slice(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image)
+    _out, guider, _vae, _noise = _run(image)
 
     layout = _layout(80, 80, 32, 32)
     canvas_noise = torch.arange(300, dtype=torch.float32).reshape(1, 3, 10, 10)
     assert len(guider.calls) == 9
-    for tile, call in zip(layout.tiles, guider.calls):
+    for tile, call in zip(layout.tiles, guider.calls, strict=True):
         crop = tile.crop_rect
         expected = canvas_noise[:, :, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
         assert torch.equal(call["noise"], expected)
@@ -116,11 +116,11 @@ def test_each_tile_gets_its_canvas_noise_slice(comfy_stubs):
 def test_each_encode_gets_the_core_crop(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image)
+    _out, _guider, vae, _noise = _run(image)
 
     layout = _layout(80, 80, 32, 32)
     assert len(vae.encode_calls) == 9
-    for tile, pixels in zip(layout.tiles, vae.encode_calls):
+    for tile, pixels in zip(layout.tiles, vae.encode_calls, strict=True):
         core = tile.core  # crop_rect == core at r=0
         assert pixels.shape == (1, core.y1 - core.y0, core.x1 - core.x0, 3)
         assert torch.equal(pixels, image[:, core.y0:core.y1, core.x0:core.x1, :])
@@ -129,7 +129,7 @@ def test_each_encode_gets_the_core_crop(comfy_stubs):
 def test_output_equals_hand_assembled_paste(comfy_stubs):
     image = torch.rand(1, 84, 76, 3)  # pads to 88x80 -> 3x3 grid at caps 32
 
-    out, guider, vae, noise = _run(image)
+    out, _guider, _vae, _noise = _run(image)
 
     padded, _ = sampling.pad_image_to_multiple(image)
     layout = _layout(80, 88, 32, 32)
@@ -168,6 +168,38 @@ def test_single_tile_matches_whole_image_sequence(comfy_stubs):
     assert out.shape == (1, 32, 24, 3)
 
 
+def test_each_picture_gets_its_own_row_of_the_whole_batch_noise_draw(comfy_stubs):
+    # The dummy is still built at the FULL batch and row b selected from that draw: comfy's
+    # prepare_noise draws ONE torch.randn over the whole latent size, so a [1,...] dummy would
+    # hand every picture of the batch the SAME noise. GridNoise is position-sensitive (arange
+    # over numel), so taking the wrong row is visible; FakeNoise's zeros would pass vacuously.
+    image = torch.rand(2, 80, 80, 3)
+
+    _out, guider, _vae, noise = _run(image)
+
+    assert [tuple(call["samples"].shape) for call in noise.calls] == [(2, 3, 10, 10)] * 2
+    canvas_noise = torch.arange(600, dtype=torch.float32).reshape(2, 3, 10, 10)
+    layout = _layout(80, 80, 32, 32)
+    assert len(guider.calls) == 2 * len(layout.tiles) == 18
+    for b in range(2):
+        for i, tile in enumerate(layout.tiles):
+            crop = tile.crop_rect
+            expected = canvas_noise[b:b + 1, :, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
+            assert torch.equal(guider.calls[b * len(layout.tiles) + i]["noise"], expected)
+
+
+def test_progress_spans_every_picture_of_a_batch(comfy_stubs):
+    # One bar across the whole run, not one per picture: every picture reports on the SAME
+    # total and starts where the previous picture stopped.
+    image = torch.rand(2, 80, 80, 3)
+
+    _run(image, cap_w=56, cap_h=56, overlap=16)
+
+    bars = comfy_stubs["progress_bars"]
+    assert [bar.total for bar in bars] == [32, 32]   # 4 steps * 4 tiles * 2 pictures
+    assert [update[0] for bar in bars for update in bar.updates] == list(range(1, 33))
+
+
 def test_interrupt_checked_once_per_tile(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
@@ -193,7 +225,7 @@ def test_previewer_output_forwarded_to_progress(comfy_stubs):
     comfy_stubs["previewer"] = RecordingPreviewer()
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image)
+    _out, guider, _vae, _noise = _run(image)
 
     previewer = comfy_stubs["previewer"]
     assert len(previewer.calls) == 36
@@ -216,16 +248,19 @@ class SecondCallRaisesGuider(GridGuider):
         return super().sample(noise, latent_image, sampler, sigmas, **kwargs)
 
 
-def _decode_tile(canvas, source, layout, idx):
+def _decode_tile(canvas, source, layout, idx, batch=1, batch_index=0):
     # The fakes' VAE round-trip for a single tile, mirroring refine_image's encode-source
     # split exactly: the DIFFUSED core+overlap band (overlap_inner_rect) is taken from the
     # FROZEN raw `source`, the frozen context_anchor ring (crop \ inner) from the live
     # `canvas`. Then encode = stride-8 downsample, sample = + canvas_noise slice, decode =
     # 8x nearest upsample. Returns the full decoded crop.
+    # `canvas` holds ONE picture; batch/batch_index are the run's picture count and this
+    # picture's index, because production draws the canvas noise at the FULL batch and takes
+    # row batch_index from it (sampling._refine_tiles' draw_batch).
     tile = layout.tiles[idx]
     crop, inner = tile.crop_rect, tile.overlap_inner_rect
-    batch, height, width = canvas.shape[0], canvas.shape[1], canvas.shape[2]
-    canvas_noise = torch.arange(batch * 3 * (height // 8) * (width // 8), dtype=torch.float32).reshape(batch, 3, height // 8, width // 8)
+    height, width = canvas.shape[1], canvas.shape[2]
+    canvas_noise = torch.arange(batch * 3 * (height // 8) * (width // 8), dtype=torch.float32).reshape(batch, 3, height // 8, width // 8)[batch_index:batch_index + 1]
     enc = canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :].clone()
     enc[:, inner.y0 - crop.y0:inner.y1 - crop.y0, inner.x0 - crop.x0:inner.x1 - crop.x0, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
     latent = enc[:, ::8, ::8, :].movedim(-1, 1)
@@ -250,32 +285,40 @@ def _simulate_feather_canvas(image, layout, n_tiles=None, displace=True):
     # the VAE round trip, the raster order, the encode-source split, and the paste geometry —
     # including that the DC offset is subtracted BEFORE the routing surface is built.
     # displace=False gives the undisplaced composite, used to show what routing changed.
-    source = image
-    canvas = image.clone()
+    #
+    # The PICTURE loop is the outer one, exactly as production runs it (refine_image recurses
+    # per picture and concatenates): each picture gets its own live canvas, and therefore its
+    # own DC offset and its own routed cut, instead of one pooled over the whole batch.
+    batch = image.shape[0]
     tiles = layout.tiles if n_tiles is None else layout.tiles[:n_tiles]
-    for i, tile in enumerate(tiles):
-        crop, core, paste = tile.crop_rect, tile.core, tile.paste_rect
-        decoded = _decode_tile(canvas, source, layout, i)
-        sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
-        region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
-        dc_offset = sampling.seam_dc_offset(tile, sub, region)
-        if dc_offset is not None:
-            sub = sub - dc_offset
-        disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
-        alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
-                                       disp_top=disp_top, disp_left=disp_left)[..., None]
-        canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
-    return canvas
+    pictures = []
+    for b in range(batch):
+        source = image[b:b + 1]
+        canvas = source.clone()
+        for i, tile in enumerate(tiles):
+            crop, core, paste = tile.crop_rect, tile.core, tile.paste_rect
+            decoded = _decode_tile(canvas, source, layout, i, batch=batch, batch_index=b)
+            sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
+            region = canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
+            dc_offset = sampling.seam_dc_offset(tile, sub, region)
+            if dc_offset is not None:
+                sub = sub - dc_offset
+            disp_top, disp_left = sampling.seam_displacements(tile, sub, region) if displace else (None, None)
+            alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left,
+                                           disp_top=disp_top, disp_left=disp_left)[..., None]
+            canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
+        pictures.append(canvas)
+    return torch.cat(pictures, dim=0)
 
 
 def test_overlap_masks_forwarded_per_tile(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=56, cap_h=56, overlap=16)
+    _out, guider, _vae, _noise = _run(image, cap_w=56, cap_h=56, overlap=16)
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     assert len(guider.calls) == 4
-    for tile, call in zip(layout.tiles, guider.calls):
+    for tile, call in zip(layout.tiles, guider.calls, strict=True):
         # Handed over in prepare_mask's output form ([B,1,h,w]); values stay the binary
         # overlap_inner_rect indicator (core+overlap = 1, ring = 0), not a ramp.
         # At ctx=0 the crop == overlap_inner_rect, so there is no context ring and the mask
@@ -293,11 +336,11 @@ def test_ctx_ring_frozen_in_binary_mask(comfy_stubs):
     # r=32, 2x2 grid (base=40), every crop 72x72 -> latent 9x9, inner 56x56 -> 7x7 ones.
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=72, cap_h=72, ctx=16, overlap=16)
+    _out, guider, _vae, _noise = _run(image, cap_w=72, cap_h=72, ctx=16, overlap=16)
 
     layout = _layout(80, 80, 72, 72, ctx=16, overlap=16)
     assert len(guider.calls) == 4
-    for tile, call in zip(layout.tiles, guider.calls):
+    for tile, call in zip(layout.tiles, guider.calls, strict=True):
         crop, oir = tile.crop_rect, tile.overlap_inner_rect
         assert call["denoise_mask"].shape == (1, 1, 9, 9)
         mask = call["denoise_mask"][0, 0]
@@ -315,7 +358,7 @@ def test_ctx_ring_frozen_in_binary_mask(comfy_stubs):
 def test_feather_run_never_writes_model_options(comfy_stubs):
     # A feather-active run passes the binary latent denoise_mask statically to guider.sample
     # and never writes guider.model_options (no denoise_mask_function injection).
-    out, guider, vae, noise = _run(torch.rand(1, 80, 80, 3), cap_w=56, cap_h=56, overlap=16)
+    _out, guider, _vae, _noise = _run(torch.rand(1, 80, 80, 3), cap_w=56, cap_h=56, overlap=16)
 
     assert guider.model_options == {}
 
@@ -339,7 +382,7 @@ def test_feather_preset_mask_function_respected(comfy_stubs):
     guider = GridGuider()
     guider.model_options["denoise_mask_function"] = sentinel
 
-    out, guider, vae, noise = _run(torch.rand(1, 80, 80, 3), cap_w=56, cap_h=56, overlap=16, guider=guider)
+    _out, guider, _vae, _noise = _run(torch.rand(1, 80, 80, 3), cap_w=56, cap_h=56, overlap=16, guider=guider)
 
     assert len(guider.calls) == 4
     for call in guider.calls:
@@ -353,7 +396,7 @@ def test_feather_output_matches_hand_assembled_composite(comfy_stubs):
     # composite in raster order from a live canvas.
     image = torch.rand(2, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=56, cap_h=56, overlap=16)
+    out, _guider, _vae, _noise = _run(image, cap_w=56, cap_h=56, overlap=16)
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     expected = _simulate_feather_canvas(image, layout)
@@ -370,7 +413,7 @@ def test_later_tile_feathers_into_earlier_neighbor(comfy_stubs):
     # differing from a hard core paste, which would leave the neighbor untouched.
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=56, cap_h=56, overlap=16)
+    out, _guider, _vae, _noise = _run(image, cap_w=56, cap_h=56, overlap=16)
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     t1 = layout.tiles[1]
@@ -461,7 +504,7 @@ def test_output_keeps_the_full_input_size(comfy_stubs):
 def test_feather_second_tile_encodes_raw_source_at_ctx0(comfy_stubs):
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=56, cap_h=56, overlap=16)
+    _out, _guider, vae, _noise = _run(image, cap_w=56, cap_h=56, overlap=16)
 
     layout = _layout(80, 80, 56, 56, overlap=16)
     after_tile0 = _simulate_feather_canvas(image, layout, n_tiles=1)
@@ -486,7 +529,7 @@ def test_feather_encode_splits_raw_inner_live_ring(comfy_stubs):
     # already-processed neighbors on top and left and has a 16px top/left anchor ring.
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=72, cap_h=72, ctx=16, overlap=16)
+    _out, _guider, vae, _noise = _run(image, cap_w=72, cap_h=72, ctx=16, overlap=16)
 
     layout = _layout(80, 80, 72, 72, ctx=16, overlap=16)
     live_before_t3 = _simulate_feather_canvas(image, layout, n_tiles=3)
@@ -523,7 +566,7 @@ def test_anchor_only_overlap0_encode_is_noop(comfy_stubs):
     # (expanded, so the new branch runs) while inner == core.
     image = torch.rand(1, 80, 80, 3)
 
-    out, guider, vae, noise = _run(image, cap_w=56, cap_h=56, ctx=16, overlap=0)
+    _out, _guider, vae, _noise = _run(image, cap_w=56, cap_h=56, ctx=16, overlap=0)
 
     layout = _layout(80, 80, 56, 56, ctx=16, overlap=0)
     assert len(vae.encode_calls) == 4
@@ -538,7 +581,7 @@ def test_anchor_only_overlap0_encode_is_noop(comfy_stubs):
 
 
 def test_r0_multi_tile_never_touches_model_options(comfy_stubs):
-    out, guider, vae, noise = _run(torch.rand(1, 80, 80, 3))  # ctx=overlap=0 escape hatch
+    _out, guider, _vae, _noise = _run(torch.rand(1, 80, 80, 3))  # ctx=overlap=0 escape hatch
 
     assert guider.model_options == {}
     assert len(guider.calls) == 9

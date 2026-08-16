@@ -1,7 +1,7 @@
 import torch
+from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 from context_anchored_tile_refine import sampling
-from test_tiling import GridGuider, GridNoise, GridVAE, _layout
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
 
@@ -13,11 +13,13 @@ def _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0, guider=None):
     return out, guider, vae, noise
 
 
-def _refine_tiles_direct(sub_image, sub_mask, cap_w, cap_h, ctx, overlap):
+def _refine_tiles_direct(sub_image, sub_mask, cap_w, cap_h, ctx, overlap, batch_size=1, batch_index=0):
     # Fresh position-aware fakes reproduce refined_sub bit-for-bit (all deterministic), so
     # the AA composite can be asserted against the SAME expression production uses.
+    # batch_size/batch_index place this picture in the run, because the canvas noise is drawn
+    # at the full batch and row batch_index taken from it.
     guider, vae, noise = GridGuider(), GridVAE(), GridNoise()
-    return sampling._refine_tiles(sub_image, guider, object(), SIGMAS, vae, noise, cap_w, cap_h, ctx, overlap, region_pixel=sub_mask)
+    return sampling._refine_tiles(sub_image, guider, object(), SIGMAS, vae, noise, cap_w, cap_h, ctx, overlap, region_pixel=sub_mask, batch_size=batch_size, batch_index=batch_index)
 
 
 # ---- bbox / crop geometry -------------------------------------------------
@@ -71,7 +73,7 @@ def test_masked_refine_anchor0_corner_mask_on_non_multiple_image(comfy_stubs):
     mask = torch.zeros(1, 17, 17)
     mask[:, 16, 16] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, ctx=0, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, ctx=0, overlap=0)
 
     assert out.shape == image.shape
     # Everything outside the 8px-floored crop (9:17, 9:17) stays byte-identical.
@@ -89,7 +91,7 @@ def test_region_gate_is_grad_times_region_latent(comfy_stubs):
     mask = torch.zeros(1, 80, 80)
     mask[:, 16:64, 16:64] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
+    _out, guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
 
     # crop = bbox (16,64) expand 8 -> (8,72), full 64x64 sub-canvas at origin 8.
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
@@ -99,7 +101,7 @@ def test_region_gate_is_grad_times_region_latent(comfy_stubs):
 
     layout = _layout(64, 64, 56, 56, ctx=8, overlap=16)
     assert len(guider.calls) == 4
-    for tile, call in zip(layout.tiles, guider.calls):
+    for tile, call in zip(layout.tiles, guider.calls, strict=True):
         crop = tile.crop_rect
         grad = sampling.tile_gradient(crop, tile.overlap_inner_rect, scale=8)
         reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
@@ -116,7 +118,7 @@ def test_n1_masked_tile_denoise_mask_is_region_latent(comfy_stubs):
     mask = torch.zeros(1, 40, 40)
     mask[:, 16:24, 16:24] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    _out, guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
     assert len(guider.calls) == 1
     dm = guider.calls[0]["denoise_mask"]
@@ -137,7 +139,7 @@ def test_masked_run_covers_mid_cell_subject_edge(comfy_stubs):
     mask = torch.zeros(1, 32, 32)
     mask[:, 12:20, 12:20] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    _out, guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
     assert len(guider.calls) == 1
     dm = guider.calls[0]["denoise_mask"]   # crop == full 32x32 -> region_latent [1,4,4]
@@ -186,17 +188,20 @@ def test_aa_composite_matches_hand_assembled_bitwise(comfy_stubs):
     mask[0, 8:32, 8:32] = 1.0
     mask[1, 16:40, 16:40] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
+    # One picture at a time, so the AA composite is asserted per picture against that
+    # picture's OWN bbox — the two rows' regions no longer share one crop.
     mask_bin = mask >= 0.5
-    y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin), 8, 48, 48)
-    sub_image = image[:, y0:y1, x0:x1, :]
-    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    refined_sub = _refine_tiles_direct(sub_image, sub_mask, 64, 64, 8, 0)
-    aa = sampling._aa_alpha(sub_mask)[..., None]
-    expected_crop = aa * refined_sub + (1.0 - aa) * image[:, y0:y1, x0:x1, :]
+    for b in range(2):
+        y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin[b:b + 1]), 8, 48, 48)
+        sub_image = image[b:b + 1, y0:y1, x0:x1, :]
+        sub_mask = mask_bin[b:b + 1, y0:y1, x0:x1].to(image.dtype)
+        refined_sub = _refine_tiles_direct(sub_image, sub_mask, 64, 64, 8, 0, batch_size=2, batch_index=b)
+        aa = sampling._aa_alpha(sub_mask)[..., None]
+        expected_crop = aa * refined_sub + (1.0 - aa) * image[b:b + 1, y0:y1, x0:x1, :]
 
-    assert torch.equal(out[:, y0:y1, x0:x1, :], expected_crop)
+        assert torch.equal(out[b:b + 1, y0:y1, x0:x1, :], expected_crop)
 
 
 # ---- batch, edge cases, locality ------------------------------------------
@@ -208,16 +213,21 @@ def test_batch_per_row_masks(comfy_stubs):
     mask[0, 8:24, 8:24] = 1.0
     mask[1, 24:40, 24:40] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    _out, guider, vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
-    # One shared union crop for both rows (expands+snaps to the full image here).
-    assert sampling._mask_bbox(mask >= 0.5) == (8, 40, 8, 40)
-    assert sampling._expand_snap_clamp((8, 40, 8, 40), 8, 48, 48) == (0, 48, 0, 48)
-    # Per-row region gate differs.
-    assert len(guider.calls) == 1
-    dm = guider.calls[0]["denoise_mask"]
-    assert dm.shape[0] == 2
-    assert not torch.equal(dm[0], dm[1])
+    # Each picture's crop comes from its OWN mask row. The union of the two rows expands to
+    # the whole image, which would drag BOTH pictures' crops out to it.
+    mask_bin = mask >= 0.5
+    assert sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin), 8, 48, 48) == (0, 48, 0, 48)
+    boxes = [sampling._expand_snap_clamp(sampling._mask_bbox(mask_bin[b:b + 1]), 8, 48, 48) for b in range(2)]
+    assert boxes == [(0, 32, 0, 32), (16, 48, 16, 48)]
+    # One sample call per picture, each encoding its own crop of its own picture and gated by
+    # a single-picture region mask.
+    assert len(guider.calls) == 2
+    assert len(vae.encode_calls) == 2
+    for b, (y0, y1, x0, x1) in enumerate(boxes):
+        assert guider.calls[b]["denoise_mask"].shape[0] == 1
+        assert torch.equal(vae.encode_calls[b], image[b:b + 1, y0:y1, x0:x1, :])
 
 
 def test_empty_mask_returns_clone_no_side_effects():
@@ -231,6 +241,20 @@ def test_empty_mask_returns_clone_no_side_effects():
     assert out is not image
     assert vae.encode_calls == [] and vae.decode_calls == 0
     assert guider.calls == [] and noise.calls == []
+
+
+def test_empty_mask_narrows_an_rgba_input_to_three_channels():
+    # Same contract as the sampled mask path (test_rgba_mask_input_returns_three_channels):
+    # the channel count must not depend on whether the mask happened to be empty.
+    image = torch.rand(1, 48, 48, 4)
+    mask = torch.zeros(1, 48, 48)
+    guider, vae, noise = GridGuider(), GridVAE(), GridNoise()
+
+    out = sampling.refine_image(image, guider, object(), SIGMAS, vae, noise, max_tile_width=64, max_tile_height=64, context_anchor=8, context_overlap=0, mask=mask)
+
+    assert out.shape == (1, 48, 48, 3)
+    assert torch.equal(out, image[..., :3])
+    assert vae.encode_calls == [] and guider.calls == []
 
 
 def test_whole_image_mask_matches_no_mask_refine(comfy_stubs):
@@ -262,7 +286,7 @@ def test_context_anchor_zero_crops_tight(comfy_stubs):
     mask = torch.zeros(1, 48, 48)
     mask[:, 16:32, 16:32] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=0, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=0, overlap=0)
 
     # anchor 0 -> crop is exactly the /8-snapped bbox, no frozen halo.
     assert sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 0, 48, 48) == (16, 32, 16, 32)
@@ -279,7 +303,7 @@ def test_border_touching_mask_internal_pad(comfy_stubs):
     mask = torch.zeros(1, 50, 50)
     mask[:, 30:50, 30:50] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 50, 50)
     assert (y0, y1, x0, x1) == (16, 50, 16, 50)   # 34x34 crop, non-/8 -> internal pad
@@ -295,7 +319,7 @@ def test_locality_outside_crop_and_where_aa_zero(comfy_stubs):
     mask[:, 24:40, 24:40] = 1.0
     before_img, before_mask = image.clone(), mask.clone()
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
 
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 64, 64)
     # Outside the crop: byte-identical to the input.
@@ -320,5 +344,57 @@ def test_rgba_mask_input_returns_three_channels(comfy_stubs):
     mask = torch.zeros(1, 64, 64)
     mask[:, 16:48, 16:48] = 1.0
 
-    out, guider, vae, noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
+    out, _guider, _vae, _noise = _run_mask(image, mask, cap_w=64, cap_h=64, ctx=8, overlap=0)
     assert out.shape == (1, 64, 64, 3)
+
+
+# ---- region gate device alignment ----------------------------------------
+
+
+class ForeignDeviceGradient:
+    """Stands in for tile_gradient's return when region_latent lives on ANOTHER device.
+
+    tile_gradient builds its indicator from torch.arange, so it is always CPU, while
+    region_latent follows the MASK/IMAGE device (CUDA under --gpu-only). This proxy
+    reproduces torch's behaviour there — an elementwise multiply raises, and only `.to()`
+    yields a multipliable tensor — which a CPU-only suite cannot otherwise observe.
+    """
+
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.moved = False
+
+    def to(self, device):
+        self.moved = True
+        return self.tensor
+
+    def __mul__(self, other):
+        raise RuntimeError("Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!")
+
+    __rmul__ = __mul__
+
+
+def test_masked_multi_tile_moves_gradient_onto_region_device(comfy_stubs, monkeypatch):
+    # Same geometry as test_region_gate_is_grad_times_region_latent: a 2x2 grid, so every
+    # tile is `expanded` and takes the grad * region_latent branch.
+    image = torch.rand(1, 80, 80, 3)
+    mask = torch.zeros(1, 80, 80)
+    mask[:, 16:64, 16:64] = 1.0
+
+    baseline, _guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
+
+    real_tile_gradient = sampling.tile_gradient
+    proxies = []
+
+    def foreign_tile_gradient(*args, **kwargs):
+        proxy = ForeignDeviceGradient(real_tile_gradient(*args, **kwargs))
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(sampling, "tile_gradient", foreign_tile_gradient)
+    out, guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
+
+    assert len(guider.calls) == 4
+    assert len(proxies) == 4
+    assert all(proxy.moved for proxy in proxies)   # .to(reg.device) BEFORE the multiply
+    assert torch.equal(out, baseline)              # and the moved gradient is the same value

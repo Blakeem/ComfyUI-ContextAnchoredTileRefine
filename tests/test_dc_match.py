@@ -1,7 +1,7 @@
 import torch
+from test_tiling import SIGMAS, GridGuider, GridNoise, GridVAE
 
 from context_anchored_tile_refine import grid, sampling
-from test_tiling import GridGuider, GridNoise, GridVAE, SIGMAS
 
 # A real 2x2 layout with 16px overlap bands, so every rect below comes from build_layout
 # rather than being hand-constructed: 160 with cap 96 and r=16 solves to n=2, base 80.
@@ -216,7 +216,7 @@ def test_too_few_in_mask_samples_take_no_correction():
 # 80 with cap 64 and r=16 solves to a 2x2 grid of 40px cores -- the smallest real grid that
 # still has an 8px overlap band and an 8px anchor ring, i.e. the production shape in
 # miniature. GridVAE strides by 8, so every crop extent here stays a multiple of 8.
-E2E = dict(overlap=8, ctx=8, cap=64)
+E2E = {"overlap": 8, "ctx": 8, "cap": 64}
 
 
 def _refine(image, guider=None, mask=None, overlap=E2E["overlap"], ctx=E2E["ctx"], cap=E2E["cap"]):

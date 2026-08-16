@@ -11,12 +11,18 @@ from dataclasses import dataclass
 class GridConfigError(ValueError):
     # Configuration error: caps too small for the chosen context_overlap +
     # context_anchor per seam side. Carries the simulator's failure fields as attributes.
-    def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason):
+    def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason, axis=None):
+        # `axis` ("width"/"height") is optional so the internal symbols above can be followed
+        # by one sentence in the caller's own widget names — nothing in the leading text names
+        # anything the user typed, and VALIDATE_INPUTS cannot pre-empt this (it never sees the
+        # image).
+        widgets = "" if axis is None else (
+            f" — max_tile_{axis} {cap} cannot hold context_anchor {ctx} + context_overlap {overlap} "
+            f"on both sides; raise max_tile_{axis} or lower context_overlap."
+        )
         super().__init__(
-            "caps too small for overlap + context: L={} cap={} ctx={} overlap={} "
-            "(fails at n={} with base={}, reason={})".format(
-                L, cap, ctx, overlap, fail_n, fail_base, reason
-            )
+            f"caps too small for overlap + context: L={L} cap={cap} ctx={ctx} overlap={overlap} "
+            f"(fails at n={fail_n} with base={fail_base}, reason={reason}){widgets}"
         )
         self.r = r
         self.fail_n = fail_n
@@ -97,30 +103,38 @@ def round8(x):
     return round(x / 8) * 8
 
 
+def round_up_multiple(x, multiple):
+    # Smallest multiple of `multiple` that is >= x.
+    return math.ceil(x / multiple) * multiple
+
+
 def round8_up(x):
     # Smallest multiple of 8 that is >= x.
-    return math.ceil(x / 8) * 8
+    return round_up_multiple(x, 8)
 
 
-def solve_axis(L, cap, ctx, overlap=0):
+def solve_axis(L, cap, ctx, overlap=0, multiple=8, axis=None):
     # Per-axis grid solve (authoritative):
     #   r = context_anchor + context_overlap
     #   overhead(n) = 0 | r | 2r  for n = 1 | 2 | >= 3
-    #   base(n) = round8_up(ceil(L / n)); choose the smallest n with
+    #   base(n) = round_up_multiple(ceil(L / n), multiple); choose the smallest n with
     #   base(n) + overhead(n) <= cap.
     # There is NO fade/overlap floor — a base is judged on the cap constraint alone
     # (owner's decision; keep it simple). Only "exhausted" remains as a failure.
+    # `multiple` is the pixel granularity a sampled crop must land on: 8 for the
+    # /8-latent image VAEs (the default, which keeps the image path bit-identical),
+    # 32 for MiniMax H3 (VAE spatial factor 16 x DiT patch 2).
     r = ctx + overlap
-    max_n = max(1, math.ceil(L / 8)) + 1  # defensive bound; base(max_n) = 8
+    max_n = max(1, math.ceil(L / multiple)) + 1  # defensive bound; base(max_n) = multiple
 
     for n in range(1, max_n + 1):
-        base = round8_up(math.ceil(L / n))
+        base = round_up_multiple(math.ceil(L / n), multiple)
         overhead = 0 if n == 1 else r if n == 2 else 2 * r
 
         if base + overhead <= cap:
             return AxisSolution(n=n, base=base, last=L - (n - 1) * base, overhead=overhead, r=r)
-    # Unreachable unless the cap is smaller than the minimum base 8 + overhead.
-    raise GridConfigError(L, cap, ctx, overlap, r, max_n, 8, "exhausted")
+    # Unreachable unless the cap is smaller than the minimum base `multiple` + overhead.
+    raise GridConfigError(L, cap, ctx, overlap, r, max_n, multiple, "exhausted", axis=axis)
 
 
 def expand_rect(core, amount, nb, W, H):
@@ -190,10 +204,21 @@ def build_layout(W, H, sx, sy, ctx, overlap=0):
 
             overlap_inner_rect = expand_rect(core, overlap, nb, W, H)
             crop_rect = expand_rect(core, r, nb, W, H)
-            # Directional: overlap on top/left only (never right/bottom). Reuses
-            # expand_rect with the right/bottom sides forced off.
-            paste_nb = Neighbors(left=nb.left, right=False, top=nb.top, bottom=False)
-            paste_rect = expand_rect(core, overlap, paste_nb, W, H)
+            # Directional: overlap on top/left only (never right/bottom), and clamped per axis
+            # to that axis's base so paste_rect never reaches past the PREVIOUS tile's core
+            # start. That is what keeps the invariant above true — each interior seam feathered
+            # exactly once, by the later tile — rather than cross-dissolving over a whole
+            # earlier core (the wide blend of two independent refinements CLAUDE.md prohibits).
+            # A no-op whenever base >= overlap, i.e. every default configuration; solve_axis has
+            # no fade floor by design, so base < overlap is reachable from widget-legal values.
+            # One expand_rect call per axis, each with the other axis's sides forced off,
+            # because the two clamps differ (sx.base vs sy.base).
+            paste_x = expand_rect(core, min(overlap, sx.base), Neighbors(left=nb.left, right=False, top=False, bottom=False), W, H)
+            paste_y = expand_rect(core, min(overlap, sy.base), Neighbors(left=False, right=False, top=nb.top, bottom=False), W, H)
+            paste_rect = ExpandedRect(
+                x0=paste_x.x0, y0=paste_y.y0, x1=paste_x.x1, y1=paste_y.y1,
+                clamped=paste_x.clamped or paste_y.clamped,
+            )
             sampled_w = crop_rect.x1 - crop_rect.x0
             sampled_h = crop_rect.y1 - crop_rect.y0
             label = tile_class_label(axis_class(col, sx.n), axis_class(row, sy.n))

@@ -1,3 +1,5 @@
+from itertools import pairwise
+
 import torch
 
 from context_anchored_tile_refine import grid, sampling
@@ -249,7 +251,7 @@ def test_min_error_alpha_handover_follows_the_planted_cut():
 
     assert max(crossing) - min(crossing) >= 2                  # genuinely not a straight line
     assert crossing[0] < crossing[-1]                          # rises with the staircase
-    assert all(b >= a for a, b in zip(crossing, crossing[1:]))  # tracks it over the whole seam
+    assert all(b >= a for a, b in pairwise(crossing))           # tracks it over the whole seam
 
 
 def test_path_displacement_biases_the_feather_toward_the_cut():
@@ -262,13 +264,13 @@ def test_path_displacement_biases_the_feather_toward_the_cut():
     crossings = [_crossing_for_valley(row, band) for row in range(band)]
 
     # Monotone: a cut nearer the seam always moves the handover nearer the seam.
-    assert all(b >= a for a, b in zip(crossings, crossings[1:])), crossings
+    assert all(b >= a for a, b in pairwise(crossings)), crossings
     # Genuinely responsive — it tracks the cut rather than sitting still.
     assert crossings[-1] - crossings[0] >= band // 2, crossings
     assert len(set(crossings)) >= band // 3, crossings
     # ...and always strictly inside the band, which is what the taper buys: the handover is
     # never shoved onto the core edge or the outer edge, where it would re-create a step.
-    assert 0 < crossings[0] and crossings[-1] < band - 1, crossings
+    assert crossings[0] > 0 and crossings[-1] < band - 1, crossings
 
 
 def test_path_displacement_attenuation_is_documented_accurately():

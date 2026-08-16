@@ -4,7 +4,6 @@ import pytest
 
 from context_anchored_tile_refine import grid
 
-
 # --- The 12 simulator SELF_TESTS (docs/tile-simulator.html:494-656), pinned verbatim.
 # Signature: solve_axis(L, cap, ctx, overlap); build_layout(W, H, sx, sy, ctx, overlap).
 
@@ -162,6 +161,21 @@ def test_grid_config_error_message_names_the_inputs():
     message = str(excinfo.value)
     for token in ("L=64", "cap=4", "ctx=8", "overlap=8"):
         assert token in message
+    # No axis given (the bare solver call): the internal-symbol message stands alone.
+    assert "max_tile_" not in message
+
+
+def test_grid_config_error_axis_names_the_widgets():
+    # With `axis`, the same message gains one sentence in the caller's widget names — the
+    # only part of it a node user can act on. sampling.py passes width/height.
+    with pytest.raises(grid.GridConfigError) as excinfo:
+        grid.solve_axis(64, 4, 8, 8, axis="width")
+    message = str(excinfo.value)
+    assert "caps too small for overlap + context" in message
+    for token in ("L=64", "cap=4", "ctx=8", "overlap=8"):
+        assert token in message
+    assert "max_tile_width 4 cannot hold context_anchor 8 + context_overlap 8" in message
+    assert "raise max_tile_width or lower context_overlap" in message
 
 
 def test_solver_exhausted_guard():
@@ -223,6 +237,74 @@ def test_axis_class_pins():
     assert grid.axis_class(1, 3) == "mid"
 
 
+# --- multiple=32: the MiniMax H3 granularity (VAE 16 x DiT patch 2). Same ladder,
+# same first-fit n, bases snapped to 32 instead of 8. ---
+
+
+def test_multiple32_single_tile_no_overhead():
+    # n=1: base round_up_multiple(1408,32)=1408, overhead 0 <= cap 1408.
+    s = grid.solve_axis(1408, 1408, 32, 32, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead, s.r) == (1, 1408, 1408, 0, 64)
+
+
+def test_multiple32_two_tiles_pay_r():
+    # The spike's 2688x1536 canvas at cap 1408, ctx=overlap=32 -> r=64.
+    # x: n=2 base round_up_multiple(1344,32)=1344, +r 64 = 1408 <= 1408.
+    # y: n=2 base round_up_multiple(768,32)=768, +r 64 = 832 <= 1408.
+    sx = grid.solve_axis(2688, 1408, 32, 32, multiple=32)
+    sy = grid.solve_axis(1536, 1408, 32, 32, multiple=32)
+    assert (sx.n, sx.base, sx.last, sx.overhead, sx.r) == (2, 1344, 1344, 64, 64)
+    assert (sy.n, sy.base, sy.last, sy.overhead) == (2, 768, 768, 64)
+
+
+def test_multiple32_snaps_base_up_past_the_8_grid():
+    # Same inputs as t3 (which lands on 1544 at /8): n=2 base
+    # round_up_multiple(1540,32)=1568, +128 = 1696 <= 2048; last = 3080 - 1568 = 1512.
+    s = grid.solve_axis(3080, 2048, 64, 64, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead) == (2, 1568, 1512, 128)
+    assert grid.solve_axis(3080, 2048, 64, 64).base == 1544  # /8 default unchanged
+
+
+def test_multiple32_five_tiles_pay_2r():
+    # Same inputs as t5. r=64. n=4: 1024 + 2r(128) = 1152 > 1024. n=5: base
+    # round_up_multiple(820,32)=832, +128 = 960 <= 1024; last = 4096 - 4*832 = 768.
+    s = grid.solve_axis(4096, 1024, 0, 64, multiple=32)
+    assert (s.n, s.base, s.last, s.overhead, s.r) == (5, 832, 768, 128, 64)
+
+
+def test_multiple32_exhausted_reports_the_multiple_as_fail_base():
+    # max_n = ceil(64/32) + 1 = 3; the smallest base the ladder can offer is 32, not 8.
+    with pytest.raises(grid.GridConfigError) as excinfo:
+        grid.solve_axis(64, 4, 0, 0, multiple=32)
+    exc = excinfo.value
+    assert exc.reason == "exhausted"
+    assert (exc.fail_n, exc.fail_base, exc.r) == (3, 32, 0)
+
+
+@pytest.mark.parametrize("cap", [512, 1024, 1408, 2048])
+def test_multiple32_sweep(cap):
+    # ctx=0/overlap=0 so overhead is 0 at every n and minimality is a base-only test.
+    for L in range(32, 4097, 32):
+        s = grid.solve_axis(L, cap, 0, 0, multiple=32)
+        assert s.n == 1 or grid.round_up_multiple(math.ceil(L / (s.n - 1)), 32) > cap
+        assert s.base % 32 == 0
+        assert s.base * (s.n - 1) + s.last == L
+        assert 0 < s.last <= s.base
+
+
+def test_multiple_default_matches_explicit_8():
+    for L in range(8, 4097, 8):
+        assert grid.solve_axis(L, 1024, 64, 64) == grid.solve_axis(L, 1024, 64, 64, multiple=8)
+
+
+def test_round_up_multiple():
+    assert grid.round_up_multiple(1541, 8) == 1544
+    assert grid.round_up_multiple(1536, 32) == 1536
+    assert grid.round_up_multiple(1537, 32) == 1568
+    # round8_up delegates, so the public /8 name keeps its exact meaning.
+    assert grid.round8_up(1541) == grid.round_up_multiple(1541, 8)
+
+
 @pytest.mark.parametrize(
     "cx,cy,expected",
     [
@@ -239,3 +321,45 @@ def test_axis_class_pins():
 )
 def test_tile_class_label_pins(cx, cy, expected):
     assert grid.tile_class_label(cx, cy) == expected
+
+
+# --- paste_rect vs the previous tile's core (overlap > base is reachable: no fade floor) ---
+
+
+def test_paste_rect_clamps_at_previous_core_when_overlap_exceeds_base():
+    # Widget-legal and off-nominal: max_tile 768, context_anchor 32, context_overlap 256 gives
+    # r=288, so on a 4096 axis the cap admits only base<=192 -> n=22, base 192 < overlap 256.
+    # Unclamped, tile col=2's paste would start at 384-256=128, inside col=0's core (0..192)
+    # that col=1 already feathered — the wide two-refinement blend the node forbids.
+    sx = grid.solve_axis(4096, 768, 32, 256, axis="width")
+    sy = grid.solve_axis(4096, 768, 32, 256, axis="height")
+    assert (sx.n, sx.base) == (22, 192)
+    assert sx.base < 256
+    layout = grid.build_layout(4096, 4096, sx, sy, 32, 256)
+
+    for tile in layout.tiles:
+        # The previous tile's core start on each axis; the tile's own core start when there is
+        # no previous tile (paste_rect never expands on a side without a neighbor).
+        prev_x0 = (tile.col - 1) * sx.base if tile.col > 0 else tile.core.x0
+        prev_y0 = (tile.row - 1) * sy.base if tile.row > 0 else tile.core.y0
+        assert tile.paste_rect.x0 >= prev_x0
+        assert tile.paste_rect.y0 >= prev_y0
+        # Never expands right/bottom, on any configuration.
+        assert (tile.paste_rect.x1, tile.paste_rect.y1) == (tile.core.x1, tile.core.y1)
+
+    t22 = next(t for t in layout.tiles if (t.row, t.col) == (2, 2))
+    assert (t22.paste_rect.x0, t22.paste_rect.y0) == (192, 192)
+    assert (t22.paste_rect.x1, t22.paste_rect.y1) == (576, 576)
+
+
+def test_paste_rect_unchanged_when_base_exceeds_overlap():
+    # The clamp is min(overlap, base), so every configuration with base >= overlap (every
+    # default, and every other test in this file) keeps the full directional expansion.
+    sx = grid.solve_axis(2048, 1024, 64, 64)
+    sy = grid.solve_axis(2048, 1024, 64, 64)
+    layout = grid.build_layout(2048, 2048, sx, sy, 64, 64)
+
+    for tile in layout.tiles:
+        want_x0 = max(0, tile.core.x0 - (64 if tile.nb.left else 0))
+        want_y0 = max(0, tile.core.y0 - (64 if tile.nb.top else 0))
+        assert (tile.paste_rect.x0, tile.paste_rect.y0) == (want_x0, want_y0)

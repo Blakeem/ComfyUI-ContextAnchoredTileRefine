@@ -38,7 +38,7 @@ def _load_graph(png_path):
         raw = im.info.get("prompt")
         size = im.size
     if not raw:
-        raise ValueError("{}: no ComfyUI 'prompt' metadata (was it saved by SaveImage?)".format(png_path))
+        raise ValueError(f"{png_path}: no ComfyUI 'prompt' metadata (was it saved by SaveImage?)")
     return json.loads(raw), size
 
 
@@ -116,7 +116,7 @@ def extract(png_path):
     graph, size = _load_graph(png_path)
     node_id, refine = _find_refine_node(graph)
     if refine is None:
-        raise ValueError("{}: no {} node in the embedded workflow".format(png_path, REFINE_CLASS))
+        raise ValueError(f"{png_path}: no {REFINE_CLASS} node in the embedded workflow")
     inputs = refine.get("inputs", {})
 
     settings = {
@@ -190,7 +190,7 @@ def _print_human(settings):
             value = settings[key]
             if isinstance(value, str) and len(value) > 90:
                 value = value[:87] + "..."
-            print("  {:18s} {}".format(key, value))
+            print(f"  {key:18s} {value}")
     print()
 
 
@@ -213,7 +213,7 @@ def main(argv=None):
             results.append(extract(path))
         except Exception as exc:                       # keep going across a batch
             failures += 1
-            print("SKIP {}: {}".format(path.name, exc), file=sys.stderr)
+            print(f"SKIP {path.name}: {exc}", file=sys.stderr)
 
     if args.json:
         print(json.dumps(results, indent=2))

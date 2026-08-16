@@ -63,7 +63,7 @@ class FakeVAE:
         self.encode_calls += 1
         batch, height, width, channels = pixels.shape
         assert height % 8 == 0 and width % 8 == 0, "encode received non-/8 dims"
-        assert channels == 3, "encode received {} channels".format(channels)
+        assert channels == 3, f"encode received {channels} channels"
         self.encoded = torch.zeros(batch, 4, height // 8, width // 8)
         return self.encoded
 
@@ -143,6 +143,19 @@ def test_empty_schedule_returns_clone_without_vae_or_sampling(sigmas):
     assert guider.sample_calls == 0 and noise.calls == []
 
 
+def test_empty_schedule_narrows_an_rgba_input_to_three_channels():
+    # The output channel count must not depend on a widget value: every sampled path drops
+    # alpha, so the zero-step short-circuit does too (denoise 0 is an advertised mode).
+    guider, sampler, vae, noise = FakeGuider(), object(), FakeVAE(), FakeNoise()
+    image = torch.rand(1, 96, 104, 4)
+
+    out = sampling.refine_image(image, guider, sampler, torch.empty(0), vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+    assert out.shape == (1, 96, 104, 3)
+    assert torch.equal(out, image[..., :3])
+    assert vae.encode_calls == 0 and guider.sample_calls == 0
+
+
 def test_batch_dimension_preserved(comfy_stubs):
     guider, sampler, vae, noise = FakeGuider(), object(), FakeVAE(), FakeNoise()
     image = torch.rand(3, 96, 104, 3)
@@ -150,9 +163,160 @@ def test_batch_dimension_preserved(comfy_stubs):
     out = sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
 
     assert out.shape == (3, 96, 104, 3)
-    assert vae.encoded.shape[0] == 3
-    assert len(noise.calls) == 1  # one whole-batch generate_noise call
-    assert guider.sample_calls == 1  # one whole-batch guider.sample call
+    # One PICTURE at a time: the batch axis is the outer loop, not the sampler's batch.
+    assert vae.encoded.shape[0] == 1
+    assert len(noise.calls) == 3  # one generate_noise per picture...
+    assert guider.sample_calls == 3  # ...and one guider.sample per picture
+    # The draw itself still covers the WHOLE batch, so picture b keeps its own noise row.
+    assert [call["samples"].shape[0] for call in noise.calls] == [3, 3, 3]
+
+
+def _record_refine_tiles(monkeypatch):
+    # Records (image, batch_size, batch_index) per _refine_tiles call, then runs the real one.
+    calls = []
+    real = sampling._refine_tiles
+
+    def recording(image, *args, **kwargs):
+        calls.append((image, kwargs.get("batch_size", 1), kwargs.get("batch_index", 0)))
+        return real(image, *args, **kwargs)
+
+    monkeypatch.setattr(sampling, "_refine_tiles", recording)
+    return calls
+
+
+def test_one_picture_never_enters_the_picture_loop(comfy_stubs, monkeypatch):
+    # B == 1 takes exactly today's path: ONE _refine_tiles call, handed the caller's own
+    # tensor, at the 1/0 defaults — no slice, no copy, no concatenation.
+    calls = _record_refine_tiles(monkeypatch)
+    image = torch.rand(1, 96, 104, 3)
+
+    out = sampling.refine_image(image, FakeGuider(), object(), SIGMAS, FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+    assert len(calls) == 1
+    assert calls[0][0] is image
+    assert calls[0][1:] == (1, 0)
+    assert out.shape == (1, 96, 104, 3)
+
+
+def test_a_batch_refines_one_picture_at_a_time(comfy_stubs, monkeypatch):
+    # B > 1 recurses once per picture, each pass carrying its own picture and its place in the
+    # run, and the results are concatenated back onto the batch axis.
+    calls = _record_refine_tiles(monkeypatch)
+    image = torch.rand(3, 96, 104, 3)
+
+    out = sampling.refine_image(image, FakeGuider(), object(), SIGMAS, FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+    assert [call[1:] for call in calls] == [(3, 0), (3, 1), (3, 2)]
+    for b, call in enumerate(calls):
+        assert call[0].shape[0] == 1
+        assert torch.equal(call[0], image[b:b + 1])
+    assert out.shape == (3, 96, 104, 3)
+
+
+# --- which engine a refine lands in ---------------------------------------------------
+# ONE fork, at refine_image: a vl_clip is the sync engine (sync.py) for BOTH the whole-image
+# and the masked flow; no vl_clip is the raster path below (_refine_tiles), whose byte-for-
+# byte value tests are the rest of this file.
+
+
+def _record_sync(monkeypatch):
+    # Records every sync.refine_sync call and returns a same-shaped stand-in, so the fork can
+    # be pinned without running the engine (test_sync.py owns what the engine then does).
+    from context_anchored_tile_refine import sync
+
+    calls = []
+
+    def recording(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
+                  context_anchor, context_overlap, vl_clip, mask=None, **kwargs):
+        calls.append({"image": image, "mask": mask, "vl_clip": vl_clip, **kwargs})
+        return image[..., :3].clone()
+
+    monkeypatch.setattr(sync, "refine_sync", recording)
+    return calls
+
+
+def _vl_guider():
+    # The VL preamble refuses anything that does not keep 'positive' in original_conds.
+    guider = FakeGuider()
+    guider.original_conds = {"positive": [], "negative": []}
+    return guider
+
+
+def _sync_sampler():
+    # test_vl's KSAMPLER stand-in, imported lazily: test_vl -> test_tiling -> test_sampling,
+    # so a module-scope import here would close a cycle.
+    from test_vl import sync_sampler
+    return sync_sampler()
+
+
+def test_a_vl_clip_routes_to_the_sync_engine_masked_and_unmasked(comfy_stubs, monkeypatch):
+    sync_calls = _record_sync(monkeypatch)
+    raster_calls = _record_refine_tiles(monkeypatch)
+    image = torch.rand(1, 96, 104, 3)
+    mask = torch.zeros(1, 96, 104)
+    mask[:, 32:64, 40:72] = 1.0
+    clip = object()
+
+    for row_mask in (None, mask):
+        sampling.refine_image(image, _vl_guider(), _sync_sampler(), SIGMAS, FakeVAE(), FakeNoise(),
+                              max_tile_width=1024, max_tile_height=1024, context_anchor=0,
+                              context_overlap=0, mask=row_mask, vl_clip=clip)
+
+    # The engine owns the region crop itself, so the MASK is handed over whole — refine_image
+    # never bbox-crops on this path, and never reaches the raster tiler at all.
+    assert [call["mask"] for call in sync_calls] == [None, mask]
+    assert all(call["vl_clip"] is clip and call["image"] is image for call in sync_calls)
+    assert raster_calls == []
+
+
+def test_no_vl_clip_stays_on_the_raster_path(comfy_stubs, monkeypatch):
+    sync_calls = _record_sync(monkeypatch)
+    raster_calls = _record_refine_tiles(monkeypatch)
+
+    sampling.refine_image(torch.rand(1, 96, 104, 3), FakeGuider(), object(), SIGMAS, FakeVAE(),
+                          FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                          context_anchor=0, context_overlap=0)
+
+    assert sync_calls == [] and len(raster_calls) == 1
+
+
+def test_the_picture_loop_wraps_the_sync_path_too(comfy_stubs, monkeypatch):
+    # B > 1 recurses per PICTURE on the VL path exactly as on the raster one, so the engine
+    # only ever sees one picture and peak VRAM stops scaling with the batch. batch_size /
+    # batch_index are how it still draws the canvas noise at the FULL batch and takes this
+    # picture's row (test_sync.py pins the draw itself).
+    sync_calls = _record_sync(monkeypatch)
+    image = torch.rand(3, 96, 104, 3)
+
+    out = sampling.refine_image(image, _vl_guider(), _sync_sampler(), SIGMAS, FakeVAE(),
+                                FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                                context_anchor=0, context_overlap=0, vl_clip=object())
+
+    assert [(call["batch_size"], call["batch_index"]) for call in sync_calls] == [(3, 0), (3, 1), (3, 2)]
+    for b, call in enumerate(sync_calls):
+        assert torch.equal(call["image"], image[b:b + 1])
+    assert out.shape == (3, 96, 104, 3)
+
+
+def test_the_engine_draws_a_batched_runs_noise_at_the_full_batch(comfy_stubs, monkeypatch):
+    # The same contract as the raster path's, end to end through the REAL engine: every
+    # picture's draw covers the whole batch, so picture b keeps the noise row it would have
+    # had in one shared call.
+    from test_tiling import GridNoise, GridVAE
+    from test_vl import PIPE_ENC, PIPE_SEQ, FakeVLClip, VLGuider
+
+    from context_anchored_tile_refine import vl
+
+    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+    noise = GridNoise()
+
+    out = sampling.refine_image(torch.rand(2, 80, 80, 3), VLGuider(), _sync_sampler(), SIGMAS,
+                                GridVAE(), noise, max_tile_width=56, max_tile_height=56,
+                                context_anchor=0, context_overlap=16,
+                                vl_clip=FakeVLClip(seq_override=PIPE_SEQ))
+
+    assert out.shape == (2, 80, 80, 3)
+    assert [call["samples"].shape[0] for call in noise.calls] == [2, 2]
 
 
 def test_rgba_input_encodes_three_channels(comfy_stubs):
@@ -171,17 +335,20 @@ def test_sampling_call_contract(comfy_stubs):
 
     out = sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
 
-    # SPEC CHANGE (grid-tiling): generate_noise now receives an all-zeros dummy sized
-    # like the whole-canvas latent, not the encoded latent itself.
-    assert len(noise.calls) == 1
+    # SPEC CHANGE (grid-tiling): generate_noise receives an all-zeros dummy sized like the
+    # whole-canvas latent, not the encoded latent itself.
+    # SPEC CHANGE (batch-loop): one draw PER PICTURE, and the dummy keeps the FULL batch while
+    # the encode is now a single picture — vae.encoded holds the LAST [1,...] encode.
+    assert len(noise.calls) == 2
     assert set(noise.calls[0].keys()) == {"samples"}
     dummy = noise.calls[0]["samples"]
-    assert dummy.shape == vae.encoded.shape
+    assert dummy.shape[0] == 2 and vae.encoded.shape[0] == 1
+    assert dummy.shape[1:] == vae.encoded.shape[1:]
     assert dummy.dtype == torch.float32
     assert torch.equal(dummy, torch.zeros_like(dummy))
 
     call = guider.call
-    assert guider.sample_calls == 1  # caps 1024 on a 96x104 image: a 1x1 grid
+    assert guider.sample_calls == 2  # caps 1024 on a 96x104 image: a 1x1 grid per picture
     assert call["noise"].shape == vae.encoded.shape
     assert call["latent_image"] is vae.encoded
     assert call["sampler"] is sampler
@@ -190,13 +357,14 @@ def test_sampling_call_contract(comfy_stubs):
     assert call["disable_pbar"] is False
     assert call["seed"] == 99
 
-    # The callback is the aggregate one: one ProgressBar sized steps * n_tiles.
+    # The callback is the aggregate one, and its total spans every picture: picture 1 picks up
+    # where picture 0 stopped instead of restarting the bar.
     device, latent_format = comfy_stubs["get_previewer_args"]
     assert device is guider.model_patcher.load_device
     assert latent_format is guider.model_patcher.model.latent_format
-    (pbar,) = comfy_stubs["progress_bars"]
-    assert pbar.total == 4
-    assert pbar.updates == [(step + 1, 4, None) for step in range(4)]
+    bars = comfy_stubs["progress_bars"]
+    assert [bar.total for bar in bars] == [8, 8]
+    assert [update for bar in bars for update in bar.updates] == [(step + 1, 8, None) for step in range(8)]
     assert out.device == torch.device("cpu")  # stubbed intermediate_device()
 
 
@@ -284,7 +452,7 @@ class FakeVideoVAE:
         self.encoded = None
 
     def encode(self, pixels):
-        batch, height, width, channels = pixels.shape
+        batch, height, width, _channels = pixels.shape
         self.encoded = torch.zeros(batch, 4, 1, height // 8, width // 8)
         return self.encoded
 
@@ -322,7 +490,7 @@ def test_video_vae_tiled_noise_and_mask_are_5d(comfy_stubs):
         assert call["latent_image"].ndim == 5
         assert call["noise"].shape == call["latent_image"].shape
         if call["denoise_mask"] is not None:
-            assert call["denoise_mask"].shape == (1, 1, 1) + call["latent_image"].shape[-2:]
+            assert call["denoise_mask"].shape == (1, 1, 1, *call["latent_image"].shape[-2:])
 
 
 def test_sample_latent_normalizes_denoise_mask_for_5d_latent(comfy_stubs):
@@ -381,8 +549,9 @@ def test_encode_pixels_passes_a_4d_vae_through_in_one_call():
 
 def test_batch_through_a_folding_video_vae_tiles_row_by_row(comfy_stubs):
     # Owner-reported live defect: a 2-image batch through a Wan-family VAE died on the
-    # encode/noise fail-fast, because the VAE folded both images into one latent row.
-    # Encoding row by row keeps every image on its own row, so the batch tiles.
+    # encode/noise fail-fast, because the VAE folded both images into one latent row. Refining
+    # one PICTURE at a time keeps every image on its own row, so the batch tiles — the VAE now
+    # only ever sees the single row it folds to itself.
     guider, sampler, vae, noise = FakeGuider(), object(), FoldingVideoVAE(), FakeNoise()
     image = torch.rand(2, 96, 104, 3)
 
@@ -392,22 +561,23 @@ def test_batch_through_a_folding_video_vae_tiles_row_by_row(comfy_stubs):
     assert guider.sample_calls > 1
     for call in guider.calls:
         assert call["latent_image"].ndim == 5
-        assert (call["latent_image"].shape[0], call["latent_image"].shape[2]) == (2, 1)
+        assert (call["latent_image"].shape[0], call["latent_image"].shape[2]) == (1, 1)
         assert call["noise"].shape == call["latent_image"].shape
-    assert vae.encode_calls == [1] * (2 * guider.sample_calls)
+    assert vae.encode_calls == [1] * guider.sample_calls
 
 
-def test_batch_folding_non_video_vae_fails_fast(comfy_stubs):
-    # The encode/noise guard stays the net for the layouts encode_pixels does NOT handle:
-    # a 4-D VAE that folds an image batch is still untileable, and must say so instead of
-    # crashing downstream with a broadcast shape error.
-    class FoldingImageVAE(FakeVAE):
+def test_unsupported_latent_layout_fails_fast(comfy_stubs):
+    # The encode/noise guard stays the net for the layouts encode_pixels does NOT handle. A
+    # folded image batch can no longer reach it (every _refine_tiles call holds ONE picture),
+    # so the live case is a spatial compression the /8 grid math does not model: it must say
+    # so instead of crashing downstream with a broadcast shape error.
+    class SixteenthScaleVAE(FakeVAE):
         def encode(self, pixels):
             _, height, width, _ = pixels.shape
-            return torch.zeros(1, 4, height // 8, width // 8)
+            return torch.zeros(pixels.shape[0], 4, height // 16, width // 16)
 
-    guider, sampler, vae, noise = FakeGuider(), object(), FoldingImageVAE(), FakeNoise()
-    image = torch.rand(2, 96, 104, 3)
+    guider, sampler, vae, noise = FakeGuider(), object(), SixteenthScaleVAE(), FakeNoise()
+    image = torch.rand(1, 96, 104, 3)
 
     with pytest.raises(RuntimeError, match="latent layout is not supported"):
         sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)

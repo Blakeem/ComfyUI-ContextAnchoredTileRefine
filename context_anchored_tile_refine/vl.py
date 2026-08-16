@@ -75,7 +75,7 @@ def slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, expected_seq, offset_x
     cy0 = max(0, math.floor((crop.y0 + offset_y) * enc_h / canvas_h / MERGED_CELL))
     cy1 = min(grid_h, math.ceil((crop.y1 + offset_y) * enc_h / canvas_h / MERGED_CELL))
     rows = [1 + r * grid_w + c for r in range(cy0, cy1) for c in range(cx0, cx1)]
-    return [0] + rows + [1 + n_rows] + list(range(1 + n_rows + 1, expected_seq))
+    return [0, *rows, 1 + n_rows, *range(1 + n_rows + 1, expected_seq)]
 
 
 def _encode_canvas(clip, canvas_copy, grid_h, grid_w):
@@ -89,7 +89,7 @@ def _encode_canvas(clip, canvas_copy, grid_h, grid_w):
     except TypeError as error:
         raise RuntimeError(
             "VL refine: this CLIP's tokenizer does not accept images. The node needs a "
-            "vision-language text encoder (Krea 2 family). ({})".format(error)) from error
+            f"vision-language text encoder (Krea 2 family). ({error})") from error
     ids = [t[0] for t in tokens[next(iter(tokens))][0]]
     pad_pos = next((i for i, v in enumerate(ids) if isinstance(v, dict)), None)
     if pad_pos is None:
@@ -103,10 +103,9 @@ def _encode_canvas(clip, canvas_copy, grid_h, grid_w):
     seq = encoded[0][0].shape[1]
     if seq != expected_seq:
         raise RuntimeError(
-            "VL refine: encoded conditioning has {} rows, expected {} (vision grid {}x{} "
-            "+ template tail {}). The text encoder's template or strip layout does not "
-            "match the Krea 2 contract this node slices by.".format(
-                seq, expected_seq, grid_h, grid_w, tail_len))
+            f"VL refine: encoded conditioning has {seq} rows, expected {expected_seq} (vision grid {grid_h}x{grid_w} "
+            f"+ template tail {tail_len}). The text encoder's template or strip layout does not "
+            "match the Krea 2 contract this node slices by.")
     return encoded, expected_seq
 
 
@@ -130,7 +129,9 @@ def _encode_batch(clip, canvas_copy, grid_h, grid_w):
         per_row.append(encoded)
 
     merged = []
-    for entries in zip(*per_row):
+    # strict: every row went through the same CLIP on the same token layout, so the encodes
+    # carry the same number of cond entries — a mismatch is a contract break, not truncation.
+    for entries in zip(*per_row, strict=True):
         # Keep the first row's extras (build_global_slices drops the canvas attention_mask
         # per tile); pooled_output is the one extra that is per-image, so cat it as well.
         extras = dict(entries[0][1])

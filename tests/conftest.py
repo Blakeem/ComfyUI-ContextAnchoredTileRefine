@@ -7,6 +7,7 @@ import sys
 import types
 import uuid
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import torch
@@ -17,9 +18,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Comfy Desktop's bundled source tree, tried after the standard custom_nodes layout.
-# Ordered newest-install-first: the @comfyorgcomfyui-electron path is a pre-rename desktop
-# build (0.3.45, no z-image) that may not exist any more, so it is only a last resort.
+# Ordered newest-install-first: ComfyUI-Installs holds the current source install (the
+# only H3-capable tree on this machine); the @comfyorgcomfyui-electron path is a
+# pre-rename desktop build (0.3.45, no z-image) that may not exist any more, so it is
+# only a last resort.
 DESKTOP_COMFYUI_ROOTS = (
+    Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI"),
     Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),
     Path(r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"),
 )
@@ -35,19 +39,19 @@ def _resolve_comfyui_root():
         if (path / "comfy").is_dir():
             return path, trace
         raise ValueError(
-            "COMFYUI_ROOT={} does not contain a 'comfy' directory".format(env_root)
+            f"COMFYUI_ROOT={env_root} does not contain a 'comfy' directory"
         )
     trace.append("COMFYUI_ROOT env var: not set")
 
     standard_root = REPO_ROOT.parent.parent.resolve()
     if (standard_root / "comfy").is_dir():
         return standard_root, trace
-    trace.append("standard layout {}: no 'comfy' directory".format(standard_root))
+    trace.append(f"standard layout {standard_root}: no 'comfy' directory")
 
     for desktop_root in DESKTOP_COMFYUI_ROOTS:
         if (desktop_root / "comfy").is_dir():
             return desktop_root, trace
-        trace.append("Desktop install {}: no 'comfy' directory".format(desktop_root))
+        trace.append(f"Desktop install {desktop_root}: no 'comfy' directory")
 
     return None, trace
 
@@ -63,7 +67,7 @@ def comfy_env():
     if root is None:
         pytest.skip(
             "ComfyUI root not found. Checked:\n"
-            + "\n".join("  - {}".format(step) for step in trace)
+            + "\n".join(f"  - {step}" for step in trace)
         )
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -74,11 +78,50 @@ def comfy_env():
     origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
     if origin is None or origin.parent != (root / "comfy").resolve():
         pytest.skip(
-            "A different 'comfy' package shadows the ComfyUI source at {} "
-            "(comfy.samplers resolved to: {}). Set COMFYUI_ROOT or remove the "
-            "conflicting package.".format(root, origin)
+            f"A different 'comfy' package shadows the ComfyUI source at {root} "
+            f"(comfy.samplers resolved to: {origin}). Set COMFYUI_ROOT or remove the "
+            "conflicting package."
         )
     return root
+
+
+class BaseModel:
+    """comfy's BaseModel stand-in, shared by every test that drives a guider's model.
+
+    The class NAME is load-bearing: sampling._model_re_noises_anchor walks __mro__ for the
+    class that DEFINES scale_latent_inpaint and answers True only for "BaseModel" — core's
+    default, which the anchor-ring schedule and the sync engine's precondition are both
+    derived for.
+
+    process_latent_in/out are the CANVAS SPACE pair (roadmap decision): comfy applies
+    process_latent_in to latent_image inside guider.sample, so the engine's maintained canvas
+    lives in process-space while VAE encode/decode are raw-space. The default scale/shift make
+    the pair the IDENTITY; a test passes a non-identity affine (what Krea 2's Wan21 format
+    really is) to prove the two spaces are never mixed.
+    """
+
+    def __init__(self, scale=1.0, shift=0.0, model_sampling=None):
+        # Lazy, so the class resolves comfy.model_sampling.CONST through whichever module is
+        # live — the comfy_stubs one in the pure suite, the real one under comfy_env.
+        import comfy.model_sampling
+
+        self.latent_format = object()
+        self.model_sampling = comfy.model_sampling.CONST() if model_sampling is None else model_sampling
+        self.scale = scale
+        self.shift = shift
+        self.process_in_calls = []
+        self.process_out_calls = []
+
+    def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
+        return self.model_sampling.noise_scaling(sigma, noise, latent_image)
+
+    def process_latent_in(self, latent):
+        self.process_in_calls.append(latent)
+        return latent * self.scale + self.shift
+
+    def process_latent_out(self, latent):
+        self.process_out_calls.append(latent)
+        return (latent - self.shift) / self.scale
 
 
 @pytest.fixture()
@@ -191,10 +234,21 @@ def comfy_stubs(monkeypatch):
     class StubKSampler:
         # Only the two combo lists node.py's INPUT_TYPES reads. Short on purpose, but they
         # must contain every default the node declares or the widget would be invalid.
-        SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "ddim"]
-        SCHEDULERS = ["normal", "karras", "simple", "sgm_uniform", "beta"]
+        SAMPLERS: ClassVar[list[str]] = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "ddim", "res_multistep"]
+        SCHEDULERS: ClassVar[list[str]] = ["normal", "karras", "simple", "sgm_uniform", "beta"]
 
     samplers_module.KSampler = StubKSampler
+
+    class StubKSAMPLER:
+        # comfy.samplers.KSAMPLER's construction surface: the sync stepper isinstance-checks
+        # this class, keys its EVALS_PER_STEP table on sampler_function.__name__, and carries
+        # extra_options/inpaint_options onto every lane's rebuilt sampler.
+        def __init__(self, sampler_function, extra_options=None, inpaint_options=None):
+            self.sampler_function = sampler_function
+            self.extra_options = {} if extra_options is None else extra_options
+            self.inpaint_options = {} if inpaint_options is None else inpaint_options
+
+    samplers_module.KSAMPLER = StubKSAMPLER
 
     def calculate_sigmas(model_sampling, scheduler_name, steps):
         # Returns 0..steps so the caller's tail slice is readable as plain integers.
@@ -204,8 +258,16 @@ def comfy_stubs(monkeypatch):
     samplers_module.calculate_sigmas = calculate_sigmas
 
     def sampler_object(name):
+        # Core returns a KSAMPLER whose sampler_function is sample_<name> (comfy/samplers.py
+        # ksampler); the stub mirrors that, because the sync stepper resolves the sampler by
+        # that function's __name__ and rejects anything that is not a KSAMPLER.
         recorded["sampler_object_calls"].append(name)
-        return ("sampler_object", name)
+
+        def sampler_function(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+            raise AssertionError("the stub sampler function is never run")
+
+        sampler_function.__name__ = f"sample_{name}"
+        return StubKSAMPLER(sampler_function)
 
     samplers_module.sampler_object = sampler_object
 
@@ -222,13 +284,33 @@ def comfy_stubs(monkeypatch):
             recorded["guiders"].append(self)
 
         def set_conds(self, positive, negative):
-            self.original_conds["positive"] = positive
-            self.original_conds["negative"] = negative
+            self.inner_set_conds({"positive": positive, "negative": negative})
+
+        def inner_set_conds(self, conds):
+            # comfy/samplers.py:1201-1205, the seam upscale.build_basic_guider's Guider_Basic
+            # subclass reaches set_conds through. The real one runs convert_cond on the way
+            # in; the stub stores what it was handed so callers can assert identity.
+            self.original_conds.update(conds)
 
         def set_cfg(self, cfg):
             self.cfg = cfg
 
     samplers_module.CFGGuider = StubCFGGuider
+
+    model_sampling_module = types.ModuleType("comfy.model_sampling")
+
+    class StubCONST:
+        """comfy.model_sampling.CONST cut to what the engine touches: the TYPE the sync
+        preconditions isinstance-check (the flow family), and the noise_scaling /
+        inverse_noise_scaling pair the frozen-ring algebra is derived from."""
+
+        def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
+            return sigma * noise + (1.0 - sigma) * latent_image
+
+        def inverse_noise_scaling(self, sigma, latent):
+            return latent / (1.0 - sigma)
+
+    model_sampling_module.CONST = StubCONST
 
     sampler_helpers_module = types.ModuleType("comfy.sampler_helpers")
 
@@ -251,10 +333,29 @@ def comfy_stubs(monkeypatch):
 
     sampler_helpers_module.convert_cond = convert_cond
 
+    nested_tensor_module = types.ModuleType("comfy.nested_tensor")
+
+    class StubNestedTensor:
+        """comfy/nested_tensor.py NestedTensor cut to the surface the video path touches:
+        the stream list, the `is_nested` flag core's sample() and previewer branch on, and
+        unbind()."""
+
+        def __init__(self, tensors):
+            self.tensors = list(tensors)
+            self.is_nested = True
+
+        def unbind(self):
+            return self.tensors
+
+    nested_tensor_module.NestedTensor = StubNestedTensor
+
     sample_module = types.ModuleType("comfy.sample")
 
     def prepare_noise(latent_image, seed, batch_inds=None):
         recorded["prepare_noise_calls"].append((latent_image, seed, batch_inds))
+        if getattr(latent_image, "is_nested", False):
+            # comfy/sample.py:29-34 draws one noise tensor per stream of a nested latent.
+            return StubNestedTensor([torch.zeros_like(t) for t in latent_image.unbind()])
         return torch.zeros_like(latent_image)
 
     sample_module.prepare_noise = prepare_noise
@@ -265,6 +366,8 @@ def comfy_stubs(monkeypatch):
     comfy_module.samplers = samplers_module
     comfy_module.sample = sample_module
     comfy_module.sampler_helpers = sampler_helpers_module
+    comfy_module.model_sampling = model_sampling_module
+    comfy_module.nested_tensor = nested_tensor_module
 
     latent_preview_module = types.ModuleType("latent_preview")
 
@@ -291,5 +394,7 @@ def comfy_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "comfy.samplers", samplers_module)
     monkeypatch.setitem(sys.modules, "comfy.sample", sample_module)
     monkeypatch.setitem(sys.modules, "comfy.sampler_helpers", sampler_helpers_module)
+    monkeypatch.setitem(sys.modules, "comfy.model_sampling", model_sampling_module)
+    monkeypatch.setitem(sys.modules, "comfy.nested_tensor", nested_tensor_module)
     monkeypatch.setitem(sys.modules, "latent_preview", latent_preview_module)
     return recorded

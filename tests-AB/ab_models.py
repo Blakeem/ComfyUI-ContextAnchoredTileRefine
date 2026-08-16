@@ -16,7 +16,6 @@ import torch
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-
 # ---------------------------------------------------------------- image IO
 
 # Deliberately no load_image(): nothing in this harness may take PIXELS from a PNG.
@@ -32,7 +31,7 @@ def require_image_shape(image, height, width, what):
     directory listing, so every stage boundary is checked explicitly now."""
     actual = tuple(image.shape)
     if image.ndim != 4 or actual[1:] != (height, width, 3):
-        raise RuntimeError("{}: expected [B,{},{},3], got {}".format(what, height, width, actual))
+        raise RuntimeError(f"{what}: expected [B,{height},{width},3], got {actual}")
     return image
 
 
@@ -46,7 +45,9 @@ def to_uint8(image):
     """SaveImage's quantization, exactly: truncate, do NOT round.
     (nodes.py SaveImage: np.clip(255. * image, 0, 255).astype(np.uint8).)
     Matching it matters — the self-check diffs our PNG against ComfyUI's."""
-    scaled = 255.0 * image[0].detach().cpu().numpy()
+    # .float() after .cpu(): fp16 canvases would otherwise scale IN fp16 (spacing 0.125
+    # near 255), rounding before the truncation and biasing ~3% of pixels +1 vs SaveImage.
+    scaled = 255.0 * image[0].detach().cpu().float().numpy()
     return np.clip(scaled, 0, 255).astype(np.uint8)
 
 
@@ -64,8 +65,7 @@ def save_png(path, image, settings):
     written = png_size(path)
     expected = (int(image.shape[2]), int(image.shape[1]))
     if written != expected:
-        raise RuntimeError("{}: wrote {}x{} but the tensor is {}x{}".format(
-            path, written[0], written[1], expected[0], expected[1]))
+        raise RuntimeError(f"{path}: wrote {written[0]}x{written[1]} but the tensor is {expected[0]}x{expected[1]}")
     return written
 
 
@@ -74,7 +74,7 @@ def summarize(settings):
     keys = ("image_label", "run_label", "seam_mode", "seam_blend", "context_anchor",
             "context_overlap", "max_tile_width", "max_tile_height", "sampler",
             "scheduler", "steps", "denoise", "cfg", "seed")
-    return " ".join("{}={}".format(k, settings[k]) for k in keys if k in settings)
+    return " ".join(f"{k}={settings[k]}" for k in keys if k in settings)
 
 
 def read_prompts(path, positive_node, negative_node):
@@ -103,7 +103,7 @@ def cache_path(cache_dir, label, kind, width, height, key):
     no stage reads pixels from disk."""
     payload = json.dumps(key, sort_keys=True, default=str)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
-    return Path(cache_dir) / "{}_{}_{}x{}_{}.pt".format(label, kind, width, height, digest)
+    return Path(cache_dir) / f"{label}_{kind}_{width}x{height}_{digest}.pt"
 
 
 # ---------------------------------------------------------------- upscale stage
@@ -302,7 +302,9 @@ def weight_fingerprint(model, samples=4):
         tensor = state[name]
         if tensor.numel() < 4096:
             continue
-        total += float(tensor.detach().double().abs().sum().item())
+        # One float64 copy, abs in place on it: .double().abs() keeps both alive at once.
+        # Cast first, never abs() first — these state_dicts carry int8/float8 weights.
+        total += float(tensor.detach().to(torch.float64).abs_().sum().item())
         samples -= 1
         if samples <= 0:
             break
@@ -320,10 +322,12 @@ def free_gpu():
     re-upload of the 11.5 GB UNET across PCIe on the next sample, per run."""
     import comfy.model_management
 
+    # Cache-empty LAST: the collect that reaps the cycle-held patchers unload_all_models()
+    # dropped has to run before the blocks they hold can be returned to the allocator.
     gc.collect()
     comfy.model_management.unload_all_models()
-    comfy.model_management.soft_empty_cache()
     gc.collect()
+    comfy.model_management.soft_empty_cache()
 
 
 def clear_cache():
@@ -361,7 +365,5 @@ class VramProbe:
 
     def __str__(self):
         if not self.available:
-            return "{:.1f}s".format(self.elapsed)
-        return "{:.1f}s  peak VRAM {:.2f} GiB alloc / {:.2f} GiB reserved".format(
-            self.elapsed, self.allocated, self.reserved
-        )
+            return f"{self.elapsed:.1f}s"
+        return f"{self.elapsed:.1f}s  peak VRAM {self.allocated:.2f} GiB alloc / {self.reserved:.2f} GiB reserved"

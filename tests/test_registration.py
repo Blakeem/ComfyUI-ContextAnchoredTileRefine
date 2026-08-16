@@ -23,11 +23,11 @@ def test_loads_via_comfyui_directory_mechanism():
         assert isinstance(node_class, type)
         assert isinstance(vl_class, type)
         assert isinstance(upscale_class, type)
-        assert module.NODE_CLASS_MAPPINGS == {
+        assert {
             "ContextAnchoredTileRefine": node_class,
             "ContextAnchoredTileRefineVL": vl_class,
             "ContextAnchoredTileUpscaleVL": upscale_class,
-        }
+        } == module.NODE_CLASS_MAPPINGS
         assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefine"]
@@ -117,6 +117,24 @@ def test_vl_module_never_imports_comfy():
     assert result.returncode == 0, result.stderr
 
 
+def test_captions_module_never_imports_comfy():
+    # captions.py holds the same lazy-import contract as vl.py, which it imports at module
+    # scope: torch (and vl) at module scope, comfy only inside functions.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.captions\n"
+        "assert 'comfy' not in sys.modules, 'captions.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'captions.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_upscale_module_never_imports_comfy():
     # upscale.py holds the same lazy-import contract as sampling.py / vl.py: torch at
     # module scope, comfy only inside functions.
@@ -125,6 +143,67 @@ def test_upscale_module_never_imports_comfy():
         "import context_anchored_tile_refine.upscale\n"
         "assert 'comfy' not in sys.modules, 'upscale.py imported comfy at module scope'\n"
         "assert 'latent_preview' not in sys.modules, 'upscale.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_stepper_module_never_imports_comfy():
+    # stepper.py holds the same lazy-import contract as sampling.py: torch (and stdlib
+    # threading) at module scope, comfy only inside functions.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.stepper\n"
+        "assert 'comfy' not in sys.modules, 'stepper.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'stepper.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_sync_module_never_imports_comfy():
+    # sync.py imports sampling/vl/captions/conds at module scope (no cycle — sampling imports
+    # sync lazily) and must inherit their contract: torch at module scope, comfy only inside
+    # functions, stepper.py lazily too.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.sync\n"
+        "assert 'comfy' not in sys.modules, 'sync.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'sync.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_progress_module_never_imports_comfy():
+    # progress.py is stdlib ONLY — it holds no tensors, so torch has no business there
+    # either, and every comfy touch (the run's one ProgressBar, the scoped shim) is
+    # function-scope. upscale.py and sync.py import it at THEIR module scope, so a comfy
+    # import here would break their contracts too. `server` is held to the same rule and
+    # matters more: it is ComfyUI's aiohttp web app, so importing it to write a status line
+    # would drag a web server into every headless harness run.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.progress\n"
+        "assert 'comfy' not in sys.modules, 'progress.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'progress.py imported latent_preview at module scope'\n"
+        "assert 'torch' not in sys.modules, 'progress.py imported torch at module scope'\n"
+        "assert 'server' not in sys.modules, 'progress.py imported server at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
