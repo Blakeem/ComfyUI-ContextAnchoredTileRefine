@@ -142,6 +142,21 @@ def _digest(payload):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
+def _arm_instruction(method):
+    """This campaign's instruction table, pinned — NOT captions.CAPTION_INSTRUCTIONS.
+
+    That table moved VLM_METHOD_VISION_CAPTIONS from the SETTLED_POSITION wording to
+    RICH_GROUPED on 2026-08-16. Resolving through it now would silently re-caption the "pos"
+    arms with the "vlcap" arms' text, making the two render identically while every label,
+    PNG tEXt stamp and cache key still said "settled-position". The "pos" arms stay pinned to
+    the instruction they were judged with."""
+    from context_anchored_tile_refine import captions
+
+    if method == captions.VLM_METHOD_VISION_CAPTIONS:
+        return captions.SETTLED_POSITION_INSTRUCTION, captions.SETTLED_POSITION_MAX_TOKENS
+    return captions.CAPTION_INSTRUCTIONS[method]
+
+
 def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):
     """The production caption pre-pass per scene, cached per (scene gen digest,
     rects, instruction) — the market harness's pattern. `method` picks the shipped
@@ -153,7 +168,7 @@ def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):
     from context_anchored_tile_refine import captions
 
     method = captions.VLM_METHOD_VISION_CAPTIONS if method is None else method
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[method]
+    instruction, max_length = _arm_instruction(method)
     key = {"gen": _digest(matrix_run.gen_key(scene)), "rects": krea2_run._rects(tiles),
            "instruction": instruction, "max_length": max_length, "clip": CLIP_NAME,
            "surface": ("settled-position" if method == captions.VLM_METHOD_VISION_CAPTIONS
@@ -198,7 +213,7 @@ def build_settings(arm, scene, tile_captions, sigmas):
 
     caption_method = (captions_mod.VLM_METHOD_VISION_CAPTIONS
                       if ARM_SURFACE[arm] == "pos" else captions_mod.VLM_METHOD_CAPTIONS)
-    instruction, max_length = captions_mod.CAPTION_INSTRUCTIONS[caption_method]
+    instruction, max_length = _arm_instruction(caption_method)
     ring_desc = {
         "lead": "frozen RAW canvas on the SHIPPED lead curve (run-global "
                 "sigma_first) — the market arm-24 validated config",

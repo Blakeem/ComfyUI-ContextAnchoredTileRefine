@@ -1,5 +1,9 @@
 """Krea 2 conditioning A/B at production settings: does low-denoise refine need text?
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4: its arms drove the raster VL branch removed in
+1.6.0 (the VL path is the sync engine now). __main__ is guarded; module helpers stay
+importable — the active sync harnesses use them. Kept as the campaign record.
+
 Renders FOUR arms of the refine stage from ONE frozen base, all at the exact settings
 of output\\ComfyUI-2x_00676_.png (node 364: seed 42, exp_heun_2_x0_sde / sgm_uniform,
 28 steps, cfg 3.5, denoise 0.35, upscale 3x via 4xFaceUpDAT + lanczos, tile caps
@@ -702,4 +706,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab_krea2.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4. Since 1.6.0 refine_image"
+        " routes the VL path to the sync engine, so these arms would silently render on a"
+        " different engine than the one they were judged on. Check out 0dfd1e4 to re-run."
+        " Module helpers stay importable (the active sync harnesses use them)."
+    )

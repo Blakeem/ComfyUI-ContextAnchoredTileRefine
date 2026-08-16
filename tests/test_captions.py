@@ -9,7 +9,7 @@ no model are needed.
 """
 import pytest
 import torch
-from test_vl import VLGuider
+from test_vl import VLGuider, sync_sampler
 
 from context_anchored_tile_refine import captions, sampling, vl
 from context_anchored_tile_refine.grid import Rect
@@ -39,11 +39,19 @@ class FakeCaptionClip:
     sequence position.
     """
 
-    def __init__(self, n_rows=N_ROWS, tail_len=TAIL, answer=None, seq_override=None):
+    def __init__(self, n_rows=N_ROWS, tail_len=TAIL, answer=None, seq_override=None,
+                 text_seq_override=None, text_pooled=None, text_extras=None):
         self.n_rows = n_rows
         self.tail_len = tail_len
         self.answer = answer if answer is not None else (lambda image, instruction: "<think>weighing it up</think>a plain caption")
         self.seq_override = seq_override
+        # The text-only half of the slice+caption surface, knobbed separately so a broken
+        # caption encode can be tested without also breaking the vision encode. Krea 2 returns
+        # pooled_output None on a text-only encode (probe C, docs/vl-conditioning-encode-cost.md
+        # section 10), which is what makes the concatenation lossless.
+        self.text_seq_override = text_seq_override
+        self.text_pooled = text_pooled
+        self.text_extras = {} if text_extras is None else text_extras
         self.tokenize_calls = []
         self.generate_calls = []
         self.encoded = []
@@ -75,14 +83,15 @@ class FakeCaptionClip:
     def encode_from_tokens_scheduled(self, tokens):
         text, image, tail_rows = tokens["_probe"]
         self.encoded.append(text)
-        if self.seq_override is not None:
-            seq = self.seq_override
-        elif image is not None:
-            seq = 1 + self.n_rows + 1 + tail_rows
+        if image is None:                         # a text-only encode is only its own rows
+            seq = tail_rows if self.text_seq_override is None else self.text_seq_override
+            extras = dict(self.text_extras, pooled_output=self.text_pooled,
+                          attention_mask=torch.ones(1, seq))
         else:
-            seq = tail_rows                       # a text-only encode is only its own rows
+            seq = 1 + self.n_rows + 1 + tail_rows if self.seq_override is None else self.seq_override
+            extras = {"pooled_output": torch.zeros(1, 4), "attention_mask": torch.ones(1, seq)}
         tensor = torch.arange(seq, dtype=torch.float32).reshape(1, seq, 1).expand(1, seq, 8).clone()
-        return [[tensor, {"pooled_output": torch.zeros(1, 4), "attention_mask": torch.ones(1, seq)}]]
+        return [[tensor, extras]]
 
 
 @pytest.fixture
@@ -118,13 +127,19 @@ def test_settled_instructions_are_the_ab_settled_strings():
 
 
 def test_each_caption_method_asks_its_settled_question():
-    # The pairing is the decision, not a detail: the position wording complements the vision
-    # rows, and the GROUPED rich wording is what the captions-only surface ships (the owner's
-    # explicit call on 17_CaptionOnly+Group_Lead_s42_v3, taken against the lab score).
+    # Both caption surfaces ask the GROUPED rich question since 2026-08-16. On the
+    # captions-only surface that was already the owner's explicit call
+    # (17_CaptionOnly+Group_Lead_s42_v3, taken against the lab score); on the slice+caption
+    # surface the caption is now encoded TEXT-ONLY, so it no longer reads the canvas while it
+    # is encoded and the position wording had nothing left to complement.
     assert captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_VISION_CAPTIONS] == (
-        captions.SETTLED_POSITION_INSTRUCTION, 512)
+        captions.RICH_GROUPED_INSTRUCTION, 768)
     assert captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_CAPTIONS] == (
         captions.RICH_GROUPED_INSTRUCTION, 768)
+    # Retired from the table 2026-08-16, still defined: tests-AB's judged "pos" arms pin
+    # themselves to it and their renders are on disk.
+    assert captions.SETTLED_POSITION_INSTRUCTION not in [
+        instruction for instruction, _tokens in captions.CAPTION_INSTRUCTIONS.values()]
     # "vision tokens" never reaches the VLM at all, so it has no instruction.
     assert captions.VLM_METHOD_VISION not in captions.CAPTION_INSTRUCTIONS
 
@@ -335,39 +350,61 @@ def test_caption_conds_take_the_single_row_of_each_tile(stubbed_slices):
 
     tensor, extras = conds[0][0]
     assert tensor.shape == (1, TAIL + 3, 8)
-    assert extras["pooled_output"].shape == (1, 4)
+    # Krea 2 produces no pooled output on a text-only encode; the extras still pass through.
+    assert "pooled_output" in extras and extras["pooled_output"] is None
 
 
 # --- build_slice_caption_conds --------------------------------------------------------
 
-def test_slice_caption_conds_keep_each_tiles_rows_plus_its_caption(stubbed_slices):
+def _vision_rows(tile, offset_x=0, offset_y=0):
+    # What the tile keeps of the shared pure-vision encode: vision_start, its own grid cells,
+    # vision_end — and NO template tail (expected_seq = n_rows + 2 empties that range), because
+    # the one tail in the concatenated stream arrives with the caption rows.
+    return vl.slice_indices(tile.crop_rect, CANVAS_H, CANVAS_W, ENC_H, ENC_W, N_ROWS + 2,
+                            offset_x, offset_y)
+
+
+def test_slice_caption_conds_cat_each_tiles_vision_rows_and_its_own_caption(stubbed_slices):
+    # The settled surface (2026-08-16): sliced rows of ONE shared pure-vision canvas encode,
+    # then that tile's caption encoded TEXT-ONLY, concatenated on the row axis. The fake's
+    # feature value is the row's position in its own encode, so the two halves are readable
+    # apart: vision rows carry their slice indices, caption rows count 0..n-1.
     clip = FakeCaptionClip()
     tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
     conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"], ["a cart"]])
 
-    # The caption rides INSIDE the vision encode, so one whole-canvas encode per caption.
-    assert clip.encoded == [vl.VISION_BLOCK + "a fox", vl.VISION_BLOCK + "a cart"]
-    assert all(call["llama_template"] == vl.KREA2_TEMPLATE for call in clip.tokenize_calls)
-    expected_seq = 1 + N_ROWS + 1 + TAIL + 2
+    # ONE whole-canvas encode for the run (pure vision, no caption in it), then one cheap
+    # text encode per tile — the cost shape the old per-tile canvas encode gave up.
+    assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a cart"]
+    caption_rows = TAIL + 2                                  # tail + the caption's two words
     for cond, tile in zip(conds, tiles, strict=True):
-        indices = vl.slice_indices(tile.crop_rect, CANVAS_H, CANVAS_W, ENC_H, ENC_W, expected_seq)
+        indices = _vision_rows(tile)
         tensor, extras = cond[0]
-        assert tensor[0, :, 0].tolist() == indices
-        # The tail carries the caption, so both tiles keep every caption row.
-        assert indices[-(TAIL + 2):] == list(range(1 + N_ROWS + 1, expected_seq))
+        assert tensor.shape == (1, len(indices) + caption_rows, 8)
+        assert tensor[0, :len(indices), 0].tolist() == indices
+        assert tensor[0, len(indices):, 0].tolist() == list(range(caption_rows))
+        # Extras are the VISION encode's; the full-canvas attention mask is still dropped.
         assert "attention_mask" not in extras
+        assert extras["pooled_output"].shape == (1, 4)
 
 
-def test_slice_caption_conds_reuse_one_encode_per_distinct_caption(stubbed_slices):
+def test_slice_caption_conds_share_one_vision_encode_across_every_tile(stubbed_slices, monkeypatch):
+    # The counting check behind the cost claim: the canvas goes through the vision tower ONCE
+    # no matter how many tiles slice it, exactly as on the vision-only surface.
     clip = FakeCaptionClip()
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H)),
+             Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    calls = []
+    real_encode = vl._encode_canvas
+    monkeypatch.setattr(vl, "_encode_canvas", lambda *a, **k: (calls.append(a[1]), real_encode(*a, **k))[1])
 
     captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3), tiles,
-                                       [["a fox"], ["a fox"]])
+                                       [["a fox"]] * 4)
 
-    assert clip.encoded == [vl.VISION_BLOCK + "a fox"]
+    assert len(calls) == 1
+    assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a fox", "a fox", "a fox"]
 
 
 def test_slice_caption_conds_offset_region_tiles_into_the_full_canvas_frame(stubbed_slices):
@@ -393,7 +430,8 @@ def test_slice_caption_conds_encode_one_picture_at_a_time(stubbed_slices):
     conds = captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))],
                                                [["a fox"]])
 
-    assert [tuple(call["image"].shape) for call in clip.tokenize_calls] == [(1, CANVAS_H, CANVAS_W, 3)]
+    handed = [call["image"] for call in clip.tokenize_calls if call["image"] is not None]
+    assert handed and all(tuple(image.shape) == (1, CANVAS_H, CANVAS_W, 3) for image in handed)
     tensor, extras = conds[0][0]
     assert tensor.shape[0] == 1
     assert extras["pooled_output"].shape == (1, 4)
@@ -409,17 +447,52 @@ def test_slice_caption_conds_reject_a_caption_count_that_is_not_the_batch(stubbe
                                            [["a fox"]])
 
 
-def test_slice_caption_conds_reject_an_encoder_whose_layout_disagrees(stubbed_slices):
+def test_slice_caption_conds_reject_a_vision_encoder_whose_layout_disagrees(stubbed_slices):
+    # The vision half is vl._encode_canvas' own fail-fast, reached unchanged by this surface.
     clip = FakeCaptionClip(seq_override=1 + N_ROWS + 1 + TAIL + 99)
 
-    with pytest.raises(RuntimeError, match="slice\\+caption encode has"):
+    with pytest.raises(RuntimeError, match="encoded conditioning has"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
                                            [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
 
 
-# --- through the pipeline: the three-way branch in _refine_tiles ----------------------
-# 80x80 image at cap 56 / overlap 16 solves to a 2x2 grid, so tiles really do select
-# different rows of the 256x256 (8x8 merged cell) encode geometry pinned below.
+def test_slice_caption_conds_reject_a_caption_encode_of_the_wrong_length(stubbed_slices):
+    # The concatenation's contract: a text-only encode of the caption must be exactly the
+    # caption+tail rows the in-stream token layout says it is. Anything else means the
+    # template strip changed, and cat'ing it would silently reshape every tile's positive.
+    clip = FakeCaptionClip(text_seq_override=TAIL + 99)
+
+    with pytest.raises(RuntimeError, match="text-only caption encode has"):
+        captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+
+
+def test_slice_caption_conds_reject_caption_extras_the_vision_encode_lacks(stubbed_slices):
+    # The merged entry keeps the VISION encode's extras, so anything only the caption encode
+    # carries would vanish without a trace.
+    clip = FakeCaptionClip(text_extras={"guidance": torch.ones(1)})
+
+    with pytest.raises(RuntimeError, match="extras the vision encode lacks"):
+        captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+
+
+def test_slice_caption_conds_reject_a_caption_encode_with_a_real_pooled_output(stubbed_slices):
+    # Same argument, for the one extra that is always present: Krea 2 returns None here, and a
+    # CLIP that returns a real vector is outside what this surface was settled on.
+    clip = FakeCaptionClip(text_pooled=torch.zeros(1, 4))
+
+    with pytest.raises(RuntimeError, match="real pooled_output"):
+        captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+
+
+# --- through the pipeline: the three-way branch, through the REAL dispatch -------------
+# A vl_clip sends refine_image to the sync engine, so these run end to end through it (the
+# fake model rides the real stepper): a refine_image mock would build no conditioning at all,
+# which is the whole thing under test. 80x80 image at cap 56 / overlap 16 solves to a 2x2
+# grid, so tiles really do select different rows of the 256x256 (8x8 merged cell) encode
+# geometry pinned below.
 PIPE_ENC = 256
 PIPE_ROWS = (PIPE_ENC // vl.MERGED_CELL) ** 2
 
@@ -432,8 +505,9 @@ def pipeline_clip(monkeypatch):
 
 def _run(image, guider, clip, vlm_method, mask=None, ctx=0):
     return sampling.refine_image(
-        image, guider, object(), SIGMAS, *_engine(), max_tile_width=56, max_tile_height=56,
-        context_anchor=ctx, context_overlap=16, mask=mask, vl_clip=clip, vlm_method=vlm_method,
+        image, guider, sync_sampler(), SIGMAS, *_engine(), max_tile_width=56,
+        max_tile_height=56, context_anchor=ctx, context_overlap=16, mask=mask, vl_clip=clip,
+        vlm_method=vlm_method,
     )
 
 
@@ -450,7 +524,7 @@ def test_vision_tokens_is_the_default_and_still_routes_through_build_global_slic
     real_build = vl.build_global_slices
     monkeypatch.setattr(vl, "build_global_slices", lambda *a, **k: (seen.append(k), real_build(*a, **k))[1])
 
-    default = sampling.refine_image(image, VLGuider(), object(), SIGMAS, *_engine(),
+    default = sampling.refine_image(image, VLGuider(), sync_sampler(), SIGMAS, *_engine(),
                                     max_tile_width=56, max_tile_height=56, context_anchor=0,
                                     context_overlap=16, vl_clip=pipeline_clip)
     explicit = _run(image, VLGuider(), pipeline_clip, "vision tokens")
@@ -461,7 +535,7 @@ def test_vision_tokens_is_the_default_and_still_routes_through_build_global_slic
 
 
 @pytest.mark.parametrize("method,instruction,max_length", [
-    ("vision tokens and captions", captions.SETTLED_POSITION_INSTRUCTION, 512),
+    ("vision tokens and captions", captions.RICH_GROUPED_INSTRUCTION, 768),
     ("captions", captions.RICH_GROUPED_INSTRUCTION, 768),
 ])
 def test_each_caption_method_reaches_the_vlm_with_its_settled_question(comfy_stubs, pipeline_clip, method, instruction, max_length):
@@ -490,19 +564,22 @@ def test_captions_only_gives_each_tile_a_text_only_positive(comfy_stubs, pipelin
     assert guider.original_conds is pristine
 
 
-def test_vision_and_captions_slices_the_encode_that_carries_the_caption(comfy_stubs, pipeline_clip):
+def test_vision_and_captions_cats_the_shared_slice_and_a_text_only_caption(comfy_stubs, pipeline_clip):
     image = torch.rand(1, 80, 80, 3)
     guider = VLGuider()
 
     _run(image, guider, pipeline_clip, "vision tokens and captions")
 
-    assert pipeline_clip.encoded == [vl.VISION_BLOCK + "a plain caption"]   # cached per caption
-    expected_seq = 1 + PIPE_ROWS + 1 + TAIL + 3
+    # ONE pure-vision canvas encode for the whole picture, then one text-only caption encode
+    # per tile — no VISION_BLOCK prefix on the caption encode at all.
+    assert pipeline_clip.encoded == [vl.VISION_BLOCK] + ["a plain caption"] * 4
+    caption_rows = TAIL + 3                              # tail + the caption's three words
     from test_tiling import _layout
     layout = _layout(80, 80, 56, 56, overlap=16)
     for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
-        indices = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, expected_seq)
-        assert seen["positive"][0]["cross_attn"][0, :, 0].tolist() == indices
+        indices = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_ROWS + 2)
+        rows = seen["positive"][0]["cross_attn"][0, :, 0].tolist()
+        assert rows == indices + list(range(caption_rows))
 
 
 def test_the_mask_path_captions_the_region_crop_and_encodes_the_full_image(comfy_stubs, pipeline_clip):
@@ -517,8 +594,11 @@ def test_the_mask_path_captions_the_region_crop_and_encodes_the_full_image(comfy
 
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
     assert (y0, y1, x0, x1) == (8, 72, 8, 72)
-    caption_inputs = [call["image"] for call in pipeline_clip.tokenize_calls if call["llama_template"] is None]
-    encode_inputs = [call["image"] for call in pipeline_clip.tokenize_calls if call["llama_template"] is not None]
+    # The text-only caption encode tokenizes with no image at all, so only the calls that were
+    # handed pixels are read here.
+    with_image = [call for call in pipeline_clip.tokenize_calls if call["image"] is not None]
+    caption_inputs = [call["image"] for call in with_image if call["llama_template"] is None]
+    encode_inputs = [call["image"] for call in with_image if call["llama_template"] is not None]
     # comfy_stubs' common_upscale returns the resampled COPY, so only the shape is readable —
     # which is the point: what the VLM reads is never the sampled tile.
     assert caption_inputs and all(tuple(x.shape[1:3]) != (y1 - y0, x1 - x0) for x in caption_inputs)
@@ -538,9 +618,12 @@ def test_a_two_picture_batch_with_different_length_captions_completes(comfy_stub
 
     assert out.shape == (2, 80, 80, 3)
     assert len(pipeline_clip.generate_calls) == 8            # 4 tiles x 2 pictures
-    # Both captions reach the encoder; the slice surface carries them inside the vision block.
-    prefix = "" if method == "captions" else vl.VISION_BLOCK
-    assert set(pipeline_clip.encoded) == {prefix + "a fox", prefix + "a cart in a very busy market"}
+    # Both captions reach the encoder as plain text on BOTH surfaces; the slice surface adds
+    # its one shared pure-vision canvas encode per picture on top.
+    expected = {"a fox", "a cart in a very busy market"}
+    if method == "vision tokens and captions":
+        expected.add(vl.VISION_BLOCK)
+    assert set(pipeline_clip.encoded) == expected
 
 
 def test_an_unknown_vlm_method_is_rejected_by_name(comfy_stubs, pipeline_clip):

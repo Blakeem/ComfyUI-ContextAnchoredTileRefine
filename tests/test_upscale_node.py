@@ -21,8 +21,8 @@ WIDGETS = {
     "max_tile_height": 2048,
     "context_anchor": 32,
     "context_overlap": 32,
-    "context_anchor_type": "leading",
-    "vlm_method": "vision tokens",
+    "anchor_source": "source image",
+    "vlm_method": "vision tokens and captions",
 }
 
 
@@ -64,7 +64,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         recorded["build_sigmas"] = (model, scheduler, steps, denoise)
         return recorded["sigmas"]
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, anchor_type=None, vlm_method=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None):
         recorded["refine_image"] = {
             "image": image,
             "guider": guider,
@@ -78,8 +78,9 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
             "context_overlap": context_overlap,
             "mask": mask,
             "vl_clip": vl_clip,
-            "anchor_type": anchor_type,
+            "anchor_source": anchor_source,
             "vlm_method": vlm_method,
+            "sampler_name": sampler_name,
         }
         return recorded["refined"]
 
@@ -153,13 +154,16 @@ def test_geometry_widgets_pass_through_unchanged(comfy_stubs, monkeypatch):
     assert call["sigmas"] is recorded["sigmas"]
 
 
-@pytest.mark.parametrize("choice", ["leading", "adjacent"])
-def test_anchor_type_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice):
-    # The widget is inert unless it arrives as refine_image's anchor_type; sampling.py
-    # resolves the ring gate from that name alone.
-    recorded, _ = _drive(monkeypatch, context_anchor_type=choice)
+@pytest.mark.parametrize("choice", ["source image", "live canvas"])
+def test_anchor_source_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice):
+    # The widget is inert unless it arrives as refine_image's anchor_source: that string IS
+    # the sync engine's mode, so nothing maps or renames it on the way through.
+    from context_anchored_tile_refine import sync
 
-    assert recorded["refine_image"]["anchor_type"] == choice
+    recorded, _ = _drive(monkeypatch, anchor_source=choice)
+
+    assert recorded["refine_image"]["anchor_source"] == choice
+    assert choice in sync.ANCHOR_SOURCES
 
 
 @pytest.mark.parametrize("choice", ["vision tokens", "vision tokens and captions", "captions"])
@@ -202,7 +206,13 @@ def test_sampler_is_built_from_the_widget_name(comfy_stubs, monkeypatch):
     recorded, _ = _drive(monkeypatch, sampler_name="euler")
 
     assert comfy_stubs["sampler_object_calls"] == ["euler"]
-    assert recorded["refine_image"]["sampler"] == ("sampler_object", "euler")
+    # The stub mirrors core: sampler_object returns a KSAMPLER whose sampler_function is
+    # sample_<name>, which is the identity the sync stepper resolves its timing table on.
+    assert recorded["refine_image"]["sampler"].sampler_function.__name__ == "sample_euler"
+    # The NAME rides along too: core wraps several samplers in a private function
+    # (dpm_fast -> dpm_fast_function), so a rejection resolved off the object alone would
+    # name something this node's widget never offered.
+    assert recorded["refine_image"]["sampler_name"] == "euler"
 
 
 def test_noise_carries_the_seed(comfy_stubs, monkeypatch):

@@ -8,8 +8,9 @@ import logging
 import pytest
 import torch
 from test_conds import FakeControl
-from test_tiling import GridGuider, GridNoise, GridVAE, _layout
+from test_tiling import GridNoise, GridVAE
 
+from conftest import BaseModel
 from context_anchored_tile_refine import sampling, vl
 from context_anchored_tile_refine.grid import Rect
 
@@ -231,9 +232,19 @@ def test_resample_for_global_snaps_to_merged_cells(comfy_env):
     assert enc_h * enc_w == vl.GLOBAL_SLICE_BUDGET
 
 
-# --- through the pipeline: the per-tile positive swap in _refine_tiles ----------------
-# Mirrors the ControlNet swap tests in test_conds.py -- same fakes, same restore checks --
-# over the block sampling.py writes to the caller's guider.
+# --- through the pipeline: the VL dispatch into the sync engine -----------------------
+# From 1.6.0 a vl_clip sends refine_image to the sync engine (sync.py), mask or no mask, so
+# what is pinned HERE is the dispatch's own preamble — the last thing that runs before the
+# engine does — driven through a REAL end-to-end run. The three tests that pinned the retired
+# raster VL branch moved WITH that branch:
+#   the per-tile positive swap (a distinct slice per tile, the negative untouched, the
+#     caller's conds pristine) -> test_sync.py's
+#     test_each_lane_guider_carries_its_own_tile_positive, asserted of the LANE guiders the
+#     engine builds, because the caller's own guider is never swapped at all;
+#   the pristine-conds restore after a mid-run raise -> test_sync.py's
+#     test_the_callers_guider_is_untouched_after_a_lane_raises;
+#   the mask path's full-image encode at the bbox offset -> test_sync.py's
+#     test_the_mask_path_encodes_the_full_image_at_the_bbox_offset.
 # Its own encode geometry: 256x256 -> an 8x8 merged-cell grid over the 80px test canvas, so
 # neighboring tiles really do select different rows (the 3x2 grid above is coarser than the
 # tiles and every tile would take every row).
@@ -242,32 +253,72 @@ PIPE_ROWS = (PIPE_ENC // vl.MERGED_CELL) ** 2
 PIPE_SEQ = 1 + PIPE_ROWS + 1 + 4
 
 
-class VLGuider(GridGuider):
-    # GridGuider carrying the CFGGuider conds convention, recording what each tile saw.
+class SyncPatcher:
+    """comfy's ModelPatcher cut to the three members the sync engine reads."""
+
+    def __init__(self, model):
+        self.model = model
+        self.load_device = torch.device("cpu")
+
+    def get_model_object(self, name):
+        return getattr(self.model, name)
+
+
+class SyncModelK:
+    """comfy's KSamplerX0Inpaint (samplers.py:634-643) cut to its blend contract: the released
+    cells take the model's prediction and the frozen ring is restored from the clean
+    `latent_image`. Both tensors are held as attributes, exactly as core's are, because they
+    are what the engine's live-canvas surgery rewrites between steps."""
+
+    def __init__(self, latent, noise, denoise_mask):
+        self.latent_image = latent
+        self.noise = noise
+        self.denoise_mask = denoise_mask
+
+    def __call__(self, x, sigma, **kwargs):
+        return x * self.denoise_mask + self.latent_image * (1.0 - self.denoise_mask)
+
+
+class VLGuider:
+    """comfy's CFGGuider cut to sample()'s contract, recording what every tile saw.
+
+    The sync engine samples each tile on its own shallow COPY of this object, and a shallow
+    copy shares `seen_conds`, so the caller's list collects every LANE's conds in lane order.
+    """
+
     def __init__(self):
-        super().__init__()
+        self.model_patcher = SyncPatcher(BaseModel())
         self.original_conds = {
             "positive": [{"cross_attn": torch.zeros(1, 1, 8)}],
             "negative": [{"cross_attn": torch.zeros(1, 1, 8)}],
         }
         self.seen_conds = []
 
-    def sample(self, noise, latent_image, sampler, sigmas, **kwargs):
+    def sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None,
+               disable_pbar=False, seed=None):
         self.seen_conds.append(self.original_conds)
-        return super().sample(noise, latent_image, sampler, sigmas, **kwargs)
+        model = self.model_patcher.model
+        latent = model.process_latent_in(latent_image)
+        x = model.model_sampling.noise_scaling(sigmas[0], noise, latent)
+        out = sampler.sampler_function(
+            SyncModelK(latent, noise, denoise_mask), x, sigmas, extra_args={},
+            callback=callback, disable=disable_pbar, **sampler.extra_options)
+        return model.process_latent_out(out)
 
 
-class VLRaisesGuider(VLGuider):
-    # cf. test_conds.ControlRaisesGuider: blow up on the second tile, once a swap is live.
-    def __init__(self):
-        super().__init__()
-        self.conds_at_raise = None
+def sync_sampler():
+    # A stand-in k-diffusion function with euler's eval CADENCE and nothing else: one model
+    # call per sigma step. Named so the stepper's `sample_` strip resolves it in
+    # EVALS_PER_STEP — the dispatch rejects a bare object() now, before any encode.
+    import comfy.samplers
 
-    def sample(self, noise, latent_image, sampler, sigmas, **kwargs):
-        if len(self.calls) == 1:
-            self.conds_at_raise = self.original_conds
-            raise RuntimeError("sampler exploded")
-        return super().sample(noise, latent_image, sampler, sigmas, **kwargs)
+    def fn(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+        for step in range(int(sigmas.shape[-1]) - 1):
+            x = model(x, sigmas[step], **(extra_args or {})).clone()
+        return x
+
+    fn.__name__ = "sample_euler"
+    return comfy.samplers.KSAMPLER(fn, {}, {})
 
 
 @pytest.fixture
@@ -281,66 +332,10 @@ def pipeline_clip(monkeypatch):
 
 def _run_vl(image, guider, clip, cap=56, ctx=0, overlap=16, mask=None):
     return sampling.refine_image(
-        image, guider, object(), SIGMAS, GridVAE(), GridNoise(),
+        image, guider, sync_sampler(), SIGMAS, GridVAE(), GridNoise(),
         max_tile_width=cap, max_tile_height=cap, context_anchor=ctx,
         context_overlap=overlap, mask=mask, vl_clip=clip,
     )
-
-
-def test_each_tile_samples_its_own_vision_slice(comfy_stubs, pipeline_clip):
-    image = torch.rand(1, 80, 80, 3)     # /8-aligned: 2x2 grid at cap 56, overlap 16
-    guider = VLGuider()
-    pristine = guider.original_conds
-    negative = pristine["negative"]
-
-    out = _run_vl(image, guider, pipeline_clip)
-
-    layout = _layout(80, 80, 56, 56, overlap=16)
-    assert len(guider.seen_conds) == len(layout.tiles) == 4
-    for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
-        expected = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_SEQ)
-        assert seen["positive"][0]["cross_attn"][0, :, 0].tolist() == expected
-        assert seen["negative"] is negative        # only the positive is swapped
-    rows = [tuple(seen["positive"][0]["cross_attn"][0, :, 0].tolist()) for seen in guider.seen_conds]
-    assert len(set(rows)) == len(rows)             # a distinct slice per tile, in tile order
-    # Restored to the SAME object the caller handed in.
-    assert guider.original_conds is pristine
-    assert out.shape == image.shape
-
-
-def test_vl_pristine_conds_restored_after_a_mid_run_raise(comfy_stubs, pipeline_clip):
-    image = torch.rand(1, 80, 80, 3)
-    guider = VLRaisesGuider()
-    pristine = guider.original_conds
-
-    with pytest.raises(RuntimeError, match="sampler exploded"):
-        _run_vl(image, guider, pipeline_clip)
-
-    assert guider.conds_at_raise is not None and guider.conds_at_raise is not pristine
-    assert guider.original_conds is pristine
-
-
-def test_mask_path_encodes_the_full_image_at_the_bbox_offset(comfy_stubs, pipeline_clip, monkeypatch):
-    # The region's tiles index the bbox crop, but the encode must read the WHOLE image with
-    # the bbox origin as the offset, or a masked refine only ever sees its own crop.
-    image = torch.rand(1, 80, 80, 3)
-    mask = torch.zeros(1, 80, 80)
-    mask[:, 16:64, 16:64] = 1.0
-    seen = {}
-    real_build = vl.build_global_slices
-
-    def recording_build(clip, source, tiles, offset_x=0, offset_y=0):
-        seen["source"] = source
-        seen["offsets"] = (offset_x, offset_y)
-        return real_build(clip, source, tiles, offset_x, offset_y)
-
-    monkeypatch.setattr(vl, "build_global_slices", recording_build)
-    _run_vl(image, VLGuider(), pipeline_clip, ctx=8, mask=mask)
-
-    y0, _y1, x0, _x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
-    assert (y0, x0) == (8, 8)
-    assert seen["source"] is image                 # the FULL image, not the bbox crop
-    assert seen["offsets"] == (x0, y0)
 
 
 def test_controlnet_is_ignored_on_the_vl_path(comfy_stubs, pipeline_clip, caplog):
@@ -371,3 +366,43 @@ def test_controlnet_is_ignored_on_the_vl_path(comfy_stubs, pipeline_clip, caplog
     assert guider.original_conds is pristine
     assert negative_cond["control"] is control
     assert "ControlNet" in caplog.text
+
+
+def test_the_vl_dispatch_rejects_a_sampler_the_engine_cannot_time(comfy_stubs, pipeline_clip):
+    # Fail fast AT the dispatch, before any VAE or VL encode: the stepper's own rejection
+    # would otherwise arrive one whole-canvas encode and one canvas of tile encodes later.
+    vae, noise = GridVAE(), GridNoise()
+
+    with pytest.raises(ValueError, match="only supports standard"):
+        sampling.refine_image(
+            torch.rand(1, 80, 80, 3), VLGuider(), object(), SIGMAS, vae, noise,
+            max_tile_width=56, max_tile_height=56, context_anchor=0, context_overlap=16,
+            vl_clip=pipeline_clip)
+
+    assert vae.encode_calls == [] and noise.calls == []
+
+
+def test_the_vl_dispatch_names_the_sampler_the_widget_offered(comfy_stubs, pipeline_clip):
+    # The all-in-one node builds its SAMPLER from a name widget, and core's sampler_object
+    # wraps several names in a private function (dpm_fast -> dpm_fast_function), so the
+    # rejection has to resolve off the NAME threaded through — not off the object built from
+    # it. The object here is a perfectly supported one, so only the name can raise.
+    with pytest.raises(ValueError, match="'dpm_fast' is not supported"):
+        sampling.refine_image(
+            torch.rand(1, 80, 80, 3), VLGuider(), sync_sampler(), SIGMAS, GridVAE(), GridNoise(),
+            max_tile_width=56, max_tile_height=56, context_anchor=0, context_overlap=16,
+            vl_clip=pipeline_clip, sampler_name="dpm_fast")
+
+
+def test_the_vl_dispatch_rejects_a_schedule_the_lanes_cannot_share(comfy_stubs, pipeline_clip):
+    # Every lane steps ONE shared schedule, so a non-monotone one (or one that never reaches
+    # sigma 0) is named here rather than mistiming the barrier later.
+    vae, noise = GridVAE(), GridNoise()
+
+    with pytest.raises(ValueError, match="strictly decreasing and end at 0"):
+        sampling.refine_image(
+            torch.rand(1, 80, 80, 3), VLGuider(), sync_sampler(),
+            torch.tensor([1.0, 0.5, 0.7, 0.0]), vae, noise, max_tile_width=56,
+            max_tile_height=56, context_anchor=0, context_overlap=16, vl_clip=pipeline_clip)
+
+    assert vae.encode_calls == [] and noise.calls == []

@@ -11,6 +11,33 @@ results in section 10) and it validates the causality claim exactly; a first per
 timing came with it. Section 9's in-pipeline timing matrix and section 10's render A/B remain
 unrun.
 
+> ## ADDENDUM 2026-08-16 — the shipped surface CHANGED; read this document as history
+>
+> `vision tokens and captions` no longer encodes the caption inside the canvas stream.
+> Section 8's **plain split** — one shared pure-vision canvas encode, each caption encoded
+> text-only, the two concatenated on the row axis — is what
+> `captions.build_slice_caption_conds` now does, and the caption instruction moved from
+> `SETTLED_POSITION_INSTRUCTION` to `RICH_GROUPED_INSTRUCTION` (768) with it. Owner decision,
+> from the arm-2 render A/B recorded in section 12 question 2 and the sync-tiles campaign
+> that followed.
+>
+> Nothing measured below is retracted — the numbers were correct for the code that existed
+> when they were taken, and they are the evidence the change rests on. What is now STALE is
+> only the present tense used for the old design:
+>
+> - Sections 3 and 4: the `vision tokens and captions` block, and the claim that
+>   `vl.build_global_slices` is "not called at all" on that surface. Its `_encode_canvas` is
+>   what the surface now shares; the caption is a separate text-only encode.
+> - `captions._encode_slice_caption` (referenced in sections 3, 9 and 11) is DELETED. The
+>   `tests-AB/` callers are frozen at commit `0dfd1e4` and carry a header note saying so.
+> - Section 5's instruction table row for `vision tokens and captions`: now
+>   `RICH_GROUPED_INSTRUCTION` / 768, the same pair as `captions`.
+> - Section 9's timing matrix is moot for the decision it was written to inform — the design
+>   it would have chosen between is now the shipped one. Its point B no longer exists.
+>
+> Section 6's causality result is the load-bearing one and it is unchanged: it is why the
+> vision half of the new surface is the same information the old one produced.
+
 ---
 
 ## 1. Vocabulary: there are exactly two calls

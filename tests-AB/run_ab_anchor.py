@@ -1,5 +1,8 @@
 """Anchor-mechanism A/B on the owner's 2026-08-10 two-tile sweep recipe (Krea 2).
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4: drove the raster VL branch removed in 1.6.0
+(the VL path is the sync engine now). __main__ is guarded; kept as the campaign record.
+
 Reproduces the sweep workflow exactly — base gen 512x288 "Cyberpunk cityscape at
 night" (seed 16928, dpmpp_2m / sgm_uniform 52 steps, cfg 3.5), node upscale 3x via
 4xFaceUpDAT + lanczos to 1536x864, ContextAnchoredTileUpscaleVL refine (seed 42,
@@ -620,4 +623,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab_anchor.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4. Since 1.6.0 refine_image"
+        " routes the VL path to the sync engine, so these arms would silently render on a"
+        " different engine than the one they were judged on. Check out 0dfd1e4 to re-run."
+    )

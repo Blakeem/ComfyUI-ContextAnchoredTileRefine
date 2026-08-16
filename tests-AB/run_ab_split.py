@@ -1,5 +1,11 @@
 """Caption-encode-context A/B: what should the caption tokens READ while being encoded?
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4. Not runnable against the current package: this
+file calls `captions._encode_slice_caption`, which was DELETED on 2026-08-16 when arm 2's
+text-cat surface was promoted into `captions.build_slice_caption_conds`. Kept verbatim as
+the frozen record of the campaign that decided that (roadmap decision — tests-AB is a
+record, not a maintained suite).
+
 Three arms of the `vision tokens and captions` surface, identical everywhere except the
 ONE thing under test — the image context present in the encoder call that produces each
 tile's caption rows. Designed in docs/vl-conditioning-encode-cost.md (sections 8/10/11)
@@ -769,4 +775,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab_split.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4 (see the module docstring)."
+        " refine_image no longer accepts anchor_type= and captions._encode_slice_caption was"
+        " deleted in 1.6.0. Check out 0dfd1e4 to re-run. Module helpers stay importable (the"
+        " active sync harnesses use them)."
+    )

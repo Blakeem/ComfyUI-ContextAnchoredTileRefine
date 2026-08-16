@@ -28,28 +28,28 @@ def _refine(image, sigmas=None, mask=None):
 
 
 def test_no_vl_selects_on_the_base_node():
-    # Both VL selects are conditioning decisions this node cannot act on: the lead schedule
-    # was consistently worse on its plain conditioning in the owner's A/B, and there is no VL
-    # CLIP here to slice or to caption with. Absent from the widget list AND from refine(),
-    # so nothing can pass either in by accident.
+    # Both VL selects are conditioning decisions this node cannot act on: it never enters the
+    # sync engine whose ring source anchor_source picks, and there is no VL CLIP here to slice
+    # or to caption with. Absent from the widget list AND from refine(), so nothing can pass
+    # either in by accident.
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     parameters = inspect.signature(ContextAnchoredTileRefine.refine).parameters
-    for widget in ("context_anchor_type", "vlm_method"):
+    for widget in ("anchor_source", "vlm_method"):
         assert widget not in all_inputs, widget
         assert widget not in parameters, widget
 
 
-@pytest.mark.parametrize("choice", ["leading", "adjacent"])
+@pytest.mark.parametrize("choice", ["source image", "live canvas"])
 @pytest.mark.parametrize("method", ["vision tokens", "vision tokens and captions", "captions"])
 def test_vl_node_forwards_its_widgets(monkeypatch, choice, method):
     # The VL refine node's own refine() is driven nowhere else in the suite, so a parameter
     # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
     recorded = {}
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, anchor_type=None, vlm_method=None):
-        recorded.update(context_anchor=context_anchor, vl_clip=vl_clip, anchor_type=anchor_type,
-                        vlm_method=vlm_method)
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None):
+        recorded.update(context_anchor=context_anchor, vl_clip=vl_clip,
+                        anchor_source=anchor_source, vlm_method=vlm_method)
         return image
 
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
@@ -66,14 +66,14 @@ def test_vl_node_forwards_its_widgets(monkeypatch, choice, method):
         max_tile_height=1024,
         context_anchor=64,
         context_overlap=8,
-        context_anchor_type=choice,
+        anchor_source=choice,
         vlm_method=method,
         clip=clip,
         mask=None,
     )
 
     assert isinstance(result, tuple) and len(result) == 1
-    assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_type": choice,
+    assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
                         "vlm_method": method}
 
 

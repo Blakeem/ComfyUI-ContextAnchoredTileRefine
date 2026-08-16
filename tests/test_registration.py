@@ -153,6 +153,43 @@ def test_upscale_module_never_imports_comfy():
     assert result.returncode == 0, result.stderr
 
 
+def test_stepper_module_never_imports_comfy():
+    # stepper.py holds the same lazy-import contract as sampling.py: torch (and stdlib
+    # threading) at module scope, comfy only inside functions.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.stepper\n"
+        "assert 'comfy' not in sys.modules, 'stepper.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'stepper.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_sync_module_never_imports_comfy():
+    # sync.py imports sampling/vl/captions/conds at module scope (no cycle — sampling imports
+    # sync lazily) and must inherit their contract: torch at module scope, comfy only inside
+    # functions, stepper.py lazily too.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.sync\n"
+        "assert 'comfy' not in sys.modules, 'sync.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'sync.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_grid_module_never_imports_comfy():
     # grid.py must stay pure stdlib — not even torch.
     code = (

@@ -1,6 +1,6 @@
 # Context-Anchored Tile Refine
 
-ComfyUI nodes for tiled refining and upscaling. An already-upscaled image is refined tile by tile with no visible seams, or only inside a masked region with the rest left untouched. Seams are hidden by conditioning, not by blending tricks. For models with a vision-language text encoder (Krea 2), the VL nodes replace the prompt entirely with vision conditioning, which removes the classic tiled-upscale failure of prompt objects reappearing in every tile.
+ComfyUI nodes for tiled refining and upscaling. An already-upscaled image is refined tile by tile with no visible seams, or only inside a masked region with the rest left untouched. On the VL nodes the prompt is replaced entirely by vision conditioning, which removes the classic tiled-upscale failure of prompt objects reappearing in every tile.
 
 Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304 in one pass. Click any image for the full-size file.
 
@@ -15,22 +15,33 @@ Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304
 </tr>
 </table>
 
-**Jump to:**
+## Which node, which model
 
-- [Installation](#installation)
-- [The nodes](#the-nodes)
-  - [Tile Refine](#tile-refine)
-  - [Tile Refine (VL)](#tile-refine-vl)
-  - [Tile Upscale (VL)](#tile-upscale-vl)
-- [Conditioning surfaces](#conditioning-surfaces)
-- [Shared behavior](#shared-behavior)
-  - [How seams are hidden](#how-seams-are-hidden)
-  - [Masked refine](#masked-refine)
-  - [Guider and ControlNet](#guider-and-controlnet)
-  - [Model support](#model-support)
-- [The VL method: RoI token slicing](#the-vl-method-roi-token-slicing)
-- [Example workflows](#example-workflows)
-- [License](#license)
+| Node | Use when |
+|---|---|
+| [Tile Refine](#tile-refine) | Any model that samples through a GUIDER. You upscale first and wire the sampling nodes yourself. |
+| [Tile Refine (VL)](#tile-refine-vl) | Krea 2. The same wiring plus `clip`, and no positive prompt is needed. |
+| [Tile Upscale (VL)](#tile-upscale-vl) | Krea 2, everything in one node: upscale, then refine. |
+
+The VL nodes were built for and tested with Krea 2. Other models, such as Krea 2 Turbo or other Qwen3-VL based models, are untested.
+
+## The inputs that matter
+
+Everything else (models, sampler wiring, seed, steps) behaves exactly as in the standard ComfyUI sampling nodes. Each input below links to its feature section for the deeper mechanics.
+
+| Input | Nodes | What it does and why you would change it |
+|---|---|---|
+| [`max_tile_width` / `max_tile_height`](#dynamic-tile-layout) | all | Largest pixel size the model sees per tile, context rings included. Set to the largest size your model handles well. |
+| [`context_anchor`](#context-rings) | all | Width of the context ring each tile conditions against. It is what holds neighboring tiles, and the area around a mask, together. |
+| [`context_overlap`](#context-rings) | all | Width of the band neighboring tiles share. 0 gives hard seams. Smooth gradients want more, detailed scenes less. |
+| [`anchor_source`](#anchor-source) | VL | What the context ring shows: the unmodified input for maximum fidelity, or the in-progress result so flawed content can be repaired. |
+| [`vlm_method`](#conditioning-on-the-vl-nodes) | VL | What the model is told about each tile. Adding captions repairs flawed content during upscale, because naming a thing removes the ambiguity that let it stay mush. |
+| [`mask`](#masked-refine) | Refine, Refine (VL) | Refines only the masked region and leaves everything outside it untouched. |
+| `clip` | VL | The vision-language encoder that builds all tile conditioning. Tested only with Qwen3-VL as used by Krea 2. |
+
+Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html).
+
+**Jump to:** [Installation](#installation) | [The nodes](#the-nodes) | [Features](#features) | [Example workflows](#example-workflows)
 
 ## Installation
 
@@ -42,122 +53,139 @@ git clone https://github.com/blakeem/ComfyUI-ContextAnchoredTileRefine
 
 ## The nodes
 
-Three nodes share one tiling engine. Pick by model and workflow shape:
-
-| Node | Use when |
-|---|---|
-| Tile Refine | Any model that samples through a GUIDER. You wire the sampling nodes yourself. |
-| Tile Refine (VL) | A vision-language model (Krea 2). Same wiring, no positive prompt needed. |
-| Tile Upscale (VL) | A vision-language model, everything in one node: upscale, then refine. |
-
-These inputs appear on every node and are the ones worth explaining. Everything else (models, sampler wiring, seed, steps) behaves exactly as it does in the standard ComfyUI sampling nodes.
-
-| Input | Type | What it does |
-|---|---|---|
-| `max_tile_width` / `max_tile_height` | INT | Largest pixel size the model sees per tile, including the context rings. Set to the largest size your model handles well. |
-| `context_anchor` | INT | Width of the frozen border each tile sees but never changes. Holds already-refined neighbors, and the area around a mask, steady. |
-| `context_overlap` | INT | Width of the band shared with an already-processed neighbor. 0 gives hard seams. |
-
-The two VL nodes carry two more, both defaulting to today's behavior so an existing workflow reopens unchanged:
-
-| Input | Type | What it does |
-|---|---|---|
-| `context_anchor_type` | COMBO | How the frozen anchor ring is presented. `leading` resolves the ring ahead of the tile core, so the tile follows the source more closely — best when the source detail is good. `adjacent` denoises the ring alongside the tile, which adds more close-up skin texture and makes cluttered backgrounds coherent, because it will not anchor to bad source content. |
-| `vlm_method` | COMBO | What the model is told about each tile: `vision tokens` (default), `vision tokens and captions`, or `captions`. See [Conditioning surfaces](#conditioning-surfaces). |
-
-Tuning notes from real use:
-
-- Denoise 0.5 works well for smaller upscales (2x to 3x, around 4 tiles). For a 4x upscale to around 4k, 0.42 gives better detail with less chance of artifacts. It depends on the scene.
-- More tiles need more context: raise `context_anchor` (32 to 128 tested well) and `context_overlap` (32 to 256 tested well). Both default to 32, which is invisible on most scenes; large smooth gradients such as an open sky want the higher end of `context_overlap`. Detailed scenes need less, not more.
-
-Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html).
-
 ### Tile Refine
 
 ![Context-Anchored Tile Refine](refine-node.png)
 
-The base node, for any model that samples through a GUIDER. Upscale the image however you like first, then feed it in; wire `guider`, `sampler`, `sigmas`, `vae`, and `noise` as you would for SamplerCustomAdvanced. The optional `mask` refines only that region and leaves everything outside it untouched. Only the tiling geometry is tunable; how the seam itself is hidden is baked in.
+The base node, for any model that samples through a GUIDER, including models whose VAE uses video-style 5-D latents such as Krea 2. Upscale the image however you like first, then feed it in; wire `guider`, `sampler`, `sigmas`, `vae`, and `noise` as you would for SamplerCustomAdvanced. The optional `mask` refines only that region. Only the tiling geometry is tunable; how the seam itself is hidden is baked in.
 
 ### Tile Refine (VL)
 
 ![Context-Anchored Tile Refine (VL)](vl-refine-node.png)
 
-The vision-conditioned variant for models whose text encoder is a vision-language model (Krea 2). Inputs are the base node's plus `clip`, and it needs no positive prompt at all: each tile's positive conditioning is a slice of one whole-image vision encode (see [the VL method](#the-vl-method-roi-token-slicing)). The guider's positive prompt is ignored; its negative still applies. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error.
-
-The `mask` works here too and keeps the global view: the whole image is still encoded once, and the masked region's tiles slice their true place in that encode, so the region is refined aware of everything around it. That fits refining one subject with its own sampler settings, and upscale-inpainting: inpaint at low resolution, composite into the full-size image, then mask-refine the pasted region so it matches the surrounding resolution and grain.
+The vision-conditioned variant, built for Krea 2. Inputs are the base node's plus `clip` and the two VL selects, and it needs no positive prompt: each tile's positive conditioning is built from the image itself (see [Conditioning on the VL nodes](#conditioning-on-the-vl-nodes)). The guider's positive prompt is ignored; its negative still applies. Non-VL encoders (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. The `mask` works here too and keeps the global view (see [Masked refine](#masked-refine)).
 
 ### Tile Upscale (VL)
 
 ![Context-Anchored Tile Upscale (VL)](vl-upscale-node.png)
 
-The whole flow in one node: image in, refined image out. It upscales the entire image first, through the optional `upscale_model` if connected, then a single lanczos pass to exactly `input size x upscale_by` (lanczos alone when no model; a resize that would not change the size is skipped). It then runs the same VL tile refine as Tile Refine (VL).
+The whole flow in one node: image in, refined image out. It upscales the entire image first, through the optional `upscale_model` if connected, then a single lanczos pass to exactly `input size x upscale_by`. It then runs the same VL tile refine as Tile Refine (VL).
 
-Noise, sampler, schedule, and CFG guidance are built inside the node from widgets (`seed`, `sampler_name`, `scheduler`, `steps`, `denoise`, `cfg`), so no custom-sampling nodes are needed. There is no positive prompt. The optional `negative` input is the one text channel that applies; left unconnected it behaves as an empty prompt. `denoise 0.0` skips diffusion and returns the pure upscale. No mask input: for a region pass, use Tile Refine (VL).
+Noise, sampler, schedule, and CFG guidance are built inside the node from widgets, so no custom-sampling nodes are needed. The optional `negative` input is the one text channel that applies; left unconnected it behaves as an empty prompt. `denoise 0.0` skips diffusion and returns the pure upscale. No mask input: for a region pass, use Tile Refine (VL).
 
-## Conditioning surfaces
+## Features
 
-`vlm_method` picks what fills each tile's positive conditioning. All three use the same VL model already wired to `clip` — no second loader.
+### Tiling geometry
 
-Two different operations are involved, and it helps to keep them apart:
+#### Dynamic tile layout
 
-- **Writing a caption** — the VL model looks at **one tile's crop** and writes a short description of it. Nothing else is in view; the caption describes that tile and only that tile.
-- **Building the conditioning** — the whole image is run through the VL model's vision path, and each tile keeps its own rows of that encode. This is what makes tiles agree with each other: they are all reading slices of one shared picture.
+*Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-`vision tokens` does only the second. `captions` does only the first. `vision tokens and captions` does both, and puts the tile's caption inside its own copy of the second — which is where the cost comes from, since a per-tile caption means a per-tile encode rather than one shared across all tiles.
+The grid is solved from the image size and `max_tile_width` / `max_tile_height`, the largest size the model is allowed to see per tile, and every crop lands on 8 pixel boundaries. Tiles are extracted, sampled, and pasted back at their native pixel size, never resized or resampled, so no tile ever loses quality to interpolation.
 
-| Method | What the tile is told | Speed |
-|---|---|---|
-| `vision tokens` | Its slice of ONE whole-image vision encode. Carries the original style, what is in that tile, and global coherence. Invents nothing, so it preserves the source faithfully. | Fastest — one encode for the whole image, shared by every tile |
-| `captions` | A short description of that tile — written from that tile's pixels alone — used as its prompt. More creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. | One caption written per tile; no whole-image encode at all |
-| `vision tokens and captions` | Both. The tile's caption is placed inside the tile's own copy of the whole-image encode, so the caption and the picture are read together. | Slowest — per tile: one caption written, plus one whole-image conditioning encode. The shared single encode is what a per-tile caption gives up |
+#### Context rings
 
-The caption methods scale with tile count, so a large image with many tiles pays proportionally more. `vision tokens` does not — its single encode is shared by every tile.
+*Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-## Shared behavior
+Each tile is sampled oversized by two rings that are cropped away afterwards: `context_overlap`, the band it shares with neighbors, and `context_anchor`, pure context beyond that. The anchor ring is what the tile conditions against; on the base node it always shows frozen finished content, while on the VL nodes [`anchor_source`](#anchor-source) picks whether it shows the unmodified input or the in-progress result, updated every step.
 
-Everything below applies to all the nodes.
+### Seams on the base node
 
-### How seams are hidden
+The base node refines tiles one after another in raster order, so each tile's top and left neighbors are finished before it is sampled. Seams are hidden by conditioning first, then a narrow handover.
 
-Tiles are processed in raster order, so each tile's top and left neighbors are already refined by the time it is sampled. `context_anchor` gives every tile a frozen border of that finished content to condition against, so tiles continue each other instead of drifting apart.
+#### Anchor conditioning
 
-`context_overlap` is the band a tile shares with an already-processed neighbor. Both tiles diffuse that band from the same raw pixels, each anchored to the content around it, so the two results land close together. The node then cross-dissolves them. This happens only where a tile meets an earlier tile, never at the image border.
+*Nodes: [Tile Refine](#tile-refine)*
 
-The feather holds the pixels at the seam fully on the new tile, then falls off to nothing at the outer edge: the seam-most 10 percent of the band stays solid, then a squared ramp carries it to zero. Squared matters because it lands on zero with zero slope; a linear ramp meets the neighbor's untouched pixels at an angle, and the eye reads that kink as a line.
+The anchor ring shows each tile its already-refined neighbors, frozen, so the tile continues them instead of drifting apart from them. This is the main seam mechanism; the blending below is only the thin handover.
 
-Where the handover sits comes from the minimum error boundary cut in Efros and Freeman, *Image Quilting for Texture Synthesis and Transfer* (SIGGRAPH 2001): dynamic programming finds the path through the overlap where the two results already agree, and the feather's midpoint bends along it, so the handover follows image content rather than running dead straight.
+#### Directional feather
 
-Tiles diffused separately also land at slightly different brightness and color levels. Panorama stitchers fix this with gain compensation (Brown and Lowe, *Automatic Panoramic Image Stitching*, IJCV 2007); here the correction is additive, per channel, and sequential. The shared band is the only place both tiles refined the same raw pixels, so the difference there is pure disagreement with no content in it. The node subtracts the per-channel median of that difference, putting each tile on its neighbor's level. This runs only at tile seams, never at a mask edge.
+*Nodes: [Tile Refine](#tile-refine)*
 
-### Masked refine
+Both tiles diffuse the shared overlap band from the same raw pixels, and the two results are cross-dissolved: the seam-most 10 percent of the band stays fully on the new tile, then a squared ramp carries it to zero. Squared matters because it lands on zero with zero slope; a linear ramp meets the neighbor's pixels at an angle the eye reads as a line.
 
-With a `mask`, the node crops to the masked region plus a `context_anchor` border, refines only that region against the frozen surrounding pixels, and composites it back with a 1px anti-aliased edge. The rest of the image is left byte for byte untouched. Feed an inverted mask on a second pass to refine, for example, the background and the character separately with different settings.
+#### Minimum error boundary cut
 
-### Guider and ControlNet
+*Nodes: [Tile Refine](#tile-refine)*
 
-The `guider` input takes NAG (Normalized Attention Guidance) or any other guider. ControlNet is supported on the base Tile Refine node: it re-crops the control hint to each tile, so depth, canny, or pose guidance lands on the right pixels tile by tile. Build the hint at the same size as the image you feed the node. Conditioning without a per-tile meaning (GLIGEN, area masks, reference latents) passes through unchanged.
+Dynamic programming finds the path through the overlap band where the two refinements already agree, from Efros and Freeman, *Image Quilting for Texture Synthesis and Transfer* (SIGGRAPH 2001). Unlike the paper's hard cut, the feather's midpoint bends along that path, so the handover follows image content instead of running dead straight.
 
-The VL nodes ignore ControlNet entirely (a warning is logged if one is wired): every tile's positive is replaced by its vision slice, so there is nothing for a control hint to attach to. Use the base node for control.
+#### Brightness and color match
 
-Image batches work on all three nodes, including with video-family VAEs (Krea 2). Each picture is refined on its own, one after another, so peak VRAM stays at one tile regardless of batch size and every picture gets its own conditioning, its own seam placement and its own DC match — measured against that picture, not pooled across the batch.
+*Nodes: [Tile Refine](#tile-refine)*
 
-### Model support
+Tiles diffused separately land at slightly different brightness and color levels. The fix is a variant of gain compensation from Brown and Lowe, *Automatic Panoramic Image Stitching* (IJCV 2007): additive, per channel, and sequential. The shared band is the only place both tiles refined the same raw pixels, so the per-channel median of the difference there is pure disagreement, and subtracting it puts each tile on its neighbor's level. Runs only at tile seams, never at a mask edge.
 
-Any model that samples through a GUIDER works with Tile Refine, including models whose VAE uses video-style 5-D latents, such as Krea 2 with the Qwen image VAE. Tiles are encoded, sampled, and decoded in the VAE's native latent layout. The VL nodes additionally need a vision-language text encoder and are verified with Krea 2.
+### Seams on the VL nodes
 
-## The VL method: RoI token slicing
+The VL nodes do not refine one tile after another. They run a different engine with nothing to correct afterwards.
 
-Tiled refining has a classic failure: the prompt describes the whole image, but each tile only holds part of it, so strongly prompt-adherent models re-create prompt objects inside tiles that should not contain them. A moon in the sky reappears in every tile. Lowering denoise hides it but gives up refinement.
+#### Synchronized latent tiling
 
-The VL nodes fix the mismatch in conditioning space instead. The technique is **shared visual self-conditioning**: tiled refinement via RoI-sliced vision tokens from a single global encode. We have not found this exact combination published elsewhere; the pieces, individually, have established names:
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-**Stage 1: one global vision encode.** The whole image is area-resampled to the encoder's budget and run once through the vision tower of the model's own text encoder (Krea 2's Qwen3-VL). The output is a grid of vision tokens: one embedding per 32-pixel cell, each carrying what that cell holds and where it sits in the image.
+The whole image becomes one shared canvas latent, and every tile is stepped together, one sigma at a time; between steps the tiles are consolidated back into that canvas, with the overlap bands cross-dissolved by the same directional feather in latent space, and each tile is handed the consolidated view back before the next step. Both sides of every band decode one latent, so this engine needs no boundary cut and no color match. The per-step fusion of overlapping windows is the MultiDiffusion family (Bar-Tal et al., ICML 2023); here each tile runs a stock sampler full length, held at a barrier every step, so multistep sampler state is preserved and no sampler needs rewriting.
 
-**Stage 2: the tokens are the conditioning.** Those tokens are used directly as the positive conditioning, with no text at all. This is visual self-conditioning: the image being refined is its own prompt. It is also zero-shot, because a VLM-conditioned DiT was already trained to read vision tokens in its conditioning stream. Same idea as IP-Adapter's image prompting, but through the model's native multimodal interface instead of a bolted-on encoder and learned projection.
+#### Anchor source
 
-**Stage 3: RoI token slicing.** Each tile keeps the delimiter tokens plus only the grid cells its crop covers; partly covered boundary cells go to both neighbors, the token-space analogue of the pixel overlap band. This is RoI-based token selection: RoIAlign from the detection literature, applied to a conditioning token grid instead of a detector feature map.
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-Why this beats a prompt: vision tokens carry no demands, only what each cell actually holds. And because every tile slices the same global encode, tiles agree on the story: tone, palette, gaze, and structures that cross seams stay coherent even at high denoise. Systems like MultiDiffusion or Ultimate SD Upscale hide seams in pixel or latent space while every tile shares one global text prompt; the VL nodes give each tile conditioning that is true for that tile.
+`source image` (default) shows the ring the unmodified input, presented slightly ahead of the tile in the schedule so the tile follows it. Maximum fidelity: placement, style, and objects stay locked to the input, including its flaws. `live canvas` rewrites the ring every step to the neighbors' in-progress result, so the refine can reinterpret or repair damaged content; expect more invention and slightly brighter output.
+
+#### Supported samplers
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+Stepping every tile against one schedule requires timing each sampler's model evaluations, so the VL path supports `euler`, `heun`, `dpm_2`, `dpmpp_2m`, `dpmpp_2m_sde` (all variants), `exp_heun_2_x0`, and `exp_heun_2_x0_sde`. Any other choice is rejected with a clear error before sampling starts; `dpm_fast`, `dpm_adaptive`, and `uni_pc` own their own schedule and cannot be supported. The base node accepts every sampler.
+
+#### Whole-image preview
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The sampling preview shows the entire image sharpening once per step. The raster engine can only preview the one tile it is currently sampling; the synchronized engine holds every tile in one shared canvas latent, so the whole picture exists at every step and can be shown.
+
+### Conditioning on the VL nodes
+
+The classic tiled-upscale failure: a prompt describes the whole image, each tile holds only part of it, and a prompt-adherent model re-creates prompt objects inside tiles that should not contain them. The VL nodes replace the prompt with conditioning that is true for each tile, built by the same Qwen3-VL encoder wired to `clip`. Two distinct operations are involved: encoding the whole image through the vision tower (shared by all tiles), and writing a caption from one tile's crop (local to that tile). `vlm_method` picks which fills each tile's positive.
+
+#### Vision tokens
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The whole image is encoded once through the vision tower, producing a grid of position-aware tokens, and each tile's positive is its own slice of that grid, with boundary cells shared by both neighbors. No text is involved: the image being refined is its own prompt. Tokens carry what each cell actually holds rather than demands, and every tile reads the same encode, so nothing phantom is introduced and tiles agree on tone, palette, and structures that cross seams. The slicing is region-of-interest token selection, the conditioning-space analogue of RoIAlign (He et al., *Mask R-CNN*, ICCV 2017). Fastest method: one encode serves every tile.
+
+#### Captions
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The same VL model writes a short description of each tile from that tile's crop alone, used as that tile's prompt. Naming content removes ambiguity, so ambiguous artifacts or mushy areas in the source are repaired toward the named thing. Cost scales with tile count; no whole-image encode is built.
+
+#### Vision tokens and captions
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The default: the tile's vision slice followed by its own caption in a single positive. The shared encode keeps the tile faithful to the picture and coherent with its neighbors; the caption names what is there and adds detail. Costs one shared encode plus one caption per tile.
+
+### Regions, batches, and control
+
+#### Masked refine
+
+*Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl)*
+
+With a `mask`, the node crops to the masked region plus a `context_anchor` border, refines only that region against the frozen surrounding pixels, and composites it back with a 1px anti-aliased edge; the rest of the image is left byte for byte untouched. On the VL node the whole image is still encoded once and the region's tiles slice their true place in that encode, so the region is refined aware of everything around it. Feed an inverted mask on a second pass to refine, for example, background and character separately with different settings.
+
+#### Batches
+
+*Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+Each picture in a batch is refined on its own, so peak VRAM does not scale with batch size and every picture gets its own conditioning, its own seam placement and color match on the base node, and its own synchronized run on the VL nodes.
+
+#### Guider and ControlNet
+
+*Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The `guider` input takes any guider, including NAG for models without negative prompt support. ControlNet works on the base node: the control hint is re-cropped to each tile, so depth, canny, or pose guidance lands on the right pixels; build the hint at the same size as the input image. The VL nodes ignore ControlNet (a warning is logged), because every tile's positive is replaced by its vision conditioning and there is nothing for a hint to attach to. GLIGEN, area masks, and reference latents pass through unchanged.
 
 ## Example workflows
 

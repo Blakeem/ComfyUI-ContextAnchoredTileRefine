@@ -213,6 +213,112 @@ def test_a_batch_refines_one_picture_at_a_time(comfy_stubs, monkeypatch):
     assert out.shape == (3, 96, 104, 3)
 
 
+# --- which engine a refine lands in ---------------------------------------------------
+# ONE fork, at refine_image: a vl_clip is the sync engine (sync.py) for BOTH the whole-image
+# and the masked flow; no vl_clip is the raster path below (_refine_tiles), whose byte-for-
+# byte value tests are the rest of this file.
+
+
+def _record_sync(monkeypatch):
+    # Records every sync.refine_sync call and returns a same-shaped stand-in, so the fork can
+    # be pinned without running the engine (test_sync.py owns what the engine then does).
+    from context_anchored_tile_refine import sync
+
+    calls = []
+
+    def recording(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
+                  context_anchor, context_overlap, vl_clip, mask=None, **kwargs):
+        calls.append({"image": image, "mask": mask, "vl_clip": vl_clip, **kwargs})
+        return image[..., :3].clone()
+
+    monkeypatch.setattr(sync, "refine_sync", recording)
+    return calls
+
+
+def _vl_guider():
+    # The VL preamble refuses anything that does not keep 'positive' in original_conds.
+    guider = FakeGuider()
+    guider.original_conds = {"positive": [], "negative": []}
+    return guider
+
+
+def _sync_sampler():
+    # test_vl's KSAMPLER stand-in, imported lazily: test_vl -> test_tiling -> test_sampling,
+    # so a module-scope import here would close a cycle.
+    from test_vl import sync_sampler
+    return sync_sampler()
+
+
+def test_a_vl_clip_routes_to_the_sync_engine_masked_and_unmasked(comfy_stubs, monkeypatch):
+    sync_calls = _record_sync(monkeypatch)
+    raster_calls = _record_refine_tiles(monkeypatch)
+    image = torch.rand(1, 96, 104, 3)
+    mask = torch.zeros(1, 96, 104)
+    mask[:, 32:64, 40:72] = 1.0
+    clip = object()
+
+    for row_mask in (None, mask):
+        sampling.refine_image(image, _vl_guider(), _sync_sampler(), SIGMAS, FakeVAE(), FakeNoise(),
+                              max_tile_width=1024, max_tile_height=1024, context_anchor=0,
+                              context_overlap=0, mask=row_mask, vl_clip=clip)
+
+    # The engine owns the region crop itself, so the MASK is handed over whole — refine_image
+    # never bbox-crops on this path, and never reaches the raster tiler at all.
+    assert [call["mask"] for call in sync_calls] == [None, mask]
+    assert all(call["vl_clip"] is clip and call["image"] is image for call in sync_calls)
+    assert raster_calls == []
+
+
+def test_no_vl_clip_stays_on_the_raster_path(comfy_stubs, monkeypatch):
+    sync_calls = _record_sync(monkeypatch)
+    raster_calls = _record_refine_tiles(monkeypatch)
+
+    sampling.refine_image(torch.rand(1, 96, 104, 3), FakeGuider(), object(), SIGMAS, FakeVAE(),
+                          FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                          context_anchor=0, context_overlap=0)
+
+    assert sync_calls == [] and len(raster_calls) == 1
+
+
+def test_the_picture_loop_wraps_the_sync_path_too(comfy_stubs, monkeypatch):
+    # B > 1 recurses per PICTURE on the VL path exactly as on the raster one, so the engine
+    # only ever sees one picture and peak VRAM stops scaling with the batch. batch_size /
+    # batch_index are how it still draws the canvas noise at the FULL batch and takes this
+    # picture's row (test_sync.py pins the draw itself).
+    sync_calls = _record_sync(monkeypatch)
+    image = torch.rand(3, 96, 104, 3)
+
+    out = sampling.refine_image(image, _vl_guider(), _sync_sampler(), SIGMAS, FakeVAE(),
+                                FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                                context_anchor=0, context_overlap=0, vl_clip=object())
+
+    assert [(call["batch_size"], call["batch_index"]) for call in sync_calls] == [(3, 0), (3, 1), (3, 2)]
+    for b, call in enumerate(sync_calls):
+        assert torch.equal(call["image"], image[b:b + 1])
+    assert out.shape == (3, 96, 104, 3)
+
+
+def test_the_engine_draws_a_batched_runs_noise_at_the_full_batch(comfy_stubs, monkeypatch):
+    # The same contract as the raster path's, end to end through the REAL engine: every
+    # picture's draw covers the whole batch, so picture b keeps the noise row it would have
+    # had in one shared call.
+    from test_tiling import GridNoise, GridVAE
+    from test_vl import PIPE_ENC, PIPE_SEQ, FakeVLClip, VLGuider
+
+    from context_anchored_tile_refine import vl
+
+    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+    noise = GridNoise()
+
+    out = sampling.refine_image(torch.rand(2, 80, 80, 3), VLGuider(), _sync_sampler(), SIGMAS,
+                                GridVAE(), noise, max_tile_width=56, max_tile_height=56,
+                                context_anchor=0, context_overlap=16,
+                                vl_clip=FakeVLClip(seq_override=PIPE_SEQ))
+
+    assert out.shape == (2, 80, 80, 3)
+    assert [call["samples"].shape[0] for call in noise.calls] == [2, 2]
+
+
 def test_rgba_input_encodes_three_channels(comfy_stubs):
     guider, sampler, vae, noise = FakeGuider(), object(), FakeVAE(), FakeNoise()
     image = torch.rand(1, 96, 104, 4)

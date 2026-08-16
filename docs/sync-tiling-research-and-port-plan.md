@@ -20,10 +20,17 @@ rows + text-only captions (arm 2's surface).
 Judged results: arm 22 = new best on the portrait ("beats 9-cap-time-switch50 in
 every way"); arm 23 = market stress at 6 tiles / dpmpp_2m / anchor 128 — "looks
 better than it ever has", first-ever consistent floor texture, tone -0.45/255
-(the +3.94 portrait tone drift is scene-dependent, not method-constant). Open
-defect: one arm weird at a fixed seam line (diagnosis in progress; candidates:
-static boundary geometry, raw-adhering lead ring on 4x-upscaler mush, anchor 128,
-dpmpp_2m band residual).
+(the +3.94 portrait tone drift is scene-dependent, not method-constant).
+
+Open defect (one arm weird at a fixed seam line): **CLOSED**. It was arm 23 — the
+market scene at `context_overlap` 32 under a 4x upscale. Arm 24 changed ONLY
+`context_overlap`, to 128, keeping the same source-image lead ring and the same
+dpmpp_2m, and the owner judged it 2026-08-14: "Looks perfect to me! I don't see a
+single issue." So the root cause was OVERLAP SIZE at a high upscale factor — not the
+lead ring and not dpmpp_2m, the two candidates arm 24 held fixed while the defect
+disappeared. Those identical defaults then carried the four-scene sweep (arms 25-28
+plus the -cap/-vlcap surface runs) and the 2026-08-16 shipping verdict, and
+`anchor_source="source image"` ships as the DEFAULT.
 
 ## 2. Research sweep A: is there a per-step sampler layer? (verdict: NO — and a better design)
 

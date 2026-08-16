@@ -1,5 +1,11 @@
 """Vision-row bit-identity probe: the cheap pre-check from docs/vl-conditioning-encode-cost.md.
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4. Not runnable against the current package: this
+file calls `captions._encode_slice_caption`, which was DELETED on 2026-08-16 when the
+text-cat surface it validated was promoted into `captions.build_slice_caption_conds`. Kept
+verbatim as the frozen record of that measurement (roadmap decision — tests-AB is a record,
+not a maintained suite).
+
 Section 10 of that doc: before any timing matrix or render A/B, verify on the REAL installed
 model that the vision rows (indices 0 .. N+1) of a caption-carrying encode are bit-identical
 to the same rows of (a) an encode carrying a DIFFERENT caption and (b) the pure-vision encode
@@ -209,4 +215,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "probe_split_encode.py: PRE-PORT PROBE, pinned to commit 0dfd1e4 (see the module"
+        " docstring). captions._encode_slice_caption was deleted in 1.6.0 when the text-cat"
+        " surface was promoted into build_slice_caption_conds. Check out 0dfd1e4 to re-run."
+    )

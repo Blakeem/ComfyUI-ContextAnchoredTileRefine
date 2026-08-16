@@ -28,7 +28,7 @@ VL_REQUIRED_ORDER = [
     "max_tile_height",
     "context_anchor",
     "context_overlap",
-    "context_anchor_type",
+    "anchor_source",
     "vlm_method",
     "clip",
 ]
@@ -47,10 +47,10 @@ TYPE_BY_NAME = {
     "mask": "MASK",
 }
 
-# The anchor-ring and conditioning-surface selects live on the VL nodes ONLY, so they are
+# The ring-source and conditioning-surface selects live on the VL nodes ONLY, so they are
 # pinned against them below rather than through TYPE_BY_NAME / INT_WIDGET_OPTIONS (both read
 # the base node).
-CONTEXT_ANCHOR_TYPE_OPTIONS = ["leading", "adjacent"]
+ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
 VLM_METHOD_OPTIONS = ["vision tokens", "vision tokens and captions", "captions"]
 
 INT_WIDGET_OPTIONS = {
@@ -175,20 +175,25 @@ def test_vl_method_widget_is_pinned(comfy_stubs):
     for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
         definition = node.INPUT_TYPES()["required"]["vlm_method"]
         assert definition[0] == VLM_METHOD_OPTIONS, node.__name__
-        assert definition[1]["default"] == "vision tokens", node.__name__
+        assert definition[1]["default"] == "vision tokens and captions", node.__name__
         assert definition[1]["default"] in definition[0], node.__name__
     assert captions.VLM_METHODS == VLM_METHOD_OPTIONS
 
 
-def test_vl_anchor_type_widget_is_pinned(comfy_stubs):
-    # Both VL nodes offer the SAME select with the SAME default; "leading" is what the
-    # owner's A/B settled on, so a changed default silently changes every shipped workflow.
+def test_vl_anchor_source_widget_is_pinned(comfy_stubs):
+    # Both VL nodes offer the SAME select with the SAME default; "source image" is the mode
+    # the campaign's four-scene sweep ran on, so a changed default silently changes every
+    # shipped workflow. The strings are the engine's own modes, never a second copy of them.
     # (comfy_stubs is for the upscale node's INPUT_TYPES, which reads comfy.samplers.)
+    from context_anchored_tile_refine import sync
+
     for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
-        definition = node.INPUT_TYPES()["required"]["context_anchor_type"]
-        assert definition[0] == CONTEXT_ANCHOR_TYPE_OPTIONS, node.__name__
-        assert definition[1]["default"] == "leading", node.__name__
+        definition = node.INPUT_TYPES()["required"]["anchor_source"]
+        assert definition[0] == ANCHOR_SOURCE_OPTIONS, node.__name__
+        assert definition[1]["default"] == "source image", node.__name__
         assert definition[1]["default"] in definition[0], node.__name__
+    assert list(sync.ANCHOR_SOURCES) == ANCHOR_SOURCE_OPTIONS
+    assert sync.ANCHOR_SOURCE_IMAGE == "source image"
 
 
 def test_vl_refine_signature_matches_input_names():
@@ -211,7 +216,7 @@ def test_vl_node_class_attributes():
 
 def test_vl_input_types_does_not_leak_into_base():
     # The subclass edits the dict the base INPUT_TYPES call returned; a cached/shared dict
-    # would silently grow 'clip'/'context_anchor_type' and lose 'mask' on the base node.
+    # would silently grow 'clip'/'anchor_source' and lose 'mask' on the base node.
     ContextAnchoredTileRefineVL.INPUT_TYPES()
     base = ContextAnchoredTileRefine.INPUT_TYPES()
     assert list(base["required"]) == REQUIRED_ORDER
@@ -240,7 +245,7 @@ UPSCALE_REQUIRED_ORDER = [
     "context_overlap",
     # Last: widgets_values restores positionally, so a new widget only stays backward
     # compatible past the end of a legacy saved array. Same rule as VL_REQUIRED_ORDER.
-    "context_anchor_type",
+    "anchor_source",
     "vlm_method",
 ]
 
@@ -257,7 +262,7 @@ UPSCALE_TYPE_BY_NAME = {
     "max_tile_width": "INT",
     "max_tile_height": "INT",
     # A combo's "type" is its option list, not a type string.
-    "context_anchor_type": CONTEXT_ANCHOR_TYPE_OPTIONS,
+    "anchor_source": ANCHOR_SOURCE_OPTIONS,
     "vlm_method": VLM_METHOD_OPTIONS,
     "context_anchor": "INT",
     "context_overlap": "INT",
@@ -276,8 +281,8 @@ UPSCALE_WIDGET_OPTIONS = {
     # default suits the portrait crops the VL path was settled on.
     "max_tile_width": {"default": 1536, "min": 256, "max": 16384, "step": 8},
     "max_tile_height": {"default": 2048, "min": 256, "max": 16384, "step": 8},
-    "context_anchor_type": {"default": "leading"},
-    "vlm_method": {"default": "vision tokens"},
+    "anchor_source": {"default": "source image"},
+    "vlm_method": {"default": "vision tokens and captions"},
     "context_anchor": {"default": 32, "min": 0, "max": 512, "step": 8},
     "context_overlap": {"default": 32, "min": 0, "max": 512, "step": 8},
 }

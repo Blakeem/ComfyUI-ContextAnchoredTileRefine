@@ -85,6 +85,45 @@ def comfy_env():
     return root
 
 
+class BaseModel:
+    """comfy's BaseModel stand-in, shared by every test that drives a guider's model.
+
+    The class NAME is load-bearing: sampling._model_re_noises_anchor walks __mro__ for the
+    class that DEFINES scale_latent_inpaint and answers True only for "BaseModel" — core's
+    default, which the anchor-ring schedule and the sync engine's precondition are both
+    derived for.
+
+    process_latent_in/out are the CANVAS SPACE pair (roadmap decision): comfy applies
+    process_latent_in to latent_image inside guider.sample, so the engine's maintained canvas
+    lives in process-space while VAE encode/decode are raw-space. The default scale/shift make
+    the pair the IDENTITY; a test passes a non-identity affine (what Krea 2's Wan21 format
+    really is) to prove the two spaces are never mixed.
+    """
+
+    def __init__(self, scale=1.0, shift=0.0, model_sampling=None):
+        # Lazy, so the class resolves comfy.model_sampling.CONST through whichever module is
+        # live — the comfy_stubs one in the pure suite, the real one under comfy_env.
+        import comfy.model_sampling
+
+        self.latent_format = object()
+        self.model_sampling = comfy.model_sampling.CONST() if model_sampling is None else model_sampling
+        self.scale = scale
+        self.shift = shift
+        self.process_in_calls = []
+        self.process_out_calls = []
+
+    def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
+        return self.model_sampling.noise_scaling(sigma, noise, latent_image)
+
+    def process_latent_in(self, latent):
+        self.process_in_calls.append(latent)
+        return latent * self.scale + self.shift
+
+    def process_latent_out(self, latent):
+        self.process_out_calls.append(latent)
+        return (latent - self.shift) / self.scale
+
+
 @pytest.fixture()
 def comfy_stubs(monkeypatch):
     """Stub comfy/latent_preview in sys.modules so sampling.py's lazy imports resolve
@@ -200,6 +239,17 @@ def comfy_stubs(monkeypatch):
 
     samplers_module.KSampler = StubKSampler
 
+    class StubKSAMPLER:
+        # comfy.samplers.KSAMPLER's construction surface: the sync stepper isinstance-checks
+        # this class, keys its EVALS_PER_STEP table on sampler_function.__name__, and carries
+        # extra_options/inpaint_options onto every lane's rebuilt sampler.
+        def __init__(self, sampler_function, extra_options=None, inpaint_options=None):
+            self.sampler_function = sampler_function
+            self.extra_options = {} if extra_options is None else extra_options
+            self.inpaint_options = {} if inpaint_options is None else inpaint_options
+
+    samplers_module.KSAMPLER = StubKSAMPLER
+
     def calculate_sigmas(model_sampling, scheduler_name, steps):
         # Returns 0..steps so the caller's tail slice is readable as plain integers.
         recorded["calculate_sigmas_calls"].append((model_sampling, scheduler_name, steps))
@@ -208,8 +258,16 @@ def comfy_stubs(monkeypatch):
     samplers_module.calculate_sigmas = calculate_sigmas
 
     def sampler_object(name):
+        # Core returns a KSAMPLER whose sampler_function is sample_<name> (comfy/samplers.py
+        # ksampler); the stub mirrors that, because the sync stepper resolves the sampler by
+        # that function's __name__ and rejects anything that is not a KSAMPLER.
         recorded["sampler_object_calls"].append(name)
-        return ("sampler_object", name)
+
+        def sampler_function(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+            raise AssertionError("the stub sampler function is never run")
+
+        sampler_function.__name__ = f"sample_{name}"
+        return StubKSAMPLER(sampler_function)
 
     samplers_module.sampler_object = sampler_object
 
@@ -238,6 +296,21 @@ def comfy_stubs(monkeypatch):
             self.cfg = cfg
 
     samplers_module.CFGGuider = StubCFGGuider
+
+    model_sampling_module = types.ModuleType("comfy.model_sampling")
+
+    class StubCONST:
+        """comfy.model_sampling.CONST cut to what the engine touches: the TYPE the sync
+        preconditions isinstance-check (the flow family), and the noise_scaling /
+        inverse_noise_scaling pair the frozen-ring algebra is derived from."""
+
+        def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
+            return sigma * noise + (1.0 - sigma) * latent_image
+
+        def inverse_noise_scaling(self, sigma, latent):
+            return latent / (1.0 - sigma)
+
+    model_sampling_module.CONST = StubCONST
 
     sampler_helpers_module = types.ModuleType("comfy.sampler_helpers")
 
@@ -293,6 +366,7 @@ def comfy_stubs(monkeypatch):
     comfy_module.samplers = samplers_module
     comfy_module.sample = sample_module
     comfy_module.sampler_helpers = sampler_helpers_module
+    comfy_module.model_sampling = model_sampling_module
     comfy_module.nested_tensor = nested_tensor_module
 
     latent_preview_module = types.ModuleType("latent_preview")
@@ -320,6 +394,7 @@ def comfy_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "comfy.samplers", samplers_module)
     monkeypatch.setitem(sys.modules, "comfy.sample", sample_module)
     monkeypatch.setitem(sys.modules, "comfy.sampler_helpers", sampler_helpers_module)
+    monkeypatch.setitem(sys.modules, "comfy.model_sampling", model_sampling_module)
     monkeypatch.setitem(sys.modules, "comfy.nested_tensor", nested_tensor_module)
     monkeypatch.setitem(sys.modules, "latent_preview", latent_preview_module)
     return recorded

@@ -1,5 +1,8 @@
 """Standalone GPU A/B render harness for Context-Anchored Tile Refine.
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4: drove the raster VL branch removed in 1.6.0
+(the VL path is the sync engine now). __main__ is guarded; kept as the campaign record.
+
 Renders the refine stage end to end without a ComfyUI server: models are loaded
 directly, the guider/sampler/sigmas are built from the real ComfyUI node bodies, and
 sampling.refine_image is called directly. Judging seams needs comparable images, not a
@@ -666,4 +669,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4. Since 1.6.0 refine_image routes"
+        " the VL path to the sync engine, so these arms would silently render on a different"
+        " engine than the one they were judged on. Check out 0dfd1e4 to re-run."
+    )

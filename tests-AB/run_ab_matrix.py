@@ -1,5 +1,9 @@
 """Conditioning matrix for the Krea 2 nodes: VL slicing x per-tile captions x anchor Lead.
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4: its arms drove the raster VL branch removed in
+1.6.0 (the VL path is the sync engine now). __main__ is guarded; module helpers (the scene
+definitions) stay importable — the active sync harnesses use them. Kept as the record.
+
 The shipping decision this feeds: WHICH knobs belong on ContextAnchoredTileUpscaleVL, and
 whether Lead is worth adding to the base (non-VL) node. Three independent binary knobs =>
 2^3 = 8 configurations, run identically on three scene types (round 1, 24 renders), plus
@@ -1174,4 +1178,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab_matrix.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4. Since 1.6.0 refine_image"
+        " routes the VL path to the sync engine, so these arms would silently render on a"
+        " different engine than the one they were judged on. Check out 0dfd1e4 to re-run."
+        " Module helpers stay importable (the active sync harnesses use the scene definitions)."
+    )

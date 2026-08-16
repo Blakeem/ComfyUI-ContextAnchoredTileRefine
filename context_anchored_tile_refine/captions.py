@@ -13,14 +13,13 @@ this module owns the two that involve the VL model's text generator:
                                 hallucination in the source by steering the tile toward
                                 something coherent, at the cost of inventing detail the
                                 source lacks.
-    vision tokens and captions  build_slice_caption_conds — the caption rides INSIDE the
-                                whole-canvas vision encode, so each tile keeps its vision
-                                rows AND the caption rows.
+    vision tokens and captions  build_slice_caption_conds — both halves, concatenated: the
+                                tile's row slice of ONE shared pure-vision canvas encode,
+                                followed by that tile's caption encoded TEXT-ONLY.
 
-Cost, which the two caption surfaces do NOT share: both pay one clip.generate per tile per
-picture, but `captions` then pays one cheap TEXT encode per caption while
-`vision tokens and captions` pays one whole-canvas VISION encode per caption (the encode
-carries the caption, so it cannot be shared across tiles the way vl.py's single encode is).
+Cost: both caption surfaces pay one clip.generate per tile per picture, then one cheap TEXT
+encode per caption. `vision tokens and captions` adds exactly ONE whole-canvas vision encode
+for the run — the same single encode `vision tokens` pays, shared by every tile.
 
 Everything here is lifted from tests-AB/run_ab_matrix.py, which produced the renders the
 owner judged on 2026-08-13; nothing is newly invented. Module scope is torch-only; comfy
@@ -48,11 +47,15 @@ VLM_METHODS = [VLM_METHOD_VISION, VLM_METHOD_VISION_CAPTIONS, VLM_METHOD_CAPTION
 # pair under confusingly similar names (POSITION_INSTRUCTION / RICH_INSTRUCTION); the
 # SETTLED_ names are kept here so the two can never be confused again.
 #
-#   SETTLED_POSITION  rides WITH the VL slices. The vision rows carry appearance
-#                     positionally; what they lack is which object a region belongs to and
-#                     how much of it the tile holds, which is exactly what this asks for.
-#   SETTLED_RICH      the captions-ONLY surface. Style, palette and lighting lead, because
-#                     with no vision rows nothing else carries appearance.
+#   SETTLED_POSITION  RETIRED FROM THE SURFACE 2026-08-16 (owner decision, the text-cat
+#                     campaign): it rode WITH the VL slices while the caption was encoded
+#                     inside the canvas stream. Both VL-carrying methods now ask the RICH
+#                     question. Kept defined, character-frozen, because tests-AB's judged
+#                     "pos" arms pin themselves to it and their renders are on disk.
+#   SETTLED_RICH      what every caption-carrying surface asks. Style, palette and lighting
+#                     lead, because on the captions-ONLY surface nothing else carries
+#                     appearance, and on the slice+caption surface the vision rows carry
+#                     position already.
 #
 # Findings baked into the wording, none of which may be "tidied" out:
 #   - The position prompt carries TWO independent bounds and either one alone terminates:
@@ -93,8 +96,13 @@ RICH_GROUPED_INSTRUCTION = f"{SETTLED_RICH_INSTRUCTION} {GROUP_CLAUSE}"
 # What each surface asks the VLM, and how long an answer it budgets for. The cap must cover
 # the reasoning turn as well (captions are always generated with thinking=True), which is
 # why these are 512/768 rather than the pre-settlement 160/220.
+#
+# Both caption surfaces ask the SAME question since 2026-08-16: with the caption encoded
+# text-only it no longer reads the canvas while it is encoded, so the position wording had
+# nothing left to complement — the full RICH description is what the owner judged better on
+# the text-cat surface. SETTLED_POSITION_* stays defined above; nothing here selects it.
 CAPTION_INSTRUCTIONS = {
-    VLM_METHOD_VISION_CAPTIONS: (SETTLED_POSITION_INSTRUCTION, SETTLED_POSITION_MAX_TOKENS),
+    VLM_METHOD_VISION_CAPTIONS: (RICH_GROUPED_INSTRUCTION, SETTLED_RICH_MAX_TOKENS),
     VLM_METHOD_CAPTIONS: (RICH_GROUPED_INSTRUCTION, SETTLED_RICH_MAX_TOKENS),
 }
 
@@ -174,7 +182,7 @@ def clean_caption(text):
 def _tokenize_images(clip, text, image, **kwargs):
     # vl._encode_canvas' two tokenizer guards, worded for this surface, plus the tail length
     # the slice+caption layout is derived from: the rows AFTER vision_end, i.e. the caption
-    # text and the template tail. Returns (tokens, tail_len).
+    # text and the template tail. Returns (tokens, tail_len). Nothing is encoded here.
     try:
         tokens = clip.tokenize(text, images=[image], **kwargs)
     except TypeError as error:
@@ -260,16 +268,20 @@ def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_s
     return captions
 
 
+def _entry_extras(entry):
+    # A slice's extras: the encode's own, minus the full-canvas attention mask (its absence
+    # means "attend to everything", which is exact for the rows kept).
+    extras = dict(entry[1])
+    extras.pop("attention_mask", None)
+    return extras
+
+
 def _slice_rows(encoded, indices):
-    # vl.build_global_slices' per-tile selection, verbatim: keep this tile's rows and drop
-    # the full-canvas attention mask (its absence means "attend to everything", which is
-    # exact for the rows kept).
+    # vl.build_global_slices' per-tile selection, verbatim.
     sliced = []
     for entry in encoded:
-        tensor, extras = entry[0], dict(entry[1])
-        extras.pop("attention_mask", None)
-        index = torch.tensor(indices, device=tensor.device)
-        sliced.append([tensor.index_select(1, index), extras])
+        index = torch.tensor(indices, device=entry[0].device)
+        sliced.append([entry[0].index_select(1, index), _entry_extras(entry)])
     return sliced
 
 
@@ -285,42 +297,90 @@ def build_caption_conds(clip, captions):
     return tile_positives
 
 
-def _encode_slice_caption(clip, canvas_copy, caption, n_rows):
-    # ONE whole-canvas vision encode that also carries `caption`. The expected stripped
-    # length is derived from the token stream and asserted against the encoder's output, so
-    # a core layout change fails fast instead of silently scrambling every slice — the same
-    # fail-fast vl._encode_canvas runs, extended by the caption's own rows.
-    tokens, tail_len = _tokenize_images(clip, vl.VISION_BLOCK + caption, canvas_copy,
-                                        llama_template=vl.KREA2_TEMPLATE)
-    expected_seq = 1 + n_rows + 1 + tail_len
-    encoded = clip.encode_from_tokens_scheduled(tokens)
-    seq = encoded[0][0].shape[1]
-    if seq != expected_seq:
+def _slice_vision_rows(encoded, crop, canvas_h, canvas_w, enc_h, enc_w, n_rows, offset_x, offset_y):
+    # [vision_start][this tile's grid cells][vision_end] out of the ONE pure-vision canvas
+    # encode — the shipped slice MINUS its template tail. Passing expected_seq = n_rows + 2
+    # makes vl.slice_indices' trailing range empty; the one template tail the stream may carry
+    # arrives with the caption rows that are concatenated after these.
+    indices = vl.slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, n_rows + 2, offset_x, offset_y)
+    return _slice_rows(encoded, indices)
+
+
+def _caption_tail_len(clip, caption, probe_image):
+    # How many rows this caption occupies after vision_end (caption text + template tail),
+    # read off the TOKEN stream rather than off any encoder output — which is what makes it an
+    # independent expectation for _encode_caption_text_only to be checked against. Nothing is
+    # encoded here; the image only makes the stream well-formed for the tokenizer.
+    _tokens, tail_len = _tokenize_images(clip, vl.VISION_BLOCK + caption, probe_image,
+                                         llama_template=vl.KREA2_TEMPLATE)
+    return tail_len
+
+
+def _encode_caption_text_only(clip, caption, expected_rows):
+    # The caption encoded exactly as CLIPTextEncode would encode it. Krea 2's template strip
+    # removes a PREFIX only, so what survives is [caption rows][template tail] and nothing
+    # else (measured, docs/vl-conditioning-encode-cost.md section 10). That is asserted
+    # against the in-stream tail length so a template change fails fast instead of silently
+    # concatenating a differently-shaped stream onto every tile's vision rows.
+    encoded = clip.encode_from_tokens_scheduled(clip.tokenize(caption))
+    seq = int(encoded[0][0].shape[1])
+    if seq != expected_rows:
         raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): the slice+caption encode has {seq} rows, expected "
-            f"{expected_seq} ({n_rows} vision grid rows + caption/tail {tail_len}). The text "
-            "encoder's template or strip layout does not match the Krea 2 contract this node "
-            "slices by.")
-    return encoded, expected_seq
+            f"Context-Anchored Tile Refine (VL): the text-only caption encode has {seq} rows, "
+            f"expected {expected_rows} (caption + template tail). The text encoder's template "
+            "or strip layout does not match the Krea 2 contract this surface concatenates by.")
+    return encoded
+
+
+def _cat_rows(vision_entries, caption_entries):
+    # One tile's positive: its sliced vision rows, then its caption rows, on the ROW axis.
+    # Extras are the VISION encode's — the caption encode's are dropped — so anything the
+    # caption encode carries that the vision encode does not would vanish silently. Both are
+    # hard errors instead: a stray extra key, and a real pooled_output (Krea 2 produces None
+    # on both encodes, measured; a CLIP that does not is outside what this surface settled on).
+    merged = []
+    for vision, caption in zip(vision_entries, caption_entries, strict=True):
+        vision_extras, caption_extras = _entry_extras(vision), _entry_extras(caption)
+        stray = sorted(set(caption_extras) - set(vision_extras))
+        if stray:
+            raise RuntimeError(
+                "Context-Anchored Tile Refine (VL): the caption encode carries conditioning "
+                f"extras the vision encode lacks ({stray}); concatenating the rows would drop "
+                "them silently.")
+        if caption_extras.get("pooled_output") is not None:
+            raise RuntimeError(
+                "Context-Anchored Tile Refine (VL): the caption encode has a real "
+                "pooled_output; the concatenated positive keeps the vision encode's, so this "
+                "one would be dropped silently.")
+        rows = torch.cat([vision[0], caption[0].to(vision[0].device, vision[0].dtype)], dim=1)
+        merged.append([rows, vision_extras])
+    return merged
 
 
 def build_slice_caption_conds(clip, encode_source, tiles, captions, offset_x=0, offset_y=0):
-    """VL slices AND captions: the caption tokens ride INSIDE the whole-canvas vision encode
-    and each tile keeps its grid rows plus the caption and template tail.
+    """VL slices AND captions: each tile's positive is its row slice of ONE shared pure-vision
+    canvas encode, followed by that tile's own caption encoded TEXT-ONLY, concatenated on the
+    row axis.
+
+    Settled 2026-08-16 by the owner's A/B (tests-AB/run_ab_split.py arm 2 against the previous
+    arm 1, then the sync-tiles campaign). Until then the caption rode INSIDE a whole-canvas
+    vision encode, which cost one whole-canvas encode PER TILE and let far-canvas content leak
+    into every tile's caption rows through attention — the phantom-moon failure. Encoding the
+    caption alone removes both. The vision half is unaffected by the change: attention is
+    causal and the caption sat after the grid rows, so those rows were never reading it
+    (docs/vl-conditioning-encode-cost.md sections 6-7, measured bit-identical at matched
+    stream length).
 
     `encode_source` is the canvas the OFFSET tile rects index and is taken separately from
     the canvas the captions describe — mirroring vl.build_global_slices: on the whole-image
     path both are the padded canvas at offset 0, while on the mask path the captions describe
     each region tile's own crop and this encodes the FULL image with the bbox origin as the
-    offset, so a masked refine stays globally informed. One encode per DISTINCT (batch row,
-    caption) pair: the caption is inside the encode, so unlike vl.py's single vision encode it
-    cannot be shared across tiles that were captioned differently."""
+    offset, so a masked refine stays globally informed."""
     canvas_copy, enc_h, enc_w = vl.resample_for_global(encode_source)
     grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
     n_rows = grid_h * grid_w
     canvas_h, canvas_w = int(encode_source.shape[1]), int(encode_source.shape[2])
     batch = int(canvas_copy.shape[0])
-    cache = {}
     tile_positives = []
 
     if any(len(tile_captions) != batch for tile_captions in captions):
@@ -329,16 +389,20 @@ def build_slice_caption_conds(clip, encode_source, tiles, captions, offset_x=0, 
             "captioned a different number of times. Every batch row must carry its own caption "
             "or a row would be conditioned on another row's picture.")
 
+    # ONE pure-vision encode for the whole picture, shared by every tile — literally the encode
+    # `vision tokens` pays, and the reason this surface no longer scales its encode cost with
+    # tile count. Core's tokenizer attaches images[0] alone, so the canvas is narrowed to one
+    # picture here; refine_image's picture loop is what makes that the whole batch.
+    encoded, _expected_seq = vl._encode_canvas(clip, canvas_copy[:1], grid_h, grid_w)
+
     for tile, tile_captions in zip(tiles, captions, strict=True):
-        per_row = []
-        for b, caption in enumerate(tile_captions):
-            if (b, caption) not in cache:
-                cache[(b, caption)] = _encode_slice_caption(clip, canvas_copy[b:b + 1], caption, n_rows)
-            per_row.append(cache[(b, caption)])
         # Exactly ONE row, so nothing is concatenated across rows: the count guard above ties
         # len(tile_captions) to the encode canvas's batch, and refine_image's picture loop
         # makes that batch 1.
-        encoded, expected_seq = per_row[0]
-        indices = vl.slice_indices(tile.crop_rect, canvas_h, canvas_w, enc_h, enc_w, expected_seq, offset_x, offset_y)
-        tile_positives.append(vl._convert(_slice_rows(encoded, indices)))
+        caption = tile_captions[0]
+        tail_len = _caption_tail_len(clip, caption, canvas_copy[:1])
+        vision_entries = _slice_vision_rows(encoded, tile.crop_rect, canvas_h, canvas_w,
+                                            enc_h, enc_w, n_rows, offset_x, offset_y)
+        caption_entries = _encode_caption_text_only(clip, caption, tail_len)
+        tile_positives.append(vl._convert(_cat_rows(vision_entries, caption_entries)))
     return tile_positives

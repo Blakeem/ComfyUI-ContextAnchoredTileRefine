@@ -217,7 +217,11 @@ def load_or_generate_captions(clip, padded, tiles, force):
     (gen digest, rects) — split_run's pattern on this scene's own key."""
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_VISION_CAPTIONS]
+    # Pinned to the SETTLED_POSITION wording these arms were judged with, NOT resolved
+    # through captions.CAPTION_INSTRUCTIONS: that table moved VLM_METHOD_VISION_CAPTIONS to
+    # RICH_GROUPED on 2026-08-16, so resolving it now would silently re-caption this campaign
+    # with different text while every label and cache key still said "settled-position".
+    instruction, max_length = captions.SETTLED_POSITION_INSTRUCTION, captions.SETTLED_POSITION_MAX_TOKENS
     key = {"gen": _digest(gen_key()), "rects": krea2_run._rects(tiles),
            "instruction": instruction, "max_length": max_length, "clip": CLIP_NAME,
            "surface": "settled-position"}

@@ -1,5 +1,10 @@
 """Tile confluence: two-pass draft-then-detail refine, owner's design 2026-08-14.
 
+PRE-PORT HARNESS, PINNED TO COMMIT 0dfd1e4. Not runnable against the current package: it
+passes `anchor_type=` (:944/:1016/:1061/:1147/:1231), the kwarg the 1.6.0 sync port removed
+along with the raster VL branch. Kept verbatim as the frozen record of this campaign
+(tests-AB is a record, not a maintained suite).
+
 The seams are treated as tiles first ("tiles within tiles"): a structural DRAFT of the
 whole canvas is built at the first CUT_FRACTION of the steps, with every seam resolved by
 a dedicated strip diffusion and feathered at draft softness, then the stock production
@@ -1326,4 +1331,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "run_ab_confluence.py: PRE-PORT CAMPAIGN, pinned to commit 0dfd1e4 (see the module"
+        " docstring). refine_image no longer accepts anchor_type= — the raster VL branch these"
+        " arms drove was removed in 1.6.0. Check out 0dfd1e4 to re-run. Module helpers stay"
+        " importable (the active sync harnesses use them)."
+    )

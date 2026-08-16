@@ -3,12 +3,16 @@
 MAX_RESOLUTION = 16384
 
 
-def _context_anchor_type():
-    # The anchor-ring select, defined once so both VL nodes' wording cannot drift, and built
-    # fresh per call like every other widget here so no caller can poison a shared object.
-    # VL nodes ONLY: on the plain-conditioning base node the schedule was consistently worse
-    # in the owner's A/B, so there it stays permanently off (sampling.py's ANCHOR RING gate).
-    return (["leading", "adjacent"], {"default": "leading", "tooltip": "How the frozen context_anchor ring is presented to the model. leading resolves the ring ahead of the tile core, which makes the anchor stronger so the tile follows the base image more closely — best when the source detail is good. adjacent denoises the ring along with the tile, letting it add more close-up skin texture and make cluttered backgrounds coherent, because it will not anchor to bad source content."})
+def _anchor_source():
+    # WHAT the frozen context_anchor ring shows the model, defined once so both VL nodes'
+    # wording cannot drift. The options come from sync.py, so the strings the widget offers
+    # and the strings the engine branches on cannot diverge; the list is copied per call like
+    # every other widget here, so no caller can poison a shared object. Lazy import:
+    # node.py's module scope stays comfy-free (pinned by a subprocess test).
+    # VL nodes ONLY: the base node is the raster path, whose ring is always the source.
+    from . import sync
+
+    return (list(sync.ANCHOR_SOURCES), {"default": sync.ANCHOR_SOURCE_IMAGE, "tooltip": "What the frozen context ring around each tile shows the model. source image: the unmodified input, presented on the settled lead schedule. Maximum fidelity — placement, style, and objects stay locked to the input, including its flaws. live canvas: the in-progress result itself. The refine may reinterpret or repair damaged content the captions describe; expect more invention and slightly brighter output."})
 
 
 def _vlm_method():
@@ -19,7 +23,7 @@ def _vlm_method():
     # node.py's module scope stays comfy-free (pinned by a subprocess test).
     from . import captions
 
-    return (list(captions.VLM_METHODS), {"default": captions.VLM_METHOD_VISION, "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile: it carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt: more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. A caption is always written from that tile's pixels alone — the whole image is never in view while captioning. Speed: vision tokens is fastest, because the whole-image encode is built ONCE and every tile takes a slice of it. captions writes one caption per tile and builds no whole-image encode at all. vision tokens and captions is slowest: a per-tile caption cannot share one encode, so the whole-image encode is rebuilt for each tile with that tile's caption inside it. The two caption methods scale with tile count; vision tokens does not."})
+    return (list(captions.VLM_METHODS), {"default": captions.VLM_METHOD_VISION_CAPTIONS, "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile: it carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt: more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. A caption is always written from that tile's pixels alone — the whole image is never in view while captioning. Speed: vision tokens is fastest, because the whole-image encode is built ONCE and every tile takes a slice of it. captions writes one caption per tile and builds no whole-image encode at all. vision tokens and captions costs the two added together: the same single whole-image encode, plus one caption per tile. Writing captions is what scales with tile count; the whole-image encode does not."})
 
 
 def _validate_image(image):
@@ -106,8 +110,9 @@ class ContextAnchoredTileRefine:
 class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     """The vision-conditioned variant for VLM-encoder models (Krea 2 family).
 
-    Same tiling engine as the base node, but every tile's positive conditioning is
-    replaced by its slice of ONE whole-image vision encode from the required CLIP:
+    The tiles are stepped TOGETHER as lanes of one synchronized run (sync.py), and every
+    tile's positive conditioning is replaced by its slice of ONE whole-image vision encode
+    from the required CLIP:
     positionally exact, free of text demands, and globally informed, so tiles neither
     re-instantiate prompt objects they don't contain nor drift apart in story
     (gaze, tone, palette). The guider's positive text is ignored by construction;
@@ -129,17 +134,17 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # Krea 2 workflows would load context_anchor 256 into this combo and drop to 32).
         # Past the end of a legacy array the restore loop stops, leaving these widgets at
         # their defaults — which is the pre-select behaviour.
-        input_types["required"]["context_anchor_type"] = _context_anchor_type()
+        input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode; the guider's positive prompt is ignored, the negative still applies."})
         return input_types
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, context_anchor_type, vlm_method, clip, mask=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
         from . import sampling
-        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, anchor_type=context_anchor_type, vlm_method=vlm_method),)
+        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source),)
 
 
 class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
@@ -182,7 +187,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 # workflow's widgets_values POSITIONALLY, so a widget added mid-list shifts
                 # every value after it. Past the end of a legacy array the restore loop stops
                 # and these keep their defaults — the pre-select behaviour.
-                "context_anchor_type": _context_anchor_type(),
+                "anchor_source": _anchor_source(),
                 "vlm_method": _vlm_method(),
             },
             "optional": {
@@ -191,7 +196,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             },
         }
 
-    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, context_anchor_type, vlm_method, upscale_model=None, negative=None):
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
@@ -223,4 +228,8 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         sampler = comfy.samplers.sampler_object(sampler_name)
         noise = upscale.Noise_RandomNoise(seed)
 
-        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, anchor_type=context_anchor_type, vlm_method=vlm_method),)
+        # sampler_name rides along beside the built SAMPLER: the sync engine rejects an
+        # unsupported sampler before any encode, and core's sampler_object wraps several names
+        # in a private function (dpm_fast -> dpm_fast_function), so resolving the rejection off
+        # the OBJECT alone would name something this node's widget never offered.
+        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name),)
