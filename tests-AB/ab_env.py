@@ -68,13 +68,14 @@ Z_IMAGE_MARKER = Path("comfy") / "text_encoders" / "z_image.py"
 # Searched in order; the first z-image-capable hit wins, else the first hit at all.
 #
 # ORDER MATTERS. The A/B only means anything if it runs on the SAME ComfyUI the reference
-# images came from. Comfy Desktop (0.22.3, "Comfy Desktop.exe") is the production install —
-# it is the one %APPDATA%\ComfyUI\config.json points at basePath C:\Users\Blake\Documents\
-# ComfyUI. E:\ComfyUI is an older 0.19.5 desktop install that is ALSO z-image-capable, so
-# listing it first silently won and the harness rendered against the wrong version.
+# images came from. ComfyUI-Installs is the current production source install (0.32.0, the
+# tree tests/conftest.py also resolves first); verified 2026-08-14 after every previous
+# candidate went dead — the old Comfy Desktop resources\ComfyUI layout no longer exists
+# ("Comfy Desktop" ships no source tree) and E:\ComfyUI was removed. The stale desktop
+# paths stay as last resorts only.
 CANDIDATE_ROOTS = (
-    Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),   # Comfy Desktop 0.22.3
-    Path(r"E:\ComfyUI\resources\ComfyUI"),                                      # older 0.19.5
+    Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI"),                   # current install, 0.32.0
+    Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),   # gone as of 2026-08-14
     Path(r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"),
     REPO_ROOT.parent.parent,
 )
