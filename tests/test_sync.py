@@ -19,6 +19,7 @@ loop) runs under the `comfy_stubs` fixture and says so in its signature; the pur
 take no fixture at all. Nothing here needs the real `comfy_env` install.
 """
 import copy
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +29,7 @@ from test_tiling import GridNoise, GridVAE, _layout
 from test_vl import FakeVLClip
 
 from conftest import BaseModel
-from context_anchored_tile_refine import captions, conds, grid, sampling, sync, vl
+from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, vl
 
 # Strictly decreasing, ends at 0, starts below 1 — every unconditional precondition satisfied
 # and the live-canvas ring algebra defined.
@@ -123,14 +124,14 @@ def vl_clip(monkeypatch):
 def prepare(clip, guider=None, image=None, vae=None, noise=None, sigmas=SIGMAS,
             vlm_method=captions.VLM_METHOD_VISION, anchor_source=sync.ANCHOR_SOURCE_IMAGE,
             batch_size=1, batch_index=0, ctx=CTX, overlap=OVERLAP, region_pixel=None,
-            vl_context=None):
+            vl_context=None, progress=None):
     guider = SyncGuider() if guider is None else guider
     return sync._prepare_run(
         image_canvas() if image is None else image, guider, sigmas,
         GridVAE() if vae is None else vae, GridNoise() if noise is None else noise,
         CAP, CAP, ctx, overlap, clip, vlm_method=vlm_method, anchor_source=anchor_source,
         batch_size=batch_size, batch_index=batch_index, region_pixel=region_pixel,
-        vl_context=vl_context)
+        vl_context=vl_context, progress=progress)
 
 
 def expected_layout(ctx=CTX, overlap=OVERLAP):
@@ -562,7 +563,8 @@ def test_caption_surfaces_route_through_the_same_tiles(comfy_stubs, vl_clip, mon
     # The other two vlm_methods build their positives from the same layout.tiles object.
     seen = {}
 
-    def recording_captions(clip, source, tiles, instruction, max_length, batch_size=1, batch_index=0):
+    def recording_captions(clip, source, tiles, instruction, max_length, batch_size=1, batch_index=0,
+                           progress=None):
         seen["tiles"] = tiles
         seen["instruction"] = instruction
         return [[f"tile {index}"] for index in range(len(tiles))]
@@ -753,7 +755,7 @@ def lane_stamp(monkeypatch):
 
 def run_sync(clip, guider=None, image=None, vae=None, noise=None, sigmas=SIGMAS, sampler=None,
              anchor_source=sync.ANCHOR_SOURCE_IMAGE, batch_size=1, batch_index=0,
-             overlap=RUN_OVERLAP, mask=None):
+             overlap=RUN_OVERLAP, mask=None, ledger=None, vlm_method=captions.VLM_METHOD_VISION):
     # run_bounded: the engine runs the REAL stepper, so a deadlock must fail the test instead
     # of wedging the suite.
     return run_bounded(lambda: sync.refine_sync(
@@ -761,7 +763,7 @@ def run_sync(clip, guider=None, image=None, vae=None, noise=None, sigmas=SIGMAS,
         euler_sampler() if sampler is None else sampler, sigmas,
         GridVAE() if vae is None else vae, GridNoise() if noise is None else noise,
         RUN_CAP_W, RUN_CAP_H, CTX, overlap, clip, mask=mask, anchor_source=anchor_source,
-        batch_size=batch_size, batch_index=batch_index))
+        vlm_method=vlm_method, batch_size=batch_size, batch_index=batch_index, progress=ledger))
 
 
 def run_layout(overlap=RUN_OVERLAP):
@@ -1418,3 +1420,237 @@ def test_an_unsupported_sampler_passes_the_steppers_error_through(comfy_stubs, v
     assert "euler_ancestral" in message
     for supported in ("euler", "dpmpp_2m", "dpm_fast"):
         assert supported in message
+
+
+# ---- the progress ledger, at run level ---------------------------------------
+#
+# The RUN geometry above is a 2-lane, 4-step run, so the ledger's exact budgets are:
+#   vision encode   W_ENCODE                       (one whole-canvas encode for the run)
+#   canvas encode   2 x W_ENCODE_TILE
+#   sampling        plan_evals x 2 lanes           (4 with euler, 7 with exp_heun_2_x0)
+#   decode          2 x W_DECODE_TILE
+# Everything here drives the REAL engine; the ledger's pure arithmetic is in test_progress.py.
+
+
+class RecordingLedger(progress.Ledger):
+    """Ledger that keeps every advance beside the segment it landed in."""
+
+    def __init__(self, *args, **kwargs):
+        self.advances = []
+        super().__init__(*args, **kwargs)
+
+    def advance(self, units, preview=None):
+        self.advances.append((self.segments[-1][0] if self.segments else None, units, preview))
+        super().advance(units, preview)
+
+
+class EmptyEncodeClip:
+    """The one CLIP call the all-in-one node makes before any tiling: an empty text encode."""
+
+    def tokenize(self, text, images=None, llama_template=None, thinking=None):
+        return {"qwen3vl_4b": [[(10, 1.0)]]}
+
+    def encode_from_tokens_scheduled(self, tokens):
+        return [[torch.zeros(1, 1, 8), {"pooled_output": None}]]
+
+
+def heun_sampler(name="sample_exp_heun_2_x0"):
+    # exp_heun_2_x0's eval CADENCE: two model calls per step, falling back to ONE on the step
+    # whose next sigma is 0 (`x = denoised; continue`). That final-step exception is what a
+    # naive per-step advance overshoots.
+    import comfy.samplers
+
+    def fn(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+        s_in = x.new_ones([x.shape[0]])
+        for step in range(int(sigmas.shape[-1]) - 1):
+            denoised = model(x, sigmas[step] * s_in, **(extra_args or {})).clone()
+            if float(sigmas[step + 1]) == 0.0:
+                x = denoised
+                continue
+            x = model(denoised, sigmas[step + 1] * s_in, **(extra_args or {})).clone()
+        return x
+
+    fn.__name__ = name
+    return comfy.samplers.KSAMPLER(fn, {}, {})
+
+
+def ledger_for(vlm_method=captions.VLM_METHOD_VISION, batch=1, steps=RUN_STEPS, recording=True):
+    plan = progress.build_plan(vlm_method, steps, batch=batch)
+    return (RecordingLedger if recording else progress.Ledger)(plan)
+
+
+def segment_names(ledger):
+    return [name for name, _units in ledger.segments]
+
+
+def segment_units(ledger, name):
+    return [units for entry_name, units in ledger.segments if entry_name == name]
+
+
+def test_a_vl_run_with_a_ledger_emits_from_one_monotone_bar(comfy_stubs, vl_clip, lane_stamp):
+    # The whole feature: a run that used to emit from a separate sampling bar now emits from
+    # the ONE bar the ledger built, whose value only ever grows and ends on its total.
+    ledger = ledger_for()
+
+    with ledger:
+        out = run_sync(vl_clip, guider=RunGuider(), ledger=ledger)
+        ledger.finish()
+
+    assert out.shape == (1, CANVAS, CANVAS, 3)
+    assert len(comfy_stubs["progress_bars"]) == 1        # no standalone sampling bar
+    bar = comfy_stubs["progress_bars"][0]
+    values = [value for value, _total, _preview in bar.updates]
+    assert values == sorted(values)
+    assert all(total >= value for value, total, _preview in bar.updates)
+    assert (ledger.value, bar.updates[-1][0]) == (ledger.total, ledger.total)
+
+
+def test_the_ledgers_segments_are_the_engines_own_phases_at_their_true_sizes(comfy_stubs, vl_clip,
+                                                                            lane_stamp):
+    ledger = ledger_for()
+
+    with ledger:
+        run_sync(vl_clip, guider=RunGuider(), ledger=ledger)
+
+    assert segment_names(ledger) == [progress.VISION_ENCODE, progress.CANVAS_ENCODE,
+                                     progress.SAMPLING, progress.DECODE]
+    # Hand-computed against the RUN geometry: 2 lanes, 4 euler steps.
+    assert segment_units(ledger, progress.CANVAS_ENCODE) == [2 * progress.W_ENCODE_TILE]
+    assert segment_units(ledger, progress.SAMPLING) == [4 * 2]
+    assert segment_units(ledger, progress.DECODE) == [2 * progress.W_DECODE_TILE]
+
+
+def test_the_ticks_own_the_sampling_fill_and_the_hook_carries_the_preview(comfy_stubs,
+                                                                          vl_clip, lane_stamp):
+    # A 2-eval sampler: the stepper's on_eval tick advances one unit per COMPLETED eval —
+    # 2+2+2+1 evals per lane, times 2 lanes = 14 — so the bar walks every level and the
+    # final tick lands exactly on the segment total. The hook no longer moves the fill at
+    # all (its old per-step advance claimed a step's evals at its START and jumped ahead
+    # of the ticks); advance(0.0, ...) is fill-preserving and only carries the preview.
+    comfy_stubs["previewer"] = RecordingPreviewer()
+    ledger = ledger_for()
+
+    with ledger:
+        run_sync(vl_clip, guider=RunGuider(), sampler=heun_sampler(), ledger=ledger)
+
+    sampled = [(units, preview) for name, units, preview in ledger.advances
+               if name == progress.SAMPLING]
+    assert [units for units, _preview in sampled if units] == list(range(1, 15))
+    assert segment_units(ledger, progress.SAMPLING) == [14]
+    hook_advances = [(units, preview) for units, preview in sampled if preview is not None]
+    # The preview rides a fill-preserving advance: nothing about it regressed.
+    assert hook_advances == [(0.0, "preview-1"), (0.0, "preview-2"), (0.0, "preview-3")]
+
+
+@pytest.mark.parametrize(("vlm_method", "expected"), [
+    (captions.VLM_METHOD_VISION, [progress.VISION_ENCODE]),
+    (captions.VLM_METHOD_VISION_CAPTIONS, [progress.CAPTIONS, progress.VISION_ENCODE]),
+    (captions.VLM_METHOD_CAPTIONS, [progress.CAPTIONS, progress.CAPTION_ENCODE]),
+])
+def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip, monkeypatch,
+                                                           vlm_method, expected):
+    # PHASE ORDER: build_tile_positives writes the captions FIRST, so the combined surface
+    # reads [captions][vision encode] and never the reverse; the captions-only surface builds
+    # no canvas encode at all. The builders are stubbed — what is pinned is the ORDER.
+    positive = lambda count: [[{"cross_attn": torch.zeros(1, 1, 8)}] for _ in range(count)]
+    monkeypatch.setattr(captions, "generate_tile_captions",
+                        lambda clip, source, tiles, instruction, max_length, batch_size=1,
+                        batch_index=0, progress=None: [[f"tile {i}"] for i in range(len(tiles))])
+    monkeypatch.setattr(captions, "build_slice_caption_conds",
+                        lambda clip, source, tiles, tile_captions, offset_x=0, offset_y=0: positive(len(tiles)))
+    monkeypatch.setattr(captions, "build_caption_conds",
+                        lambda clip, tile_captions: positive(len(tile_captions)))
+    ledger = ledger_for(vlm_method)
+
+    with ledger:
+        prepare(vl_clip, vlm_method=vlm_method, progress=ledger)
+
+    # The pre-pass segments, then the canvas encode — never an encode before its captions.
+    assert segment_names(ledger) == [*expected, progress.CANVAS_ENCODE]
+
+
+def test_two_pictures_with_different_grids_stay_one_continuous_bar(comfy_stubs, vl_clip, lane_stamp):
+    # B > 1 refines one picture at a time and each picture solves its OWN grid, so the ledger
+    # re-fits per picture. What must survive that: ONE bar, no reset between the pictures.
+    image = torch.cat([image_canvas(), image_canvas()], dim=0)
+    mask = torch.cat([band_mask(), square_region()], dim=0)
+    ledger = ledger_for(batch=2)
+
+    with ledger:
+        out = run_bounded(lambda: sampling.refine_image(
+            image, RunGuider(), euler_sampler(), SIGMAS, GridVAE(), GridNoise(),
+            RUN_CAP_W, RUN_CAP_H, CTX, RUN_OVERLAP, mask=mask, vl_clip=vl_clip, progress=ledger))
+        ledger.finish()
+
+    assert out.shape == (2, CANVAS, CANVAS, 3)
+    # The two mask rows really do solve different grids: a full-width band tiles to 2 lanes,
+    # the little square crop to 1.
+    assert segment_units(ledger, progress.SAMPLING) == [4 * 2, 4 * 1]
+    assert len(comfy_stubs["progress_bars"]) == 1
+    values = [value for value, _total, _preview in comfy_stubs["progress_bars"][0].updates]
+    assert values == sorted(values)
+    assert values[-1] == ledger.total
+    # The review's B>1 collapse guard: preset seeds EVERY pending picture's block, so the
+    # displayed fraction never drops at a picture boundary — picture 2's own preset moves
+    # the total only by its grid DELTA, not by ~n_tiles-fold (the 96% -> 50% symptom).
+    fractions = [value / total for value, total, _preview in comfy_stubs["progress_bars"][0].updates
+                 if total]
+    assert all(b >= a - 0.02 for a, b in itertools.pairwise(fractions))
+
+
+def test_a_direct_caller_with_no_ledger_keeps_the_standalone_bar(comfy_stubs, vl_clip, lane_stamp):
+    # The engine never CREATES a ledger, so the harnesses and every direct caller see exactly
+    # the bar they saw before this feature existed.
+    run_sync(vl_clip, guider=RunGuider())
+
+    bar = comfy_stubs["progress_bars"][-1]
+    assert bar.total == RUN_STEPS
+    assert [value for value, _total, _preview in bar.updates] == [1, 2, 3, 4]
+
+
+def test_the_upscale_node_at_denoise_zero_still_ends_on_the_bars_total(comfy_stubs):
+    # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returns an EMPTY
+    # schedule and refine_image returns before the picture loop, so nearly the whole plan is
+    # never opened. Without finalization the bar would freeze part-filled.
+    from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
+
+    out = ContextAnchoredTileUpscaleVL().refine(
+        image=torch.rand(1, 32, 32, 3), model=object(), clip=EmptyEncodeClip(), vae=object(),
+        seed=0, sampler_name="euler", scheduler="sgm_uniform", steps=20, cfg=3.5, denoise=0.0,
+        upscale_by=1.0, max_tile_width=1024, max_tile_height=1024, context_anchor=32,
+        context_overlap=32, anchor_source=sync.ANCHOR_SOURCE_IMAGE,
+        vlm_method=captions.VLM_METHOD_VISION)
+
+    assert out[0].shape == (1, 32, 32, 3)
+    assert len(comfy_stubs["progress_bars"]) == 1
+    value, total, _preview = comfy_stubs["progress_bars"][0].updates[-1]
+    assert value == total > 0
+
+
+def test_the_bar_ticks_per_eval_and_the_total_settles_at_the_grid_solve(comfy_stubs, vl_clip,
+                                                                        lane_stamp):
+    # Both halves of the owner's report on the first live run. (a) The total is settled by
+    # the grid-solve presets, before anything fills — sized only at each segment's open, the
+    # bar read ~full through the pre-pass and visibly dropped when sampling opened at
+    # ~n_tiles x its provisional size. (b) The sampling segment ticks once per COMPLETED
+    # model eval (2 lanes x 4 euler steps = 8 ticks), not once per sigma step.
+    ledger = ledger_for()
+
+    with ledger:
+        run_sync(vl_clip, guider=RunGuider(), ledger=ledger)
+        ledger.finish()
+
+    bar = comfy_stubs["progress_bars"][0]
+    totals = [total for _value, total, _preview in bar.updates]
+    final_total = totals[-1]
+    settled_at = totals.index(final_total)
+    assert all(total == final_total for total in totals[settled_at:])
+    assert bar.updates[settled_at][0] == 0  # nothing had filled when the true total landed
+
+    def emitted(units):
+        return round(units * progress.EMIT_SCALE)
+
+    values = [value for value, _total, _preview in bar.updates]
+    before_sampling = progress.W_ENCODE + 2 * progress.W_ENCODE_TILE
+    per_eval_levels = {emitted(before_sampling + k) for k in range(1, 8 + 1)}
+    assert per_eval_levels <= set(values)

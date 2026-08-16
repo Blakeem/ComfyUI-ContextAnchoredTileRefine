@@ -248,6 +248,34 @@ without that doc's temporal design.
   `build_guider` == core CFGGuider — required, its `original_conds` convention is what the VL
   positive swap keys on — and `encode_empty` for the placeholder positive / default
   negative). **torch-only at module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/progress.py`: the VL path's progress ledger — ONE ProgressBar
+  per node execution, divided into budget segments whose UNIT is one DiT eval of one tile.
+  Only the sampling segment is exact (`stepper.plan_evals` x n_tiles, sized at stepper intake
+  and advanced by the step→eval-index map, because a naive per-step increment overshoots a
+  2-eval sampler's final step); every other phase is a named module-level constant
+  (`W_UPSCALE_STEP` / `W_CLIP_LOAD` / `K_CAPTION` / `W_ENCODE` / `W_ENCODE_CAPTION_TEXT` /
+  `W_ENCODE_TILE` / `W_DECODE_TILE`), i.e. calibration knobs in ONE place. **The ledger is
+  created in node.py and NOWHERE else** (both VL nodes); `sampling.refine_image`,
+  `sync.refine_sync`, `sync.build_tile_positives`, `captions.generate_tile_captions` and
+  `upscale.prepare_upscaled` only ACCEPT one as `progress=None` and build nothing when it is
+  None — so the base node, every direct caller and the `tests-AB` harnesses keep their old
+  bars byte-for-byte, and three pinned tests assert exactly that. `refine_image`'s B>1
+  recursion forwards it, so a batch shares one bar. The two invariants, and the only two: the
+  emitted VALUE never decreases and the TOTAL never drops below it — segments re-fit whenever
+  a true size arrives (the upscale model's step count, per-picture grids). SEGMENT ORDER
+  follows the CODE per `vlm_method` (captions are written BEFORE the conditioning is built).
+  **The shim** is a scoped patch of `comfy.utils.ProgressBar` held around the run: bars core
+  constructs inside it (llama.py's per-token bar, sd.py's VAE tiled fallbacks, upscale.py's
+  tiled_scale bar) route into the ledger's current segment instead of resetting the display,
+  and a NEW inner bar resumes the segment's fill rather than restarting it (the caption retry
+  chain and the OOM tile-halving retry both depend on that). A comfy MODULE-global patch is
+  normally against the rules here; it is the deliberate exception, because those bars are
+  built inside core functions with no instance to patch and no pbar parameter to pass — the
+  ledger's own bar is created from the class captured BEFORE the patch, and the patch is
+  restored in `finally` (`with ledger:`). Its scope is the `comfy.utils.ProgressBar`
+  ATTRIBUTE only; the known escape is sd.py:360's module-level binding under CLIP hook
+  scheduling. **Stdlib only at module scope — no torch either**; comfy is lazy (subprocess
+  test pins all three).
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. Both paths hand it over pre-normalized through the ONE shared helper

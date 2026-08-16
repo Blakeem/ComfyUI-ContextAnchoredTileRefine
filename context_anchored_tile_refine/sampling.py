@@ -971,7 +971,7 @@ def _check_sync_intake(sampler, sigmas, sampler_name=None):
             f"{float(sigmas.reshape(-1)[-1])}.")
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0):
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None):
     # Entry point, and the ONE place all three nodes meet. With a vl_clip the whole refine is
     # handed to the sync engine (sync.py) — mask or no mask — and everything below it is the
     # BASE node's raster path.
@@ -991,6 +991,9 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # rejected sampler is named as the user picked it. Both are inert without vl_clip.
     # batch_size/batch_index name this call's picture inside the picture loop below; a caller
     # always starts at the 1/0 defaults.
+    # progress is the VL run's progress ledger (progress.py), created by node.py and only ever
+    # PASSED THROUGH here — including across the picture loop, so a batch shares ONE bar. It is
+    # inert without vl_clip: the base raster path keeps its own per-tile bar untouched.
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         # Narrowed to RGB like every sampled path, so the output channel count never depends
@@ -1008,7 +1011,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # single-picture IMAGE never enters the loop, so its path is untouched.
     if image.shape[0] > 1:
         pictures = [
-            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b)
+            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b, progress=progress)
             for b in range(image.shape[0])
         ]
         return torch.cat(pictures, dim=0)
@@ -1053,7 +1056,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
             image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
             context_anchor, context_overlap, vl_clip, mask=mask, vlm_method=vlm_method,
             anchor_source=sync.ANCHOR_SOURCE_IMAGE if anchor_source is None else anchor_source,
-            batch_size=batch_size, batch_index=batch_index)
+            batch_size=batch_size, batch_index=batch_index, progress=progress)
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped

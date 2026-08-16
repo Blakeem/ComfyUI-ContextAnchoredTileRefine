@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from context_anchored_tile_refine import upscale
+from context_anchored_tile_refine import progress, upscale
 
 
 def _oom():
@@ -198,6 +198,34 @@ def test_oom_below_the_tile_floor_raises(comfy_stubs):
         upscale._upscale_with_model(model, image)
 
     assert [call["tile_x"] for call in comfy_stubs["tiled_scale_calls"]] == [512, 256, 128]
+
+
+# --- the ledger's upscale segment ---------------------------------------------------
+
+def test_the_model_pass_refits_the_upscale_segment_on_every_attempt(comfy_stubs):
+    # The tiled_scale step count is the segment's TRUE size and is not knowable before the
+    # pass starts; a halved tile means MORE steps, so the OOM retry has to re-fit again.
+    # 600x600 at tile 512/overlap 32 is a 2x2 walk (4 steps); at 256 it is 3x3 (9).
+    image = torch.rand(1, 600, 600, 3)
+    model = FakeUpscaleModel(scale=2, patcher=FakePatcher(), errors=[_oom()])
+    ledger = progress.Ledger(((progress.UPSCALE, progress.W_UPSCALE_STEP),))
+
+    with ledger:
+        out = upscale.prepare_upscaled(image, model, 2.0, progress=ledger)
+
+    assert out.shape == (1, 1200, 1200, 3)
+    assert [name for name, _units in ledger.segments] == [progress.UPSCALE]
+    assert ledger.segments[0][1] == 9 * progress.W_UPSCALE_STEP
+
+
+def test_no_upscale_model_opens_no_upscale_segment(comfy_stubs):
+    # Skipped entirely, not opened at zero: there is no model pass to report on.
+    ledger = progress.Ledger(((progress.UPSCALE, progress.W_UPSCALE_STEP),))
+
+    with ledger:
+        upscale.prepare_upscaled(torch.rand(1, 32, 32, 3), None, 2.0, progress=ledger)
+
+    assert ledger.segments == []
 
 
 # --- build_sigmas: BasicScheduler's arithmetic --------------------------------------

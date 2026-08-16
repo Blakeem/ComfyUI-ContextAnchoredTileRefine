@@ -137,14 +137,29 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode; the guider's positive prompt is ignored, the negative still applies."})
+        # The node's own id, so the ledger can write the live phase line under its progress
+        # bar. Hidden inputs create no socket and no widget and never enter widgets_values,
+        # so this is invisible to the append-only widget rule above. ComfyUI passes it to
+        # FUNCTION as a keyword (execution.py:218), hence the refine parameter below.
+        input_types["hidden"] = {"unique_id": "UNIQUE_ID"}
         return input_types
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None, unique_id=None):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
-        from . import sampling
-        return (sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source),)
+        from . import progress, sampling
+
+        # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
+        # run's shape is in hand, and one owner means the engine never has to decide whether
+        # to make a bar. `with` is what scopes the comfy.utils.ProgressBar shim to this run;
+        # finish() lands the bar on its total, including the zero-step early return.
+        ledger = progress.build_ledger(vlm_method, int(sigmas.numel()) - 1, batch=int(image.shape[0]),
+                                       unique_id=unique_id)
+        with ledger:
+            refined = sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, progress=ledger)
+            ledger.finish()
+        return (refined,)
 
 
 class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
@@ -194,13 +209,18 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model run over the whole image before tiling. Its fixed integer scale rarely lands on upscale_by, so a single lanczos pass then takes the result to the exact target."}),
                 "negative": ("CONDITIONING", {"tooltip": "Optional negative conditioning. Left unconnected it is an empty encode of this node's CLIP, which is what cfg needs to be meaningful at all."}),
             },
+            # The node's own id, so the ledger can write the live phase line under its
+            # progress bar. Hidden inputs create no socket and no widget and never enter
+            # widgets_values, so the positional restore rule above is untouched. ComfyUI
+            # passes it to FUNCTION as a keyword (execution.py:218).
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None):
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None, unique_id=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
-        from . import sampling, upscale
+        from . import progress, sampling, upscale
 
         empty_cond = None
         upscaled = None
@@ -211,25 +231,42 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
 
         _validate_image(image)
 
-        # Everything that resamples happens here, on the whole image, before any tiling.
-        upscaled = upscale.prepare_upscaled(image, upscale_model, upscale_by)
-        # The upscale REPLACES the validated input, and upscale_by goes down to 0.01, so a
-        # small image can leave here below 8px on an axis — where the /8 reflect pad (which
-        # needs pad < dim) would raise naming neither this node nor the widget that did it.
-        if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
-            raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}; the upscaled image must be at least 8x8 pixels")
+        # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
+        # pass), and `with` scopes the comfy.utils.ProgressBar shim to the whole run.
+        ledger = progress.build_ledger(vlm_method, steps, batch=int(image.shape[0]),
+                                       upscale_model=upscale_model is not None, clip_load=True,
+                                       unique_id=unique_id)
+        with ledger:
+            # Everything that resamples happens here, on the whole image, before any tiling.
+            upscaled = upscale.prepare_upscaled(image, upscale_model, upscale_by, progress=ledger)
+            # The upscale REPLACES the validated input, and upscale_by goes down to 0.01, so a
+            # small image can leave here below 8px on an axis — where the /8 reflect pad (which
+            # needs pad < dim) would raise naming neither this node nor the widget that did it.
+            if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
+                raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}; the upscaled image must be at least 8x8 pixels")
 
-        # One empty encode serves as the positive placeholder (vl.py replaces every tile's
-        # positive with its slice of the whole-image vision encode) and, unless the optional
-        # input is connected, as the negative.
-        empty_cond = upscale.encode_empty(clip)
-        guider = upscale.build_guider(model, empty_cond, empty_cond if negative is None else negative, cfg)
-        sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
-        sampler = comfy.samplers.sampler_object(sampler_name)
-        noise = upscale.Noise_RandomNoise(seed)
+            # One empty encode serves as the positive placeholder (vl.py replaces every tile's
+            # positive with its slice of the whole-image vision encode) and, unless the optional
+            # input is connected, as the negative.
+            # It is also the run's FIRST CLIP call, which pays CLIP.load_model and moves the
+            # text encoder onto the GPU — minutes on a cold cache, with nothing else covering
+            # it. Its own segment buys it an honest share of the total and its own status
+            # line ("loading text encoder"); the bar itself sits at the segment boundary for
+            # the load's duration, since nothing inside the load reports progress.
+            ledger.open(progress.CLIP_LOAD)
+            empty_cond = upscale.encode_empty(clip)
+            guider = upscale.build_guider(model, empty_cond, empty_cond if negative is None else negative, cfg)
+            sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
+            sampler = comfy.samplers.sampler_object(sampler_name)
+            noise = upscale.Noise_RandomNoise(seed)
 
-        # sampler_name rides along beside the built SAMPLER: the sync engine rejects an
-        # unsupported sampler before any encode, and core's sampler_object wraps several names
-        # in a private function (dpm_fast -> dpm_fast_function), so resolving the rejection off
-        # the OBJECT alone would name something this node's widget never offered.
-        return (sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name),)
+            # sampler_name rides along beside the built SAMPLER: the sync engine rejects an
+            # unsupported sampler before any encode, and core's sampler_object wraps several names
+            # in a private function (dpm_fast -> dpm_fast_function), so resolving the rejection off
+            # the OBJECT alone would name something this node's widget never offered.
+            refined = sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, progress=ledger)
+            # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returns an empty
+            # schedule and refine_image returns before the picture loop, so most of the plan is
+            # never opened. finish() is what stops the bar freezing mid-run on it.
+            ledger.finish()
+        return (refined,)

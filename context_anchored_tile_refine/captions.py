@@ -229,7 +229,8 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True):
     return text
 
 
-def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_size=1, batch_index=0):
+def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_size=1, batch_index=0,
+                           progress=None):
     """One caption per tile per batch row, read off the FROZEN raw canvas.
 
     Returns captions[tile_index][batch_row]. Batch rows are captioned INDEPENDENTLY: core's
@@ -243,6 +244,13 @@ def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_s
     row at up to SETTLED_RICH_MAX_TOKENS tokens, which on a 16-tile grid runs for minutes
     before the first tile samples. Hence the per-tile interrupt check and the ProgressBar:
     without them the run is uncancellable and the UI shows nothing until the tile loop starts.
+
+    `progress` is the VL run's ledger (progress.py) when a node created one. With it the
+    standalone bar is NOT constructed — a second bar is exactly the display reset the ledger
+    exists to remove — and each finished caption is reported to the ledger's open caption
+    segment with the SAME (done, total) counters the bar carries, so its per-caption chunk
+    snaps to its boundary while core's per-token bar (routed by the ledger's shim) fills it
+    in between. Without a ledger nothing here changes.
     """
     import comfy.model_management
     import comfy.utils
@@ -250,7 +258,7 @@ def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_s
     batch = int(source.shape[0])
     per_picture = len(tiles) * batch
     total = per_picture * batch_size
-    pbar = comfy.utils.ProgressBar(total)
+    pbar = None if progress is not None else comfy.utils.ProgressBar(total)
     done = per_picture * batch_index
     captions = []
 
@@ -263,7 +271,10 @@ def generate_tile_captions(clip, source, tiles, instruction, max_length, batch_s
             text = generate_caption(clip, vl_input, instruction, max_length, thinking=True)
             row_captions.append(clean_caption(text))
             done += 1
-            pbar.update_absolute(done, total)
+            if pbar is None:
+                progress.caption_done(done, total)
+            else:
+                pbar.update_absolute(done, total)
         captions.append(row_captions)
     return captions
 

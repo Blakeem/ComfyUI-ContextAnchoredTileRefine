@@ -198,13 +198,39 @@ def test_vl_anchor_source_widget_is_pinned(comfy_stubs):
 
 def test_vl_refine_signature_matches_input_names():
     # ComfyUI calls FUNCTION with the input names as keywords: a rename on either side
-    # is a TypeError at execution time, which this catches at test time instead.
+    # is a TypeError at execution time, which this catches at test time instead. HIDDEN
+    # inputs arrive the same way (execution.py:218 puts them in input_data_all by name),
+    # so they belong in the expected list beside the required and optional ones.
     import inspect
 
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
     parameters = list(inspect.signature(ContextAnchoredTileRefineVL.refine).parameters)
-    expected = ["self", *input_types["required"], *input_types["optional"]]
+    expected = ["self", *input_types["required"], *input_types["optional"],
+                *input_types.get("hidden", {})]
     assert parameters == expected
+
+
+def test_only_the_vl_nodes_carry_the_hidden_node_id(comfy_stubs):
+    # The node id is what the progress ledger writes its live status line against, so it
+    # exists on exactly the two nodes that build a ledger. On the base node the ABSENCE is
+    # the contract: it emits no text at all, and a hidden section there would be a silent
+    # input nothing reads. (comfy_stubs is for the upscale node's INPUT_TYPES.)
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        assert node.INPUT_TYPES()["hidden"] == {"unique_id": "UNIQUE_ID"}, node.__name__
+    assert "hidden" not in ContextAnchoredTileRefine.INPUT_TYPES()
+
+
+def test_the_hidden_node_id_adds_no_socket_and_no_widget(comfy_stubs):
+    # A hidden input must not reach the visible interface: the required/optional sections
+    # are what the frontend draws and what widgets_values restores positionally, so an
+    # extra name in either one would shift every saved workflow's tuned values.
+    vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
+    assert list(vl["required"]) == VL_REQUIRED_ORDER
+    assert list(vl["optional"]) == ["mask"]
+
+    upscale = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
+    assert list(upscale["required"]) == UPSCALE_REQUIRED_ORDER
+    assert list(upscale["optional"]) == ["upscale_model", "negative"]
 
 
 def test_vl_node_class_attributes():
@@ -362,12 +388,15 @@ def test_upscale_node_class_attributes(comfy_stubs):
 
 def test_upscale_refine_signature_matches_input_names(comfy_stubs):
     # ComfyUI calls FUNCTION with the input names as keywords: a rename on either side
-    # is a TypeError at execution time, which this catches at test time instead.
+    # is a TypeError at execution time, which this catches at test time instead. HIDDEN
+    # inputs arrive the same way (execution.py:218 puts them in input_data_all by name),
+    # so they belong in the expected list beside the required and optional ones.
     import inspect
 
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     parameters = list(inspect.signature(ContextAnchoredTileUpscaleVL.refine).parameters)
-    expected = ["self", *input_types["required"], *input_types["optional"]]
+    expected = ["self", *input_types["required"], *input_types["optional"],
+                *input_types.get("hidden", {})]
     assert parameters == expected
 
 

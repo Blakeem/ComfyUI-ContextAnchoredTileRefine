@@ -22,6 +22,8 @@ as sampling.py / vl.py, pinned by a subprocess test).
 """
 import torch
 
+from .progress import UPSCALE, W_UPSCALE_STEP
+
 # Core's ImageUpscaleWithModel tiling (comfy_extras/nodes_upscale_model.py): the model runs
 # at tile 512 / overlap 32, halves the tile on an OOM, and gives up below 128.
 MODEL_TILE = 512
@@ -45,7 +47,7 @@ def _lanczos_resize(image, width, height):
     return resized.movedim(1, -1)
 
 
-def _upscale_with_model(upscale_model, image):
+def _upscale_with_model(upscale_model, image, progress=None):
     # comfy_extras/nodes_upscale_model.py ImageUpscaleWithModel.execute, with model
     # residency made version-defensive: pyproject only requires ComfyUI >= 0.3.45, and the
     # UPSCALE_MODEL object gained its `.patcher` after that floor. WITH a patcher the model
@@ -80,6 +82,12 @@ def _upscale_with_model(upscale_model, image):
         while oom:
             try:
                 steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=MODEL_TILE_OVERLAP)
+                # The upscale segment's TRUE size, re-fit here and again on every OOM retry
+                # (a halved tile means more steps). The bar below is untouched: under a
+                # ledger `comfy.utils.ProgressBar` is the shim, so this same construction
+                # routes into that segment instead of resetting the display.
+                if progress is not None:
+                    progress.resize(steps * W_UPSCALE_STEP)
                 pbar = comfy.utils.ProgressBar(steps)
                 upscaled = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=MODEL_TILE_OVERLAP, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
                 oom = False
@@ -96,7 +104,7 @@ def _upscale_with_model(upscale_model, image):
     return torch.clamp(upscaled.movedim(-3, -1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
 
 
-def prepare_upscaled(image, upscale_model, upscale_by):
+def prepare_upscaled(image, upscale_model, upscale_by, progress=None):
     # The pre-tiling resize stage: [B,H,W,C] in, [B,target_h,target_w,C] out.
     # Model first, lanczos second, because a model's fixed integer scale rarely lands on
     # upscale_by — the lanczos pass then takes that output the rest of the way to the exact
@@ -107,7 +115,11 @@ def prepare_upscaled(image, upscale_model, upscale_by):
     current = image
 
     if upscale_model is not None:
-        current = _upscale_with_model(upscale_model, current)
+        # The model pass is the ONLY stage here with a duration worth reporting; the lanczos
+        # below is one kernel call. Opened at its provisional size and re-fit inside.
+        if progress is not None:
+            progress.open(UPSCALE)
+        current = _upscale_with_model(upscale_model, current, progress=progress)
     if int(current.shape[2]) == target_width and int(current.shape[1]) == target_height:
         return current
     return _lanczos_resize(current, target_width, target_height)

@@ -42,14 +42,15 @@ def test_no_vl_selects_on_the_base_node():
 
 @pytest.mark.parametrize("choice", ["source image", "live canvas"])
 @pytest.mark.parametrize("method", ["vision tokens", "vision tokens and captions", "captions"])
-def test_vl_node_forwards_its_widgets(monkeypatch, choice, method):
+def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
     # The VL refine node's own refine() is driven nowhere else in the suite, so a parameter
     # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
     recorded = {}
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
         recorded.update(context_anchor=context_anchor, vl_clip=vl_clip,
-                        anchor_source=anchor_source, vlm_method=vlm_method)
+                        anchor_source=anchor_source, vlm_method=vlm_method,
+                        progress=type(progress).__name__)
         return image
 
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
@@ -73,8 +74,12 @@ def test_vl_node_forwards_its_widgets(monkeypatch, choice, method):
     )
 
     assert isinstance(result, tuple) and len(result) == 1
+    # The ledger is created HERE and handed down: without the last entry the whole progress
+    # feature would be written but unreachable from this node.
     assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
-                        "vlm_method": method}
+                        "vlm_method": method, "progress": "Ledger"}
+    # ... and it is the run's ONE bar: nothing else in this call constructs another.
+    assert len(comfy_stubs["progress_bars"]) == 1
 
 
 def test_connected_mask_refines(comfy_stubs):

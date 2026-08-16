@@ -62,6 +62,19 @@ from dataclasses import dataclass
 import torch
 
 from . import captions, conds, grid, sampling, vl
+from .progress import (
+    CANVAS_ENCODE,
+    CAPTION_ENCODE,
+    CAPTIONS,
+    DECODE,
+    K_CAPTION,
+    SAMPLING,
+    VISION_ENCODE,
+    W_DECODE_TILE,
+    W_ENCODE,
+    W_ENCODE_CAPTION_TEXT,
+    W_ENCODE_TILE,
+)
 
 # What the frozen context_anchor ring around each tile SHOWS the model. "source image": the
 # unmodified input, presented on the settled lead schedule (the shipped default — the
@@ -106,7 +119,7 @@ def _latent_rect(rect):
     return grid.Rect(rect.x0 // 8, rect.y0 // 8, rect.x1 // 8, rect.y1 // 8)
 
 
-def encode_canvas_latent(vae, padded, tiles):
+def encode_canvas_latent(vae, padded, tiles, progress=None):
     # C_0: per-tile vae.encode of the raw crop windows at the stock tile sizes, the butted
     # CORES pasted into one canvas latent. Coverage is asserted — the cores tile the canvas
     # exactly, so every cell (ring regions included) comes from exactly one encode, and each
@@ -116,7 +129,7 @@ def encode_canvas_latent(vae, padded, tiles):
     h8, w8 = padded.shape[1] // 8, padded.shape[2] // 8
     canvas = None
     covered = torch.zeros((h8, w8), dtype=torch.bool)
-    for tile in tiles:
+    for index, tile in enumerate(tiles):
         crop, core = tile.crop_rect, tile.core
         latent = sampling.encode_pixels(vae, padded[:, crop.y0:crop.y1, crop.x0:crop.x1, :]).detach()
         if latent.shape[-2:] != ((crop.y1 - crop.y0) // 8, (crop.x1 - crop.x0) // 8):
@@ -129,6 +142,11 @@ def encode_canvas_latent(vae, padded, tiles):
         cx0, cx1 = (core.x0 - crop.x0) // 8, (core.x1 - crop.x0) // 8
         canvas[..., core.y0 // 8:core.y1 // 8, core.x0 // 8:core.x1 // 8] = latent[..., cy0:cy1, cx0:cx1]
         covered[core.y0 // 8:core.y1 // 8, core.x0 // 8:core.x1 // 8] = True
+        if progress is not None:
+            # The ledger's canvas-encode segment is budgeted per tile, so it advances from
+            # OUR count. The production VAE (latent_dim 3) reaches tiled_scale_multidim with
+            # no pbar at all, so nothing else here would move it.
+            progress.advance((index + 1) * W_ENCODE_TILE)
     if canvas is None or not bool(covered.all()):
         raise RuntimeError("tile cores do not tile the latent canvas — coverage hole")
     return canvas
@@ -189,7 +207,7 @@ def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, ba
 
 
 def build_tile_positives(vl_clip, source, tiles, vlm_method, batch_size=1, batch_index=0,
-                         vl_context=None):
+                         vl_context=None, progress=None):
     # The VL conditioning pre-pass, run by the ENGINE over the tiles it is about to sample —
     # the same three surfaces the raster branch built. It runs before the first lane so the
     # text encoder is resident exactly once, before the diffusion model loads.
@@ -203,15 +221,32 @@ def build_tile_positives(vl_clip, source, tiles, vlm_method, batch_size=1, batch
     # refine stays globally informed instead of only seeing its own crop. CAPTIONS always
     # describe THIS run's own canvas — the region crop the tiles actually sample — which is
     # why `source` is kept separate from the encode source.
+    # PROGRESS: this function owns the pre-pass's ledger segments, and their ORDER is the
+    # code's own — the captions are written FIRST and the conditioning built after, so the
+    # bar never claims an encode that has not started. "vision tokens" opens one segment,
+    # the two caption surfaces open two.
     if vlm_method not in captions.VLM_METHODS:
         raise ValueError(f"vlm_method must be one of {captions.VLM_METHODS}, got {vlm_method!r}")
     encode_source, offset_x, offset_y = (source, 0, 0) if vl_context is None else vl_context
+    n_tiles, rows = len(tiles), int(source.shape[0])
     if vlm_method == captions.VLM_METHOD_VISION:
+        if progress is not None:
+            progress.open(VISION_ENCODE, W_ENCODE)
         return vl.build_global_slices(vl_clip, encode_source, tiles, offset_x=offset_x, offset_y=offset_y)
     instruction, max_length = captions.CAPTION_INSTRUCTIONS[vlm_method]
-    tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, instruction, max_length, batch_size, batch_index)
+    if progress is not None:
+        progress.open(CAPTIONS, n_tiles * rows * K_CAPTION, chunks=n_tiles * rows)
+    tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, instruction, max_length,
+                                                    batch_size, batch_index, progress=progress)
     if vlm_method == captions.VLM_METHOD_VISION_CAPTIONS:
+        # ONE whole-canvas vision encode plus one caption TEXT encode per tile — the text
+        # half scales with the grid, so it is budgeted rather than folded into W_ENCODE.
+        if progress is not None:
+            progress.open(VISION_ENCODE, W_ENCODE + n_tiles * W_ENCODE_CAPTION_TEXT)
         return captions.build_slice_caption_conds(vl_clip, encode_source, tiles, tile_captions, offset_x=offset_x, offset_y=offset_y)
+    if progress is not None:
+        # Captions ONLY: no canvas encode at all, but still one text-encoder pass per tile.
+        progress.open(CAPTION_ENCODE, n_tiles * W_ENCODE_CAPTION_TEXT)
     return captions.build_caption_conds(vl_clip, tile_captions)
 
 
@@ -254,7 +289,7 @@ def build_lane_guiders(guider, tile_positives):
 def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_height,
                  context_anchor, context_overlap, vl_clip, vlm_method=captions.VLM_METHOD_VISION,
                  anchor_source=ANCHOR_SOURCE_IMAGE, batch_size=1, batch_index=0,
-                 region_pixel=None, vl_context=None):
+                 region_pixel=None, vl_context=None, progress=None, sampler=None):
     # Everything a run needs, in one place, before any sampling: ONE picture in
     # ([1,H,W,C] — the caller owns the batch loop), one grid solve, one conditioning
     # pre-pass, one C_0, one noise draw, N lanes out.
@@ -303,13 +338,29 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
     tiles = layout.tiles
 
+    # This picture's whole plan block at TRUE sizes, before any pre-pass work fills: the
+    # grid and the eval plan are both known here, and presetting now is what keeps the
+    # displayed fraction honest — sized only at each segment's open, the total was tiny
+    # through the captions (bar ~full) and then ~n_tiles-fold larger at sampling (bar
+    # visibly dropping), the value itself monotone the whole time.
+    if progress is not None and sampler is not None:
+        total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
+        progress.preset_picture(vlm_method, len(tiles), batch, total_evals)
+
     tile_positives = build_tile_positives(vl_clip, padded, tiles, vlm_method, batch_size, batch_index,
-                                          vl_context=vl_context)
+                                          vl_context=vl_context, progress=progress)
     if len(tile_positives) != len(tiles):
         raise RuntimeError(
             f"the VL pre-pass built {len(tile_positives)} positives for {len(tiles)} tiles — the "
             "conditioning and the tiling disagree about the layout")
-    raw_latent = encode_canvas_latent(vae, padded, tiles)
+    # The per-tile VAE window encodes are their own phase: one vae.encode per tile, minutes on
+    # a large grid, and until now the only phase with no bar of any kind. Closed before the
+    # noise draw, which is a single cheap call.
+    if progress is not None:
+        progress.open(CANVAS_ENCODE, len(tiles) * W_ENCODE_TILE)
+    raw_latent = encode_canvas_latent(vae, padded, tiles, progress=progress)
+    if progress is not None:
+        progress.close()
     canvas_noise = build_canvas_noise(vae, noise, canvas_h, canvas_w, batch, batch_size, batch_index)
     if tuple(canvas_noise.shape) != tuple(raw_latent.shape):
         raise RuntimeError(
@@ -436,20 +487,25 @@ def blend_lanes(canvas, blends, windows, values):
         canvas[..., paste.y0:paste.y1, paste.x0:paste.x1] = alpha * sub + (1.0 - alpha) * region
 
 
-def make_sync_progress(model_patcher, steps, batch_size=1, batch_index=0):
-    # latent_preview.prepare_callback at ENGINE scale: ONE ProgressBar over the run's sigma
+def make_sync_progress(model_patcher, steps, batch_size=1, batch_index=0, progress=None):
+    # latent_preview.prepare_callback at ENGINE scale: ONE progress report over the run's sigma
     # steps (every lane advances together, so there is nothing per-tile to count) and one
     # WHOLE-IMAGE preview per step — something the raster path could never show, because it
     # only ever holds one tile's latent at a time. batch_size/batch_index come from
     # refine_image's picture loop: every picture reports on the SAME total and starts where
     # the previous one ended, so the bar advances once across the whole run.
+    # WITH a ledger (`progress`) no standalone bar is constructed at all, and the hook does
+    # NOT move the fill either — the stepper's per-eval on_eval tick owns it exactly (one
+    # unit per completed eval; the old per-step advance claimed a step's evals at its START
+    # and jumped ahead of the ticks). advance(0.0, ...) is fill-preserving: it only carries
+    # the preview. The preview rides along either way; it must not regress.
     import comfy.utils
     import latent_preview
 
     previewer = latent_preview.get_previewer(model_patcher.load_device, model_patcher.model.latent_format)
     total = steps * batch_size
     offset = steps * batch_index
-    pbar = comfy.utils.ProgressBar(total)
+    pbar = None if progress is not None else comfy.utils.ProgressBar(total)
 
     def update(step_index, canvas, lanes):
         preview = None
@@ -465,7 +521,10 @@ def make_sync_progress(model_patcher, steps, batch_size=1, batch_index=0):
                 y0, y1, x0, x1 = lane.window
                 preview_canvas[..., y0:y1, x0:x1] = lane.denoised
             preview = previewer.decode_latent_to_preview_image("JPEG", preview_canvas)
-        pbar.update_absolute(offset + step_index + 1, total, preview)
+        if pbar is None:
+            progress.advance(0.0, preview)
+        else:
+            pbar.update_absolute(offset + step_index + 1, total, preview)
 
     return update
 
@@ -550,7 +609,7 @@ def _make_surgery_hook(canvas, blends, progress, ring_gates=None):
     return hook
 
 
-def decode_composite(vae, model, canvas, padded, layout):
+def decode_composite(vae, model, canvas, padded, layout, progress=None):
     # Stage D: per-tile decode of the CANVAS windows, composited by the stock pixel feather in
     # raster order. Reading the canvas rather than a lane's own `x` is load-bearing twice
     # over: a lane window's frozen ring is restored to its unrefined `latent_image` at every
@@ -559,7 +618,7 @@ def decode_composite(vae, model, canvas, padded, layout):
     # and NO seam_displacements here: both sides of every band decoded ONE latent, so the
     # only band delta left is VAE window framing, which the campaign measured at the floor.
     result = padded.clone()
-    for tile in layout.tiles:
+    for index, tile in enumerate(layout.tiles):
         crop, paste, core = tile.crop_rect, tile.paste_rect, tile.core
         rect = _latent_rect(crop)
         # RAW space for the VAE: the canvas is maintained in the model's process space (the
@@ -580,13 +639,15 @@ def decode_composite(vae, model, canvas, padded, layout):
         alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top,
                                        tile.kept_left).to(result.device)[..., None]
         result[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
+        if progress is not None:
+            progress.advance((index + 1) * W_DECODE_TILE)
     return result
 
 
 def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
                    context_anchor, context_overlap, vl_clip, vlm_method=captions.VLM_METHOD_VISION,
                    anchor_source=ANCHOR_SOURCE_IMAGE, batch_size=1, batch_index=0,
-                   region_pixel=None, vl_context=None):
+                   region_pixel=None, vl_context=None, progress=None):
     # The run loop over ONE canvas — the whole picture on the no-mask path, the bbox crop on
     # the region path (region_pixel/vl_context set). Every tile samples its own full-length
     # schedule on its own thread, held at each sigma step by stepper.py's barrier; between
@@ -597,9 +658,28 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
     run = _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_height,
                        context_anchor, context_overlap, vl_clip, vlm_method=vlm_method,
                        anchor_source=anchor_source, batch_size=batch_size, batch_index=batch_index,
-                       region_pixel=region_pixel, vl_context=vl_context)
+                       region_pixel=region_pixel, vl_context=vl_context, progress=progress,
+                       sampler=sampler)
     model = guider.model_patcher.model
     steps = int(sigmas.shape[-1]) - 1
+    # The sampling budget is EXACT and known here: the stepper's own eval plan, which
+    # run_lanes then enforces at every lane's eval — so the ledger and the engine cannot
+    # disagree about how long the run is. Sized at stepper intake, never re-derived.
+    on_eval = None
+    if progress is not None:
+        total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
+        progress.open(SAMPLING, total_evals * len(run.lanes))
+
+        evals_done = [0]
+
+        def on_eval(evals_done=evals_done, progress=progress):
+            # One unit per COMPLETED eval: n_lanes ticks per sigma step, so the bar and
+            # the "sampling {pct}%" line walk in ~1% increments instead of whole-step
+            # jumps (5% per hook firing at 20 steps, with all 30 tiles' work invisible
+            # in between). The hook still lands each step exactly on its target and
+            # carries the preview; advance() is monotone, so the two never fight.
+            evals_done[0] += 1
+            progress.advance(evals_done[0])
     # The maintained canvas follows the LANES' device: comfy moves every lane's noise/latent
     # to the guider's load device inside outer_sample (samplers.py:1254-1255), so `x` reaches
     # the hook there, while the canvas comes off vae.encode on the VAE's output device — the
@@ -616,7 +696,8 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
     # and in live-canvas mode nothing frozen-refined is left to lead.
     ring_gates = run.ring_gates if anchor_source == ANCHOR_SOURCE_CANVAS else None
     hook = _make_surgery_hook(canvas, blends,
-                              make_sync_progress(guider.model_patcher, steps, batch_size, batch_index),
+                              make_sync_progress(guider.model_patcher, steps, batch_size, batch_index,
+                                                 progress=progress),
                               ring_gates=ring_gates)
     # The shared canvas-wide SDE field, or None for a deterministic sampler — both are
     # rejected the other way round by the stepper, and a per-lane field would put two
@@ -626,7 +707,7 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
     # anchor_ring_schedule normalizes against sigmas[0] — which is the run's first sigma here
     # exactly because the schedule handed over is the full one.
     with sampling.anchor_ring_schedule(guider, sigmas, enabled=anchor_source == ANCHOR_SOURCE_IMAGE):
-        samples = stepper.run_lanes(run.lanes, sampler, hook, noise_fields=noise_fields)
+        samples = stepper.run_lanes(run.lanes, sampler, hook, noise_fields=noise_fields, on_eval=on_eval)
     # The hook is PRE-step, so the FINAL step's results are still only in the lanes when the
     # stepper returns. comfy hands each sample back in RAW space (process_latent_out,
     # samplers.py:1238); process_latent_in is the exact inverse it applies on the way in, and
@@ -634,14 +715,16 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
     blend_lanes(canvas, blends, windows, [model.process_latent_in(sample) for sample in samples])
 
     # ---- output
-    decoded = decode_composite(vae, model, canvas, run.padded, run.layout)
+    if progress is not None:
+        progress.open(DECODE, len(run.layout.tiles) * W_DECODE_TILE)
+    decoded = decode_composite(vae, model, canvas, run.padded, run.layout, progress=progress)
     return sampling.crop_image_to(decoded, *run.size)
 
 
 def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
                 context_anchor, context_overlap, vl_clip, mask=None,
                 vlm_method=captions.VLM_METHOD_VISION, anchor_source=ANCHOR_SOURCE_IMAGE,
-                batch_size=1, batch_index=0):
+                batch_size=1, batch_index=0, progress=None):
     """The sync engine: ONE picture in, that picture refined tile-synchronously out.
 
     Without a mask the whole picture is tiled. With one, only the masked region is refined:
@@ -656,13 +739,16 @@ def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_
     tile-to-tile handover, not a boundary.
     The caller owns the picture loop (batch_size/batch_index name this picture inside it), and
     hands over that picture's own mask row.
+    `progress` is the VL run's ledger (progress.py), created by the node and only ever
+    RECEIVED here — with None (direct callers, the tests-AB harnesses) every bar and every
+    value below is exactly what it was before the ledger existed.
     """
     # ---- inputs
     if mask is None:
         return _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width,
                               max_tile_height, context_anchor, context_overlap, vl_clip,
                               vlm_method=vlm_method, anchor_source=anchor_source,
-                              batch_size=batch_size, batch_index=batch_index)
+                              batch_size=batch_size, batch_index=batch_index, progress=progress)
 
     # Region path. Harden a soft input at 0.5 — a fractional denoise mask would leave the
     # under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
@@ -686,7 +772,8 @@ def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_
                                  max_tile_height, context_anchor, context_overlap, vl_clip,
                                  vlm_method=vlm_method, anchor_source=anchor_source,
                                  batch_size=batch_size, batch_index=batch_index,
-                                 region_pixel=sub_mask, vl_context=(image, x0, y0))
+                                 region_pixel=sub_mask, vl_context=(image, x0, y0),
+                                 progress=progress)
 
     # ---- output. Narrow to RGB: the crop comes back 3-channel (a 4-channel input's alpha is
     # dropped exactly as on the no-mask path), so the composite and the output stay 3-channel.

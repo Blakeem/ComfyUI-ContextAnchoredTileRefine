@@ -419,6 +419,17 @@ def _plan_evals(name, sigmas):
     return total, hook_step_at
 
 
+def plan_evals(sampler, sigmas):
+    """`_plan_evals` for a caller holding the SAMPLER object rather than its resolved name.
+
+    A thin public wrapper, and the ONLY eval-math the progress ledger may use: `run_lanes`
+    below enforces this exact total at every lane's eval, so a second implementation of the
+    final-step exception could disagree with the engine about how long the run is. The core
+    stays private and name-keyed because run_lanes has already resolved the name once.
+    """
+    return _plan_evals(_resolve_sampler_name(sampler), sigmas)
+
+
 class _LaneModel:
     """Wraps one lane's KSamplerX0Inpaint. The barrier site, the denoised stash, and a
     transparent attribute proxy.
@@ -458,6 +469,12 @@ class _LaneModel:
         result = self._inner(x, sigma, **kwargs)
         lane.denoised = result
         lane.eval_count = index + 1
+        if scheduler.on_eval is not None:
+            # One tick per COMPLETED eval, on this lane's thread but under the serial
+            # scheduler (exactly one lane runs at a time), so the callback needs no lock.
+            # An exception here takes the normal lane-exception path: abort flag, fleet
+            # unwind, shim restored by the caller's finally.
+            scheduler.on_eval()
         if lane.eval_count == scheduler.total_evals:
             # FINAL EXIT BARRIER: the result is computed, but the lane holds here until every
             # other lane has computed its own last eval, so no guider teardown can race one.
@@ -476,9 +493,10 @@ class _Scheduler:
     and resets the token to lane 0.
     """
 
-    def __init__(self, lanes, sigmas, sampler_name, total_evals, hook_step_at, hook):
+    def __init__(self, lanes, sigmas, sampler_name, total_evals, hook_step_at, hook, on_eval=None):
         self.total_evals = total_evals
         self.sampler_name = sampler_name
+        self.on_eval = on_eval
         self._cv = threading.Condition()
         self._lanes = lanes
         self._sigmas = sigmas
@@ -645,7 +663,7 @@ def _run_lane(scheduler, lane, spec, lane_sampler):
             scheduler.finish(lane)
 
 
-def run_lanes(lane_specs, sampler, hook, noise_fields=None):
+def run_lanes(lane_specs, sampler, hook, noise_fields=None, on_eval=None):
     """Step every lane through one shared sigma schedule, calling `hook` between steps.
 
     `sampler` is the node's SAMPLER object, resolved once and rebuilt per lane around the
@@ -654,8 +672,10 @@ def run_lanes(lane_specs, sampler, hook, noise_fields=None):
     readable. It is PRE-step by construction: the caller owns whatever consolidation the
     final step's results need after this returns. `noise_fields` is the shared canvas noise
     provider from `build_noise_fields` — REQUIRED for a stochastic sampler, and rejected for
-    a deterministic one; each lane gets `noise_fields(spec)` as its `noise_sampler`. Returns
-    the lanes' samples in lane order.
+    a deterministic one; each lane gets `noise_fields(spec)` as its `noise_sampler`.
+    `on_eval` (optional, no arguments) is called once after EVERY completed model eval,
+    under the serial scheduler — the engine's fine-grained progress tick, n_lanes calls per
+    sigma step where the hook fires once. Returns the lanes' samples in lane order.
     """
     _validate_specs(lane_specs)
     sampler_name = _resolve_sampler_name(sampler)
@@ -665,7 +685,7 @@ def run_lanes(lane_specs, sampler, hook, noise_fields=None):
     total_evals, hook_step_at = _plan_evals(sampler_name, sigmas)
 
     lanes = [Lane(index, spec.window) for index, spec in enumerate(lane_specs)]
-    scheduler = _Scheduler(lanes, sigmas, sampler_name, total_evals, hook_step_at, hook)
+    scheduler = _Scheduler(lanes, sigmas, sampler_name, total_evals, hook_step_at, hook, on_eval=on_eval)
     lane_samplers = [
         _build_lane_sampler(
             sampler, lane, scheduler, spec.extra_options,

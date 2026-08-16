@@ -2,16 +2,24 @@
 
 ComfyUI nodes for tiled refining and upscaling. An already-upscaled image is refined tile by tile with no visible seams, or only inside a masked region with the rest left untouched. On the VL nodes the prompt is replaced entirely by vision conditioning, which removes the classic tiled-upscale failure of prompt objects reappearing in every tile.
 
-Sample results with Krea 2 and the Tile Upscale (VL) node, 1024x576 to 4096x2304 in one pass. Click any image for the full-size file.
+Sample results with Krea 2 and the Tile Upscale (VL) node, upscaled in two passes: 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images produced with this method, unedited and not cherry-picked. Click any image for the full-size WebP.
 
 <table>
 <tr>
-<td align="center"><a href="samples/dragon-original.png"><img src="samples/dragon-original-preview.jpg" alt="Dragon, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
-<td align="center"><a href="samples/dragon-4x-vl-upscale.png"><img src="samples/dragon-4x-vl-upscale-preview.jpg" alt="Dragon, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x Tile Upscale (VL), Krea 2, 4096x2304</sub></td>
+<td align="center"><a href="samples/cyberpunk-city.webp"><img src="samples/cyberpunk-city.webp" alt="Cyberpunk city, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/cyberpunk-city-4k.webp"><img src="samples/cyberpunk-city-4k-preview.jpg" alt="Cyberpunk city, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.5, 6 tiles, 4096x2304</sub></td>
+<td align="center"><a href="samples/cyberpunk-city-8k.webp"><img src="samples/cyberpunk-city-8k-preview.jpg" alt="Cyberpunk city, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 30 tiles, 8192x4608</sub></td>
 </tr>
 <tr>
-<td align="center"><a href="samples/renaissance-market-original.png"><img src="samples/renaissance-market-original-preview.jpg" alt="Renaissance market, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
-<td align="center"><a href="samples/renaissance-market-4x-vl-upscale.png"><img src="samples/renaissance-market-4x-vl-upscale-preview.jpg" alt="Renaissance market, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x Tile Upscale (VL), Krea 2, 4096x2304</sub></td>
+<td colspan="3"><sub><b>Prompt:</b> Cyberpunk cityscape at night</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="samples/orbital-shipyard-hangar.webp"><img src="samples/orbital-shipyard-hangar.webp" alt="Orbital shipyard hangar, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/orbital-shipyard-hangar-4k.webp"><img src="samples/orbital-shipyard-hangar-4k-preview.jpg" alt="Orbital shipyard hangar, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.5, 6 tiles, 4096x2304</sub></td>
+<td align="center"><a href="samples/orbital-shipyard-hangar-8k.webp"><img src="samples/orbital-shipyard-hangar-8k-preview.jpg" alt="Orbital shipyard hangar, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 30 tiles, 8192x4608</sub></td>
+</tr>
+<tr>
+<td colspan="3"><sub><b>Prompt:</b> Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus</sub></td>
 </tr>
 </table>
 
@@ -143,7 +151,7 @@ Stepping every tile against one schedule requires timing each sampler's model ev
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The sampling preview shows the entire image sharpening once per step. The raster engine can only preview the one tile it is currently sampling; the synchronized engine holds every tile in one shared canvas latent, so the whole picture exists at every step and can be shown.
+The sampling preview shows the entire image sharpening once per step. The raster engine can only preview the one tile it is currently sampling; the synchronized engine holds every tile in one shared canvas latent, so the whole picture exists at every step and can be shown. A live status line under the node's progress bar names the phase the run is in — upscaling, captioning, encoding, sampling with its percent, decoding — and clears when the run ends.
 
 ### Conditioning on the VL nodes
 
@@ -190,6 +198,7 @@ The `guider` input takes any guider, including NAG for models without negative p
 ## Example workflows
 
 - [Krea 2 upscale workflow](Krea%202.json)
+- [Krea 2 8K upscale workflow](Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
 - [Krea 2 refine workflow](Krea%202%20(refine).json)
 - [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)
 

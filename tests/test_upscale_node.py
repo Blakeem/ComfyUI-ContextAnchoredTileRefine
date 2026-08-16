@@ -48,8 +48,9 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         "refined": torch.rand(1, 64, 64, 3),
     }
 
-    def fake_prepare_upscaled(image, upscale_model, upscale_by):
+    def fake_prepare_upscaled(image, upscale_model, upscale_by, progress=None):
         recorded["prepare_upscaled"] = (image, upscale_model, upscale_by)
+        recorded["upscale_progress"] = progress
         return recorded["upscaled"]
 
     def fake_encode_empty(clip):
@@ -64,7 +65,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         recorded["build_sigmas"] = (model, scheduler, steps, denoise)
         return recorded["sigmas"]
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
         recorded["refine_image"] = {
             "image": image,
             "guider": guider,
@@ -81,6 +82,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
             "anchor_source": anchor_source,
             "vlm_method": vlm_method,
             "sampler_name": sampler_name,
+            "progress": progress,
         }
         return recorded["refined"]
 
@@ -221,6 +223,35 @@ def test_noise_carries_the_seed(comfy_stubs, monkeypatch):
 
     assert isinstance(noise, upscale.Noise_RandomNoise)
     assert noise.seed == 4242
+
+
+def test_one_ledger_is_created_here_and_handed_to_both_stages(comfy_stubs, monkeypatch):
+    # LEDGER CREATION SITE: the node owns it, so the upscale stage and the refine engine
+    # report into ONE bar. Without this the progress feature would be unreachable from the
+    # all-in-one node, which is the node that has the most phases to cover.
+    from context_anchored_tile_refine import progress
+
+    recorded, _ = _drive(monkeypatch, upscale_model=object())
+    ledger = recorded["upscale_progress"]
+
+    assert isinstance(ledger, progress.Ledger)
+    assert recorded["refine_image"]["progress"] is ledger
+    assert len(comfy_stubs["progress_bars"]) == 1
+
+
+def test_the_first_clip_call_gets_its_own_segment_and_the_shim_is_restored(comfy_stubs, monkeypatch):
+    # encode_empty is the run's FIRST CLIP call — it pays CLIP.load_model and the move onto
+    # the GPU, with nothing else covering it. The shim around the whole run must be gone by
+    # the time refine() returns.
+    import comfy.utils
+
+    from context_anchored_tile_refine import progress
+
+    real = comfy.utils.ProgressBar
+    recorded, _ = _drive(monkeypatch)
+
+    assert progress.CLIP_LOAD in [name for name, _units in recorded["upscale_progress"].segments]
+    assert comfy.utils.ProgressBar is real
 
 
 def test_rejects_a_non_4d_image(comfy_stubs, monkeypatch):

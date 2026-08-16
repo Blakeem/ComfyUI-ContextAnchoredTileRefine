@@ -317,6 +317,47 @@ def test_the_caption_pre_pass_is_cancellable_and_reports_progress(comfy_stubs):
     assert [update[0] for update in pbar.updates] == [1, 2, 3, 4, 5, 6]
 
 
+def test_a_ledger_replaces_the_standalone_bar_and_receives_the_same_counters(comfy_stubs):
+    # With the VL run's ledger in hand the pre-pass builds NO bar of its own — a second bar
+    # is the display reset the ledger exists to remove — and reports each finished caption
+    # with the counters that fed that bar, which is what a status line renders as "i/n".
+    reported = []
+
+    class Recorder:
+        def caption_done(self, index, count):
+            reported.append((index, count))
+
+    source = torch.rand(1, 16, 16, 3)
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(0, 0, 16, 16))]
+    before = len(comfy_stubs["progress_bars"])
+
+    captions.generate_tile_captions(FakeCaptionClip(), source, tiles, "describe", 256,
+                                    progress=Recorder())
+
+    assert reported == [(1, 2), (2, 2)]
+    assert len(comfy_stubs["progress_bars"]) == before
+    # The interrupt check is unconditional: a ledger must not make the pre-pass uncancellable.
+    assert comfy_stubs["interrupt_calls"] == len(tiles)
+
+
+def test_a_ledgers_caption_counters_stay_run_wide_across_the_picture_loop(comfy_stubs):
+    # refine_image refines one picture at a time, so picture 2 of 2 reports 3/4 and 4/4 —
+    # the ledger re-bases those onto that picture's own segment.
+    reported = []
+
+    class Recorder:
+        def caption_done(self, index, count):
+            reported.append((index, count))
+
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(0, 0, 16, 16))]
+
+    captions.generate_tile_captions(FakeCaptionClip(), torch.rand(1, 16, 16, 3), tiles,
+                                    "describe", 256, batch_size=2, batch_index=1,
+                                    progress=Recorder())
+
+    assert reported == [(3, 4), (4, 4)]
+
+
 def test_generated_captions_are_cleaned_before_they_are_returned(comfy_stubs):
     # clean_caption runs on the way out (caption_clean=True on every settled render), so the
     # DiT never reads the VLM's own headings or its repetition loop as content.

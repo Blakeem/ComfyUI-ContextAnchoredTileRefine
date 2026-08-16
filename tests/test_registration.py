@@ -190,6 +190,30 @@ def test_sync_module_never_imports_comfy():
     assert result.returncode == 0, result.stderr
 
 
+def test_progress_module_never_imports_comfy():
+    # progress.py is stdlib ONLY — it holds no tensors, so torch has no business there
+    # either, and every comfy touch (the run's one ProgressBar, the scoped shim) is
+    # function-scope. upscale.py and sync.py import it at THEIR module scope, so a comfy
+    # import here would break their contracts too. `server` is held to the same rule and
+    # matters more: it is ComfyUI's aiohttp web app, so importing it to write a status line
+    # would drag a web server into every headless harness run.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.progress\n"
+        "assert 'comfy' not in sys.modules, 'progress.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'progress.py imported latent_preview at module scope'\n"
+        "assert 'torch' not in sys.modules, 'progress.py imported torch at module scope'\n"
+        "assert 'server' not in sys.modules, 'progress.py imported server at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_grid_module_never_imports_comfy():
     # grid.py must stay pure stdlib — not even torch.
     code = (

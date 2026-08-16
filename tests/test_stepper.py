@@ -823,3 +823,33 @@ def test_a_failure_after_the_final_exit_barrier_is_not_a_silent_none_sample():
     assert excinfo.value is interrupt
     assert model.evals == 3
     assert live_lane_threads() == []
+
+
+# ---- the per-eval progress tick --------------------------------------------
+
+
+def test_on_eval_ticks_once_per_completed_model_eval():
+    # The engine's fine-grained progress tick: n_lanes calls per sigma step where the hook
+    # fires once. 2 lanes x (2+2+1) evals on this schedule; serial scheduler, so the tick
+    # list is a clean count with no interleaving hazard.
+    fn, _records = cadence_fn("sample_exp_heun_2_x0", evals=2, final_evals=1)
+    _, spec_a = make_spec(FakeModelK())
+    _, spec_b = make_spec(FakeModelK())
+    ticks = []
+
+    run_bounded(lambda: stepper.run_lanes(
+        [spec_a, spec_b], make_sampler(fn), noop_hook, on_eval=lambda: ticks.append(object())))
+
+    assert len(ticks) == 2 * (2 + 2 + 1)
+
+
+def test_on_eval_default_is_no_callback():
+    # Omitted entirely: the scheduler stores None and the eval path takes zero extra calls,
+    # which is what keeps every direct caller and the bit-identity tests unchanged.
+    model = FakeModelK()
+    _, spec = make_spec(model)
+    fn, _records = cadence_fn()
+
+    run_bounded(lambda: stepper.run_lanes([spec], make_sampler(fn), noop_hook))
+
+    assert model.evals == 3
