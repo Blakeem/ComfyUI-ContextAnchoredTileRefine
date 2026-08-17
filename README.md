@@ -145,12 +145,6 @@ The whole image becomes one shared canvas latent, and every tile is stepped toge
 
 Stepping every tile against one schedule requires timing each sampler's model evaluations, so the VL path supports `euler`, `heun`, `dpm_2`, `dpmpp_2m`, `dpmpp_2m_sde` (all variants), `exp_heun_2_x0`, and `exp_heun_2_x0_sde`. Any other choice is rejected with a clear error before sampling starts; `dpm_fast`, `dpm_adaptive`, and `uni_pc` own their own schedule and cannot be supported. The base node accepts every sampler.
 
-#### Whole-image preview
-
-*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
-
-The sampling preview shows the entire image sharpening once per step. The raster engine can only preview the one tile it is currently sampling; the synchronized engine holds every tile in one shared canvas latent, so the whole picture exists at every step and can be shown. A live status line under the node's progress bar names the phase the run is in — upscaling, captioning, encoding, sampling with its percent, decoding — and clears when the run ends.
-
 ### Conditioning on the VL nodes
 
 The classic tiled-upscale failure: a prompt describes the whole image, each tile holds only part of it, and a prompt-adherent model re-creates prompt objects inside tiles that should not contain them. The VL nodes replace the prompt with conditioning that is true for each tile, built by the same Qwen3-VL encoder wired to `clip`. Two distinct operations are involved: encoding the whole image through the vision tower (shared by all tiles), and writing a caption from one tile's crop (local to that tile). `vlm_method` picks which fills each tile's positive.
