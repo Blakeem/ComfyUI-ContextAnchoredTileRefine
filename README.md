@@ -2,7 +2,7 @@
 
 ComfyUI nodes for tiled refining and upscaling. An already upscaled image is refined a tile at a time with no visible seams. On the VL nodes, a global prompt is replaced by vision conditioning.
 
-Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes: 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images made with this method and they are not cherry picked. Click any image for the full size WebP.
+Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes: 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images made with this method and they are not cherry picked. Click to view the full-sized image.
 
 <table>
 <tr>
