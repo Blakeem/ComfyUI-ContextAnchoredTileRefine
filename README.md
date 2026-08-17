@@ -79,8 +79,6 @@ The vision-conditioned variant, built for Krea 2. Inputs are the base node's plu
 
 The whole flow in one node: image in, refined image out. It upscales the entire image first, through the optional `upscale_model` if connected, then a single lanczos pass to exactly `input size x upscale_by`. It then runs the same VL tile refine as Tile Refine (VL).
 
-Noise, sampler, schedule, and CFG guidance are built inside the node from widgets, so no custom-sampling nodes are needed. The optional `negative` input is the one text channel that applies; left unconnected it behaves as an empty prompt. `denoise 0.0` skips diffusion and returns the pure upscale. No mask input: for a region pass, use Tile Refine (VL).
-
 ## Features
 
 ### Tiling geometry
