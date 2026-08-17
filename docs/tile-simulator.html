@@ -164,9 +164,11 @@ aside {
 .hint { margin: 7px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
 
 /* controls */
-.ctl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
-.ctl-grid.three { grid-template-columns: 1fr 1fr 1fr; }
-.ctl { display: flex; flex-direction: column; gap: 2px; }
+/* minmax(0,...) tracks: a 1fr track cannot shrink below its content's min-content
+   width, so one wide cell would push the second column out of the 330px aside. */
+.ctl-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; }
+.ctl-grid.three { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
+.ctl { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ctl label { font-size: 12px; color: var(--muted); }
 .ctl input {
   font: inherit;
@@ -176,6 +178,7 @@ aside {
   border-radius: 6px;
   padding: 4px 7px;
   width: 100%;
+  min-width: 0;
 }
 .ctl input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 #input-size {
@@ -297,13 +300,8 @@ footer {
           <input id="in-overlap" type="number" min="0" max="512" step="8" value="32"></div>
         <div class="ctl"><label for="in-ctx">context_anchor</label>
           <input id="in-ctx" type="number" min="0" max="512" step="8" value="32"></div>
-        <div class="ctl"><label for="in-multiple">grid multiple</label>
-          <select id="in-multiple">
-            <option value="8" selected>8 — image nodes</option>
-            <option value="32">32 — coarse-grid models (VAE 16x x DiT patch 2)</option>
-          </select></div>
       </div>
-      <p class="hint">The caps are the largest crop the model ever sees, rings included. The grid multiple is the pixel granularity every crop lands on: 8 for the image nodes, 32 for the video node (VAE 16&times; &times; DiT patch 2).</p>
+      <p class="hint">The caps are the largest crop the model ever sees, rings included. Every crop lands on the /8 pixel grid all three nodes share.</p>
     </div>
 
     <div class="panel" id="readouts">
@@ -808,7 +806,10 @@ function readInputs() {
   state.maxH = clampSnap(parseFloat(els.mh.value), 256, 16384, 8);
   state.ctx = clampSnap(parseFloat(els.ctxIn.value), 0, 512, 8);
   state.overlap = clampSnap(parseFloat(els.overlap.value), 0, 512, 8);
-  state.multiple = parseInt(els.multiple.value, 10) === 32 ? 32 : 8;
+  /* The nodes' pixel grid. solveAxis keeps its `multiple` parameter (and the 32
+     self-tests) to mirror grid.solve_axis(multiple=), which is retained for
+     coarse-grid model families; no shipped node uses anything but 8. */
+  state.multiple = 8;
 }
 
 function normalizeInputs() {
@@ -833,7 +834,7 @@ function recompute() {
 
   /* The refine stage never resamples: the factor models the upscale that ran before
      tiling, then the pipeline reflect-pads up to the grid multiple
-     (pad_image_to_multiple: /8 image, /32 video) and crops back at the end. */
+     (pad_image_to_multiple) and crops back at the end. */
   state.inputW = Math.max(8, Math.round(state.srcW * state.factor));
   state.inputH = Math.max(8, Math.round(state.srcH * state.factor));
   state.canvasW = roundUpMultiple(state.inputW, state.multiple);
@@ -1438,7 +1439,6 @@ function init() {
   els.mh = document.getElementById("in-mh");
   els.ctxIn = document.getElementById("in-ctx");
   els.overlap = document.getElementById("in-overlap");
-  els.multiple = document.getElementById("in-multiple");
   els.inputSize = document.getElementById("input-size");
   els.readoutsBody = document.getElementById("readouts-body");
   els.feather = document.getElementById("feather");
