@@ -218,7 +218,7 @@ def _resolve_sampler_name(sampler):
         raise ValueError(
             f"ContextAnchoredTileRefine: sampler '{name or raw_name}' is not supported by the "
             f"synchronized stepper. Supported: {', '.join(EVALS_PER_STEP)}. "
-            f"{', '.join(UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN — they own their own "
+            f"{', '.join(UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN. They own their own "
             "schedule or internal history, so no evals-per-step entry can time them."
         )
     return name
@@ -322,7 +322,7 @@ class _GeneratorNoiseFields(_NoiseFields):
         if index < self._index:
             raise RuntimeError(
                 f"ContextAnchoredTileRefine: a lane asked for SDE noise draw {index + 1} after the "
-                f"fleet had moved on to draw {self._index + 1} — the lanes are no longer stepping "
+                f"fleet had moved on to draw {self._index + 1}. The lanes are no longer stepping "
                 "the shared schedule in lockstep."
             )
         while self._index < index:
@@ -344,7 +344,7 @@ class _GeneratorNoiseFields(_NoiseFields):
                 raise RuntimeError(
                     f"ContextAnchoredTileRefine: a lane requested SDE noise draw {index + 1} but "
                     f"this schedule plans {total} ({self._noisy_steps} noisy sigma steps x "
-                    f"{self._draws_per_step} draws) — the draws-per-step contract no longer "
+                    f"{self._draws_per_step} draws). The draws-per-step contract no longer "
                     "matches this ComfyUI's sampler."
                 )
             return self._canvas(index)[..., y0:y1, x0:x1].to(device=sigma.device)
@@ -377,14 +377,14 @@ def _validate_noise_fields(sampler_name, noise_fields):
     if stochastic and noise_fields is None:
         raise ValueError(
             f"ContextAnchoredTileRefine: sampler '{sampler_name}' is stochastic, so it needs the "
-            "shared canvas noise field — build it with stepper.build_noise_fields(...) and pass "
+            "shared canvas noise field. Build it with stepper.build_noise_fields(...) and pass "
             "it as noise_fields. Without it every lane draws its own independent noise and each "
             "overlap band carries two different fields."
         )
     if not stochastic and noise_fields is not None:
         raise ValueError(
             f"ContextAnchoredTileRefine: sampler '{sampler_name}' is deterministic and takes no "
-            "noise_sampler, so noise_fields must be None — which is what build_noise_fields "
+            "noise_sampler, so noise_fields must be None. That is what build_noise_fields "
             "returns for it."
         )
 
@@ -399,7 +399,7 @@ def _reject_carried_noise_sampler(sampler, lane_specs):
             raise ValueError(
                 f"ContextAnchoredTileRefine: {owner} extra_options already carries a "
                 "'noise_sampler'. The synchronized stepper injects the shared canvas-wide field "
-                "every lane draws from, so it would silently replace that one — and a per-lane "
+                "every lane draws from, so it would silently replace that one. A per-lane "
                 "noise sampler is exactly the seam this engine exists to remove."
             )
 
@@ -461,7 +461,7 @@ class _LaneModel:
             raise RuntimeError(
                 f"ContextAnchoredTileRefine: sampler '{scheduler.sampler_name}' asked for model "
                 f"eval {index + 1} but EVALS_PER_STEP predicts {scheduler.total_evals} for this "
-                "schedule — the evals-per-step table no longer matches this ComfyUI's sampler."
+                "schedule. The evals-per-step table no longer matches this ComfyUI's sampler."
             )
 
         lane.x = x
@@ -630,7 +630,7 @@ def _validate_specs(lane_specs):
         if not torch.equal(spec.sigmas, first):
             raise ValueError(
                 f"ContextAnchoredTileRefine: lane {position} was handed a different sigma "
-                "schedule. Every lane must step the SAME schedule — that is the whole point of "
+                "schedule. Every lane must step the SAME schedule, which is the whole point of "
                 "the barrier."
             )
 

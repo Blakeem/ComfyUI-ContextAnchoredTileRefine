@@ -685,8 +685,10 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # direct call, or a single-picture IMAGE — changes nothing.
     import comfy.model_management
 
-    # Opt-in seam debug (CATR_DEBUG_DIR). `_save(name, tensor)` is a no-op when unset, so
-    # nothing below changes the output — only side-effect PNGs and a manifest are written.
+    # Opt-in seam debug (CATR_DEBUG_DIR). Every _save call site sits inside its own
+    # `if debug_dir is not None:` guard, which is what keeps _save undefined and unreachable
+    # when the variable is unset. Nothing below changes the output, only side-effect PNGs and
+    # a manifest are written.
     debug_dir = _debug_dir()
     debug_manifest = []
     if debug_dir is not None:
@@ -695,9 +697,6 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
 
         def _save(name, tensor):
             _dump_png(os.path.join(debug_dir, name), tensor)
-    else:
-        def _save(name, tensor):
-            return None
 
     pixels = image[..., :3]
     padded, (height, width) = pad_image_to_multiple(pixels)
@@ -925,7 +924,6 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 debug_manifest.append(_manifest_line(tile_idx, tile))
             canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :] = decoded
     if debug_dir is not None:
-        import os
         _save("canvas_final.png", crop_image_to(canvas, height, width))
         with open(os.path.join(debug_dir, "manifest.txt"), "w", encoding="utf-8") as manifest_file:
             manifest_file.write("\n".join(debug_manifest) + "\n")
@@ -960,13 +958,13 @@ def _check_sync_intake(sampler, sigmas, sampler_name=None):
         raise ValueError(
             f"Context-Anchored Tile Refine (VL): sampler '{sampler_name}' is not supported by "
             f"the synchronized tile engine. Supported: {', '.join(stepper.SUPPORTED_SAMPLERS)}. "
-            f"{', '.join(stepper.UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN — they own "
+            f"{', '.join(stepper.UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN. They own "
             "their own schedule or internal history, so no evals-per-step entry can time them.")
     stepper._resolve_sampler_name(sampler)
     if not bool(torch.all(sigmas[1:] < sigmas[:-1])) or float(sigmas[-1]) != 0.0:
         raise ValueError(
             "Context-Anchored Tile Refine (VL): every tile of a synchronized run steps ONE "
-            "shared schedule, so sigmas must be strictly decreasing and end at 0.0; got a "
+            "shared schedule, so sigmas must be strictly decreasing and end at 0.0. Got a "
             f"schedule of {int(sigmas.numel())} sigmas from {float(sigmas.reshape(-1)[0])} to "
             f"{float(sigmas.reshape(-1)[-1])}.")
 
@@ -1029,7 +1027,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         if not isinstance(original_conds, dict) or "positive" not in original_conds:
             raise ValueError(
                 "VL refine needs a guider that keeps 'positive' in original_conds "
-                f"(the CFGGuider convention); got {sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__}")
+                f"(the CFGGuider convention). Got {sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__}")
         # ControlNet is a BASE-node feature only. Each tile's positive is replaced outright
         # by a fresh vision-slice cond that carries no control chain, so a cropped hint would
         # reach the negative branch alone — asymmetric CFG, with the hint steering only the

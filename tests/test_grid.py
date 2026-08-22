@@ -40,14 +40,6 @@ def test_t5_five_tiles_pay_2r():
     assert (s.n, s.base, s.last, s.overhead, s.r) == (5, 824, 800, 128, 64)
 
 
-def test_t6_round8_ties_to_even_up():
-    assert grid.round8(1500) == 1504  # 187.5 -> 188 (even)
-
-
-def test_t7_round8_ties_to_even_down():
-    assert grid.round8(1012) == 1008  # 126.5 -> 126 (even)
-
-
 def test_t8_round8_up():
     assert grid.round8_up(1541) == 1544
     assert grid.round8_up(1536) == 1536
@@ -175,7 +167,7 @@ def test_grid_config_error_axis_names_the_widgets():
     for token in ("L=64", "cap=4", "ctx=8", "overlap=8"):
         assert token in message
     assert "max_tile_width 4 cannot hold context_anchor 8 + context_overlap 8" in message
-    assert "raise max_tile_width or lower context_overlap" in message
+    assert "Raise max_tile_width or lower context_overlap" in message
 
 
 def test_solver_exhausted_guard():

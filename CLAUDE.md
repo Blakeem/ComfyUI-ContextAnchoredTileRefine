@@ -182,8 +182,11 @@ without that doc's temporal design.
   space (comfy applies `process_latent_in` itself inside `guider.sample`) and is always a SLICE
   of the one C_0, so two overlapping lanes hold equal values on every shared cell at step 0;
   the canvas this engine MAINTAINS lives in PROCESS space, because the lanes' live `.x` tensors
-  are already there. The two spaces are never mixed — a window headed for `vae.decode` is
-  converted back with `process_latent_out`. `check_preconditions` runs before any GPU time
+  are already there, and is cast to **float32** because `vae.encode` writes at
+  `intermediate_dtype()` (fp16 under `--fp16-intermediates`) while every lane's `x` is float32,
+  so an fp16 canvas would round the consolidated trajectory once per step and scatter the
+  rounded values back into every lane. The two spaces are never mixed — a window headed for
+  `vae.decode` is converted back with `process_latent_out`. `check_preconditions` runs before any GPU time
   (strictly decreasing sigmas ending at 0, a CONST flow model, core's default
   `scale_latent_inpaint`, and — live-canvas only — `sigmas[0] < 1`, where that mode's `x / (1 -
   sigma)` algebra is defined). The lead ring is entered ONCE around the whole lane set (see the
@@ -222,7 +225,11 @@ without that doc's temporal design.
   encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
   `clip.generate(do_sample=False, repetition_penalty=1.05)` -> `strip_thinking` (mandatory —
   core's plain `TextGenerate` does NOT strip, and an unstripped `<think>` block reaches the
-  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. **The
+  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. `_THINK_BLOCK`
+  carries core's own `(?:</think>|$)` alternation and it is load-bearing: without the `|$` a
+  tile whose reasoning turn exhausts `max_tokens` returns that REASONING as its caption,
+  non-empty, so `generate_caption`'s fallback chain never fires and the model's deliberation
+  becomes the tile's whole positive. **The
   instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED PRESETS
   since 2026-08-22** (`load_settings` / `resolve_method` / `vlm_methods`), deployed with the
   node. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,

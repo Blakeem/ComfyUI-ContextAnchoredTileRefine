@@ -349,20 +349,6 @@ footer {
  * until END PURE GRID MATH). Mirrors context_anchored_tile_refine/grid.py.
  * ===================================================================== */
 
-/** Round half-to-even (banker's rounding), matching Python round(). */
-function roundHalfEven(x) {
-  var f = Math.floor(x);
-  var d = x - f;
-  if (d < 0.5) return f;
-  if (d > 0.5) return f + 1;
-  return (f % 2 === 0) ? f : f + 1;
-}
-
-/** Nearest multiple of 8, ties to even — matches grid.round8(). */
-function round8(x) {
-  return roundHalfEven(x / 8) * 8;
-}
-
 /** Smallest multiple of `multiple` that is >= x — matches grid.round_up_multiple(). */
 function roundUpMultiple(x, multiple) {
   return Math.ceil(x / multiple) * multiple;
@@ -569,18 +555,6 @@ var SELF_TESTS = [
          n=5: base round8Up(ceil(4096/5)=820)=824, +128 = 952 <= 1024; last=4096-4*824=800. */
       var s = solveAxis(4096, 1024, 0, 64);
       return expect(s, { ok: true, n: 5, base: 824, last: 800, overhead: 128, r: 64 });
-    }
-  },
-  {
-    name: "round8 ties-to-even matches Python round(): round8(1500)=1504",
-    run: function () {
-      return expect({ v: round8(1500) }, { v: 1504 }); /* 187.5 -> 188 (even) */
-    }
-  },
-  {
-    name: "round8 ties-to-even, downward: round8(1012)=1008",
-    run: function () {
-      return expect({ v: round8(1012) }, { v: 1008 }); /* 126.5 -> 126 (even) */
     }
   },
   {

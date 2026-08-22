@@ -115,7 +115,7 @@ def _latent_rect(rect):
     # instead of shearing every window, mask and feather by a fraction of a cell.
     coords = (rect.x0, rect.y0, rect.x1, rect.y1)
     if any(c % 8 for c in coords):
-        raise RuntimeError(f"tile rect {coords} is not /8 — latent scaling would shear")
+        raise RuntimeError(f"tile rect {coords} is not /8, so latent scaling would shear")
     return grid.Rect(rect.x0 // 8, rect.y0 // 8, rect.x1 // 8, rect.y1 // 8)
 
 
@@ -134,8 +134,8 @@ def encode_canvas_latent(vae, padded, tiles, progress=None):
         latent = sampling.encode_pixels(vae, padded[:, crop.y0:crop.y1, crop.x0:crop.x1, :]).detach()
         if latent.shape[-2:] != ((crop.y1 - crop.y0) // 8, (crop.x1 - crop.x0) // 8):
             raise RuntimeError(
-                f"window encode shape {tuple(latent.shape[-2:])} != crop {crop} at /8 — "
-                "this VAE's spatial compression is not the /8 the grid math models")
+                f"window encode shape {tuple(latent.shape[-2:])} != crop {crop} at /8. "
+                "This VAE's spatial compression is not the /8 the grid math models")
         if canvas is None:
             canvas = torch.zeros((*latent.shape[:-2], h8, w8), dtype=latent.dtype, device=latent.device)
         cy0, cy1 = (core.y0 - crop.y0) // 8, (core.y1 - crop.y0) // 8
@@ -148,7 +148,7 @@ def encode_canvas_latent(vae, padded, tiles, progress=None):
             # no pbar at all, so nothing else here would move it.
             progress.advance((index + 1) * W_ENCODE_TILE)
     if canvas is None or not bool(covered.all()):
-        raise RuntimeError("tile cores do not tile the latent canvas — coverage hole")
+        raise RuntimeError("tile cores do not tile the latent canvas. There is a coverage hole")
     return canvas
 
 
@@ -164,7 +164,7 @@ def check_preconditions(model_patcher, sigmas, anchor_source):
     import comfy.model_sampling
 
     if not torch.all(sigmas[1:] < sigmas[:-1]):
-        raise RuntimeError("sigmas are not strictly decreasing — every lane steps ONE shared schedule")
+        raise RuntimeError("sigmas are not strictly decreasing. Every lane steps ONE shared schedule")
     if float(sigmas[-1]) != 0.0:
         raise RuntimeError("schedule does not end at sigma 0")
     model_sampling = model_patcher.get_model_object("model_sampling")
@@ -173,17 +173,17 @@ def check_preconditions(model_patcher, sigmas, anchor_source):
         # (1-sigma)*latent). On an EPS/V_PREDICTION model the same expression mis-scales
         # silently, so this is a hard error rather than a fallback: from 1.6.0 sync is the
         # only VL path, and the base node is the raster path for every other model family.
-        raise RuntimeError("sync stepping is derived for CONST (flow) models; got "
+        raise RuntimeError("sync stepping is derived for CONST (flow) models. Got "
                            f"{type(model_sampling).__name__}")
     # model_patcher.model is the comfy BaseModel — _model_re_noises_anchor walks the BASE
     # model's __mro__ (the patcher's has no scale_latent_inpaint and would always answer False).
     if not sampling._model_re_noises_anchor(model_patcher.model):
-        raise RuntimeError("model overrides scale_latent_inpaint — the frozen-ring construction "
-                           "does not hold; sync mode is untested there")
+        raise RuntimeError("model overrides scale_latent_inpaint, so the frozen-ring "
+                           "construction does not hold. Sync mode is untested there")
     if anchor_source == ANCHOR_SOURCE_CANVAS and float(sigmas[0]) >= 1.0:
         raise RuntimeError(
             f"anchor_source '{ANCHOR_SOURCE_CANVAS}' presents the ring as x / (1 - sigma), which "
-            f"is undefined at sigma 1.0; this schedule starts at {float(sigmas[0])}. Lower denoise, "
+            f"is undefined at sigma 1.0. This schedule starts at {float(sigmas[0])}. Lower denoise, "
             f"or use anchor_source '{ANCHOR_SOURCE_IMAGE}'.")
 
 
@@ -268,7 +268,7 @@ def build_lane_guiders(guider, tile_positives):
     if not isinstance(pristine_conds, dict) or "positive" not in pristine_conds:
         raise ValueError(
             "Context-Anchored Tile Refine (sync): the guider must keep 'positive' in "
-            "original_conds (the CFGGuider convention); got "
+            "original_conds (the CFGGuider convention). Got "
             f"{sorted(pristine_conds) if isinstance(pristine_conds, dict) else type(pristine_conds).__name__}")
     stripped_conds = conds.strip_control(pristine_conds)
 
@@ -313,7 +313,7 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
         raise ValueError(f"anchor_source must be one of {list(ANCHOR_SOURCES)}, got {anchor_source!r}")
     if vl_clip is None:
         raise ValueError(
-            "Context-Anchored Tile Refine (sync): the sync engine is the VL path — every lane's "
+            "Context-Anchored Tile Refine (sync): the sync engine is the VL path. Every lane's "
             "positive is its tile's slice of the VL encode, so it needs the VL CLIP.")
     # ONE settings read for the whole picture, before any GPU time: the ledger's caption
     # count and the pre-pass's own must come from the same block, and a file edited mid-run
@@ -363,7 +363,7 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
                                           vl_context=vl_context, progress=progress)
     if len(tile_positives) != len(tiles):
         raise RuntimeError(
-            f"the VL pre-pass built {len(tile_positives)} positives for {len(tiles)} tiles — the "
+            f"the VL pre-pass built {len(tile_positives)} positives for {len(tiles)} tiles. The "
             "conditioning and the tiling disagree about the layout")
     # The per-tile VAE window encodes are their own phase: one vae.encode per tile, minutes on
     # a large grid, and until now the only phase with no bar of any kind. Closed before the
@@ -381,7 +381,14 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
             "into frames, or a non-8x spatial compression).")
 
     model = guider.model_patcher.model
-    canvas = model.process_latent_in(raw_latent)
+    # float32, never the VAE's output dtype. vae.encode writes at intermediate_dtype(), which
+    # is fp16 under --fp16-intermediates, and process_latent_in is a multiply that preserves
+    # it. Every lane's live `x` is float32 (comfy applies that itself), so an fp16 canvas
+    # would round the consolidated trajectory once per step and scatter the rounded values
+    # back into every lane. Prime directive 1 does not trade that away for a smaller canvas.
+    canvas = model.process_latent_in(raw_latent).to(torch.float32)
+    # AFTER the cast, never before it: .to() returns the SAME object when the dtype already
+    # matches, so an fp32 VAE still reaches this guard with the alias intact.
     if canvas.data_ptr() == raw_latent.data_ptr():
         # The maintained canvas must never alias C_0: the lanes' frozen rings are restored
         # from their RAW latent at every eval, so a canvas write would rewrite what they are

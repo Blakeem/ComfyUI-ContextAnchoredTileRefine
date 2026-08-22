@@ -139,7 +139,10 @@ def test_patcher_branch_hands_the_managed_model_to_load_models_gpu(comfy_stubs):
 
     upscale._upscale_with_model(model, image)
 
-    assert comfy_stubs["load_models_gpu_calls"] == [([patcher], _memory_required(image, 2))]
+    # force_full_load=True is core's own argument (nodes_upscale_model.py:73). Without it a
+    # spandrel module past the lowvram budget is never moved to the device, and the forward
+    # pass raises a device mismatch that raise_non_oom re-raises before the retry can run.
+    assert comfy_stubs["load_models_gpu_calls"] == [([patcher], _memory_required(image, 2), True)]
     # load_models_gpu owns residency on this branch: no hand-rolled reserve, no .to().
     assert comfy_stubs["free_memory_calls"] == []
     assert model.devices == []

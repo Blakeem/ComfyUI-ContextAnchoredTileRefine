@@ -409,9 +409,12 @@ def test_the_settings_file_reaches_the_registry_archive():
     # A stray close with no open (the model reopened mid-answer): keep what follows the LAST
     # close, which is core's own rule in TextGenerateLTX2Prompt.
     ("<think>one</think>middle</think>the answer", "the answer"),
-    # Unbalanced open with no close at all: the tags go, the text stays — there is no
-    # reasoning boundary to cut on, and dropping the whole answer would be worse.
-    ("<think>never closed", "never closed"),
+    # Unbalanced open with no close at all. With thinking=True there is no answer in the
+    # string, only a reasoning turn that ran out of budget, so "" is the honest result and it
+    # is what makes generate_caption's fallback chain fire. Core's own rule, and returning the
+    # reasoning instead would send it to the DiT as the tile's prompt.
+    ("<think>never closed", ""),
+    ("<think>reasoning that ran out of tok", ""),
 ])
 def test_strip_thinking(raw, expected):
     # Mandatory, not cosmetic: the caption is encoded as text, so an unstripped block reaches

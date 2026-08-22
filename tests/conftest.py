@@ -226,8 +226,8 @@ def comfy_stubs(monkeypatch):
 
     model_management_module.free_memory = free_memory
 
-    def load_models_gpu(models, memory_required=0):
-        recorded["load_models_gpu_calls"].append((list(models), memory_required))
+    def load_models_gpu(models, memory_required=0, force_full_load=False):
+        recorded["load_models_gpu_calls"].append((list(models), memory_required, force_full_load))
 
     model_management_module.load_models_gpu = load_models_gpu
 

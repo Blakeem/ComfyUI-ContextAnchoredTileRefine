@@ -66,17 +66,26 @@ def _upscale_with_model(upscale_model, image, progress=None):
     oom = True
     upscaled = None
 
-    if patcher is not None:
-        device = patcher.load_device
-        comfy.model_management.load_models_gpu([patcher], memory_required=memory_required)
-    else:
-        device = comfy.model_management.get_torch_device()
-        comfy.model_management.free_memory(memory_required, device)
-        upscale_model.to(device)
-
-    # The try opens on the statement AFTER the device move: the large VRAM copy below is the
-    # most likely thing here to OOM, and outside the try it would strand the module on the GPU.
+    # The try opens BEFORE the device move, not after it. nn.Module.to walks submodule
+    # parameters one at a time, so an OOM part-way through leaves some on CUDA and some on
+    # CPU inside an object ComfyUI caches across executions, and every later run of that
+    # cached object then fails with a device mismatch unrelated to the original cause.
     try:
+        if patcher is not None:
+            device = patcher.load_device
+            # force_full_load=True is core's own argument (nodes_upscale_model.py:73) and is
+            # required, not cosmetic. Without it load_models_gpu computes a lowvram budget,
+            # and a spandrel architecture is plain torch.nn with no comfy_cast_weights, so a
+            # module past that budget is never moved to the device at all. The forward pass
+            # then raises a device mismatch, which raise_non_oom re-raises before the
+            # tile-halving retry can run.
+            comfy.model_management.load_models_gpu([patcher], memory_required=memory_required,
+                                                   force_full_load=True)
+        else:
+            device = comfy.model_management.get_torch_device()
+            comfy.model_management.free_memory(memory_required, device)
+            upscale_model.to(device)
+
         in_img = image.movedim(-1, -3).to(device)
         output_device = comfy.model_management.intermediate_device()
         while oom:

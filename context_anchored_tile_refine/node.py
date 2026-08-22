@@ -12,7 +12,7 @@ def _anchor_source():
     # VL nodes ONLY: the base node is the raster path, whose ring is always the source.
     from . import sync
 
-    return (list(sync.ANCHOR_SOURCES), {"default": sync.ANCHOR_SOURCE_IMAGE, "tooltip": "What the frozen context ring around each tile shows the model. source image: the unmodified input, presented on the settled lead schedule. Maximum fidelity — placement, style, and objects stay locked to the input, including its flaws. live canvas: the in-progress result itself. The refine may reinterpret or repair damaged content the captions describe; expect more invention and slightly brighter output."})
+    return (list(sync.ANCHOR_SOURCES), {"default": sync.ANCHOR_SOURCE_IMAGE, "tooltip": "What the frozen context ring around each tile shows the model. source image shows the unmodified input, presented on the settled lead schedule. That is maximum fidelity, so placement, style and objects stay locked to the input, including its flaws. live canvas shows the in-progress result itself. The refine may reinterpret or repair damaged content the captions describe. Expect more invention and slightly brighter output."})
 
 
 def _vlm_method():
@@ -68,11 +68,11 @@ class ContextAnchoredTileRefine:
                 "noise": ("NOISE", {"tooltip": "The noise source (e.g. from RandomNoise) used when sampling each tile."}),
                 "max_tile_width": ("INT", {"default": 1024, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
                 "max_tile_height": ("INT", {"default": 1024, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge (including up against a mask) then cropped away. With a mask it also sets the frozen-background halo the masked region conditions against — keep it > 0. Always additive: the ring outside a tile core is context_overlap + context_anchor. 32-256 is the useful range; 32 suits most scenes."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width (multi-tile runs only; never applied at a mask boundary). Each tile is sampled oversized; on sides bordering an already-processed neighbor (top/left) this band is fully diffused and feathered into that neighbor (100% at the seam → 0% over the band); elsewhere it's context, then cropped. 32-256 is the useful range: DETAILED scenes need LESS (32 is invisible even when you know where the seam is) because the seam has texture to hide in and to route through, while a large smooth gradient (an open night sky) is the hard case and wants 128+. 0 = hard seams."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge, including up against a mask, then cropped away. With a mask it also sets the frozen-background halo the masked region conditions against, so keep it above 0. It is always additive, so the ring outside a tile core is context_overlap + context_anchor. The useful range is 32 to 256 and 32 suits most scenes."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width, on multi-tile runs only. It is never applied at a mask boundary. Each tile is sampled oversized. On sides bordering an already-processed neighbor (top and left) this band is fully diffused and feathered into that neighbor, at 100% on the seam falling to 0% over the band. Elsewhere it is context, then cropped. The useful range is 32 to 256. DETAILED scenes need LESS, and 32 is invisible even when you know where the seam is, because the seam has texture to hide in and to route through. A large smooth gradient such as an open night sky is the hard case and wants 128 or more. 0 gives hard seams."}),
             },
             "optional": {
-                "mask": ("MASK", {"tooltip": "Optional region mask: only the masked region is refined (hardened at 0.5), cropped to the mask plus context_anchor, with a 1px anti-aliased edge; the unmasked background is left untouched. Feed an inverted mask for a second pass."}),
+                "mask": ("MASK", {"tooltip": "Optional region mask. Only the masked region is refined, hardened at 0.5, cropped to the mask plus context_anchor, with a 1px anti-aliased edge. The unmasked background is left untouched. Feed an inverted mask for a second pass."}),
             },
         }
 
@@ -154,7 +154,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # their defaults — which is the pre-select behaviour.
         input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
-        input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode; the guider's positive prompt is ignored, the negative still applies."})
+        input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP, which must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode. The guider's positive prompt is ignored and the negative still applies."})
         # The node's own id, so the ledger can write the live phase line under its progress
         # bar. Hidden inputs create no socket and no widget and never enter widgets_values,
         # so this is invisible to the append-only widget rule above. ComfyUI passes it to
@@ -203,7 +203,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             "required": {
                 "image": ("IMAGE", {"tooltip": "The image to upscale and then refine tile by tile."}),
                 "model": ("MODEL", {"tooltip": "The diffusion model used to denoise each tile."}),
-                "clip": ("CLIP", {"tooltip": "The workflow's CLIP — must be a vision-language text encoder (Krea 2 family). The whole upscaled image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode."}),
+                "clip": ("CLIP", {"tooltip": "The workflow's CLIP, which must be a vision-language text encoder (Krea 2 family). The whole upscaled image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode."}),
                 "vae": ("VAE", {"tooltip": "The VAE used to encode each tile for sampling and decode the result."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Seed for the noise. Noise is drawn once for the whole image and sliced per tile, so a tile's noise does not change when the grid does."}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m", "tooltip": "The sampler used to denoise each tile."}),
@@ -211,11 +211,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "Sampling steps per tile. As in BasicScheduler, the schedule is built for steps/denoise steps and only the last steps+1 sigmas are used."}),
                 "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01, "tooltip": "Classifier-free guidance scale applied against the negative conditioning."}),
                 "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much of the schedule to run per tile: 1.0 rewrites the tile, lower values keep more of the upscaled pixels. 0.0 skips diffusion entirely and returns the upscale alone."}),
-                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Target scale for the whole-image upscale stage that runs before any tiling. The optional upscale_model runs first and this factor sets the final size; 1.0 with no model leaves the input pixels untouched."}),
+                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Target scale for the whole-image upscale stage that runs before any tiling. The optional upscale_model runs first and this factor sets the final size. 1.0 with no model leaves the input pixels untouched."}),
                 "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
                 "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge then cropped away. Always additive: the ring outside a tile core is context_overlap + context_anchor. 32-256 is the useful range; 32 suits most scenes."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width (multi-tile runs only). Each tile is sampled oversized; on sides bordering an already-processed neighbor (top/left) this band is fully diffused and feathered into that neighbor (100% at the seam → 0% over the band); elsewhere it's context, then cropped. 32-256 is the useful range: DETAILED scenes need LESS (32 is invisible even when you know where the seam is), while a large smooth gradient (an open night sky) wants 128+. 0 = hard seams."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge, then cropped away. It is always additive, so the ring outside a tile core is context_overlap + context_anchor. The useful range is 32 to 256 and 32 suits most scenes."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width, on multi-tile runs only. Each tile is sampled oversized. On sides bordering an already-processed neighbor (top and left) this band is fully diffused and feathered into that neighbor, at 100% on the seam falling to 0% over the band. Elsewhere it is context, then cropped. The useful range is 32 to 256. DETAILED scenes need LESS, and 32 is invisible even when you know where the seam is. A large smooth gradient such as an open night sky wants 128 or more. 0 gives hard seams."}),
                 # Last, never beside the ring it describes: the frontend restores a saved
                 # workflow's widgets_values POSITIONALLY, so a widget added mid-list shifts
                 # every value after it. Past the end of a legacy array the restore loop stops
@@ -266,7 +266,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             # small image can leave here below 8px on an axis — where the /8 reflect pad (which
             # needs pad < dim) would raise naming neither this node nor the widget that did it.
             if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
-                raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}; the upscaled image must be at least 8x8 pixels")
+                raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}. The upscaled image must be at least 8x8 pixels")
 
             # One empty encode serves as the positive placeholder (vl.py replaces every tile's
             # positive with its slice of the whole-image vision encode) and, unless the optional

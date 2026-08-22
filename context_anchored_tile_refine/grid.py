@@ -13,12 +13,12 @@ class GridConfigError(ValueError):
     # context_anchor per seam side. Carries the simulator's failure fields as attributes.
     def __init__(self, L, cap, ctx, overlap, r, fail_n, fail_base, reason, axis=None):
         # `axis` ("width"/"height") is optional so the internal symbols above can be followed
-        # by one sentence in the caller's own widget names — nothing in the leading text names
+        # by one sentence in the caller's own widget names. Nothing in the leading text names
         # anything the user typed, and VALIDATE_INPUTS cannot pre-empt this (it never sees the
         # image).
         widgets = "" if axis is None else (
-            f" — max_tile_{axis} {cap} cannot hold context_anchor {ctx} + context_overlap {overlap} "
-            f"on both sides; raise max_tile_{axis} or lower context_overlap."
+            f". max_tile_{axis} {cap} cannot hold context_anchor {ctx} + context_overlap {overlap} "
+            f"on both sides. Raise max_tile_{axis} or lower context_overlap."
         )
         super().__init__(
             f"caps too small for overlap + context: L={L} cap={cap} ctx={ctx} overlap={overlap} "
@@ -95,12 +95,6 @@ class Layout:
     tiles: tuple
     total_sampled_px: int
     clamped_tiles: int
-
-
-def round8(x):
-    # Nearest multiple of 8; Python's built-in round() is half-to-even (banker's
-    # rounding), matching the simulator's roundHalfEven.
-    return round(x / 8) * 8
 
 
 def round_up_multiple(x, multiple):

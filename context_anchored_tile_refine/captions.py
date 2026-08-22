@@ -378,7 +378,12 @@ def caption_budget_pixels(megapixels, source):
     return round(megapixels * 1_000_000)
 
 
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+# The alternation is core's own (comfy_extras/nodes_textgen.py:261) and is load-bearing:
+# without the `|$` an unclosed open makes the sub a no-op, and a tile whose reasoning turn
+# exhausts max_tokens returns that reasoning AS its caption. Non-empty, so generate_caption's
+# fallback chain never fires and the model's own deliberation reaches the DiT as the tile's
+# whole positive.
+_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
 
 _META_LINE = ("wait,", "wait ", "here's a revised", "here is a revised", "revised version",
               "let me", "i need to", "actually,")
@@ -404,9 +409,12 @@ def strip_thinking(text):
     """Cut Qwen3's reasoning turn off the front of an answer.
 
     Mirrors comfy_extras/nodes_textgen.py TextGenerateLTX2Prompt, which is the only place
-    core does this — the plain TextGenerate node returns the reasoning to the user. Here it
-    is mandatory: the caption is encoded as text, so an unstripped <think> block would reach
-    the DiT as several hundred tokens of the model talking to itself."""
+    core does this. The plain TextGenerate node returns the reasoning to the user. Here it is
+    mandatory, because the caption is encoded as text, so an unstripped <think> block would
+    reach the DiT as several hundred tokens of the model talking to itself.
+
+    An answer that is nothing BUT an unclosed reasoning turn comes back "", which is what
+    makes generate_caption's fallback chain fire on it."""
     if "<think>" not in text:
         return text.strip()
     body = _THINK_BLOCK.sub("", text)
@@ -477,7 +485,7 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True):
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): this CLIP cannot generate text. The caption "
             "vlm_methods need a vision-language text encoder with a text-generation head "
-            "(Krea 2 family); use vlm_method 'vision tokens' with any other CLIP.")
+            "(Krea 2 family). Use vlm_method 'vision tokens' with any other CLIP.")
 
     tokens, _tail = _tokenize_images(clip, instruction, vl_input, thinking=thinking)
     ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
@@ -660,12 +668,12 @@ def _cat_rows(vision_entries, caption_entries):
         if stray:
             raise RuntimeError(
                 "Context-Anchored Tile Refine (VL): the caption encode carries conditioning "
-                f"extras the vision encode lacks ({stray}); concatenating the rows would drop "
+                f"extras the vision encode lacks ({stray}). Concatenating the rows would drop "
                 "them silently.")
         if caption_extras.get("pooled_output") is not None:
             raise RuntimeError(
                 "Context-Anchored Tile Refine (VL): the caption encode has a real "
-                "pooled_output; the concatenated positive keeps the vision encode's, so this "
+                "pooled_output. The concatenated positive keeps the vision encode's, so this "
                 "one would be dropped silently.")
         rows = torch.cat([vision[0], caption[0].to(vision[0].device, vision[0].dtype)], dim=1)
         merged.append([rows, vision_extras])
