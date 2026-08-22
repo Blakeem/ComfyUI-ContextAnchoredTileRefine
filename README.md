@@ -167,6 +167,12 @@ The same VL model writes a short description of each tile from that tile's crop 
 
 The default method combines the tile's vision slice and its own caption in a single conditioning. The shared encode keeps the tile faithful to the picture and coherent with its neighbors. The caption names what is there and adds detail. The cost is one shared encode plus one caption per tile.
 
+#### Caption prompts
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The prompts behind both caption methods live in `prompts.toml` in the node's folder, and edits apply on the next run. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the whole image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption.
+
 ### Regions, batches, and control
 
 #### Masked refine
@@ -189,7 +195,6 @@ The `guider` input takes any guider, including NAG for models without negative p
 
 ## Example workflows
 
-- [Krea 2 upscale workflow](Krea%202.json)
 - [Krea 2 8K upscale workflow](Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
 - [Krea 2 refine workflow](Krea%202%20(refine).json)
 - [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)

@@ -16,7 +16,7 @@
         840
       ],
       "flags": {},
-      "order": 38,
+      "order": 37,
       "mode": 2,
       "inputs": [
         {
@@ -52,7 +52,7 @@
         110
       ],
       "flags": {},
-      "order": 39,
+      "order": 38,
       "mode": 2,
       "inputs": [
         {
@@ -99,7 +99,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 40,
+      "order": 39,
       "mode": 2,
       "inputs": [
         {
@@ -142,7 +142,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 35,
+      "order": 34,
       "mode": 2,
       "inputs": [
         {
@@ -227,7 +227,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 24,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -273,7 +273,7 @@
         100
       ],
       "flags": {},
-      "order": 22,
+      "order": 21,
       "mode": 0,
       "inputs": [
         {
@@ -322,50 +322,6 @@
       "bgcolor": "#3f5159"
     },
     {
-      "id": 339,
-      "type": "PrimitiveNode",
-      "pos": [
-        2660,
-        430
-      ],
-      "size": [
-        210,
-        110
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "COMBO",
-          "type": "COMBO",
-          "widget": {
-            "name": "scheduler"
-          },
-          "links": [
-            919
-          ]
-        }
-      ],
-      "title": "Scheduler",
-      "properties": {
-        "Run widget replace on values": false
-      },
-      "widgets_values": [
-        "sgm_uniform",
-        "fixed",
-        ""
-      ],
-      "widgets_values_named": {
-        "value": "sgm_uniform",
-        "control_after_generate": "fixed",
-        "control_filter_list": ""
-      },
-      "color": "#2a363b",
-      "bgcolor": "#3f5159"
-    },
-    {
       "id": 336,
       "type": "SamplerCustomAdvanced",
       "pos": [
@@ -377,7 +333,7 @@
         110
       ],
       "flags": {},
-      "order": 23,
+      "order": 22,
       "mode": 0,
       "inputs": [
         {
@@ -442,7 +398,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 18,
+      "order": 16,
       "mode": 0,
       "inputs": [
         {
@@ -479,80 +435,6 @@
       "bgcolor": "#3f5159"
     },
     {
-      "id": 306,
-      "type": "int",
-      "pos": [
-        2410,
-        740
-      ],
-      "size": [
-        210,
-        60
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": []
-        }
-      ],
-      "title": "Upscale Multiplier",
-      "properties": {
-        "Node name for S&R": "int"
-      },
-      "widgets_values": [
-        4
-      ],
-      "widgets_values_named": {
-        "value": 4
-      },
-      "color": "#2a363b",
-      "bgcolor": "#3f5159"
-    },
-    {
-      "id": 315,
-      "type": "PrimitiveFloat",
-      "pos": [
-        2410,
-        880
-      ],
-      "size": [
-        210,
-        60
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "FLOAT",
-          "type": "FLOAT",
-          "links": [
-            937,
-            997,
-            1031
-          ]
-        }
-      ],
-      "title": "CFG",
-      "properties": {
-        "Node name for S&R": "PrimitiveFloat"
-      },
-      "widgets_values": [
-        3.5
-      ],
-      "widgets_values_named": {
-        "value": 3.5
-      },
-      "color": "#2a363b",
-      "bgcolor": "#3f5159"
-    },
-    {
       "id": 293,
       "type": "PlaySound|pysssss",
       "pos": [
@@ -564,7 +446,7 @@
         110
       ],
       "flags": {},
-      "order": 25,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -609,7 +491,7 @@
         60
       ],
       "flags": {},
-      "order": 4,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -650,7 +532,7 @@
         60
       ],
       "flags": {},
-      "order": 5,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -692,7 +574,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 19,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -763,7 +645,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 6,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -804,7 +686,7 @@
         110
       ],
       "flags": {},
-      "order": 7,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -847,7 +729,7 @@
         710
       ],
       "flags": {},
-      "order": 27,
+      "order": 26,
       "mode": 0,
       "inputs": [
         {
@@ -874,45 +756,6 @@
       "bgcolor": "#653"
     },
     {
-      "id": 346,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        2920,
-        540
-      ],
-      "size": [
-        520,
-        160
-      ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 8,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            865
-          ]
-        }
-      ],
-      "title": "Negative Prompt",
-      "properties": {
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "jpeg compression, scribbles, AI generated, hredded cloth"
-      ],
-      "widgets_values_named": {
-        "value": "jpeg compression, scribbles, AI generated, hredded cloth"
-      },
-      "color": "#322",
-      "bgcolor": "#533"
-    },
-    {
       "id": 283,
       "type": "UNETLoader",
       "pos": [
@@ -924,7 +767,7 @@
         90
       ],
       "flags": {},
-      "order": 9,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -962,7 +805,7 @@
         90
       ],
       "flags": {},
-      "order": 17,
+      "order": 15,
       "mode": 4,
       "inputs": [
         {
@@ -1011,7 +854,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 21,
+      "order": 20,
       "mode": 0,
       "inputs": [
         {
@@ -1079,7 +922,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 16,
+      "order": 19,
       "mode": 0,
       "inputs": [
         {
@@ -1137,7 +980,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 20,
+      "order": 18,
       "mode": 0,
       "inputs": [
         {
@@ -1191,7 +1034,7 @@
         110
       ],
       "flags": {},
-      "order": 10,
+      "order": 6,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1235,7 +1078,7 @@
         60
       ],
       "flags": {},
-      "order": 11,
+      "order": 7,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1272,7 +1115,7 @@
         60
       ],
       "flags": {},
-      "order": 12,
+      "order": 8,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1311,7 +1154,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 13,
+      "order": 9,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -1342,7 +1185,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 26,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
@@ -1383,104 +1226,423 @@
       "bgcolor": "#353"
     },
     {
-      "id": 364,
-      "type": "ContextAnchoredTileUpscaleVL",
+      "id": 371,
+      "type": "LiebsPicker",
       "pos": [
-        4030,
+        4970,
+        680
+      ],
+      "size": [
+        210,
+        90
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 31,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1023
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGES",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "IMAGES",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LiebsPicker"
+      },
+      "widgets_values": [
+        "none",
+        null,
+        null
+      ],
+      "widgets_values_named": {
+        "selected": "none",
+        "picker_tab_id": null,
+        "title": null
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 286,
+      "type": "SaveImage",
+      "pos": [
+        5010,
+        490
+      ],
+      "size": [
+        210,
+        290
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 947
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "ComfyUI-2x"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "ComfyUI-2x"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 375,
+      "type": "SaveImage",
+      "pos": [
+        6210,
+        450
+      ],
+      "size": [
+        210,
+        290
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 35,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1036
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "ComfyUI-2x"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "ComfyUI-2x"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 287,
+      "type": "PlaySound|pysssss",
+      "pos": [
+        4950,
+        840
+      ],
+      "size": [
+        240,
+        110
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "any",
+          "type": "*",
+          "link": 948
+        }
+      ],
+      "outputs": [
+        {
+          "name": "*",
+          "shape": 6,
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PlaySound|pysssss"
+      },
+      "widgets_values": [
+        "on empty queue",
+        0.5,
+        "notify.mp3"
+      ],
+      "widgets_values_named": {
+        "mode": "on empty queue",
+        "volume": 0.5,
+        "file": "notify.mp3"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 373,
+      "type": "PreviewImage",
+      "pos": [
+        5590,
         290
       ],
       "size": [
-        340,
-        520
+        520,
+        710
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1033
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            1034,
+            1036,
+            1037
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 376,
+      "type": "PlaySound|pysssss",
+      "pos": [
+        6130,
+        750
+      ],
+      "size": [
+        240,
+        110
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "any",
+          "type": "*",
+          "link": 1037
+        }
+      ],
+      "outputs": [
+        {
+          "name": "*",
+          "shape": 6,
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PlaySound|pysssss"
+      },
+      "widgets_values": [
+        "on empty queue",
+        0.5,
+        "notify.mp3"
+      ],
+      "widgets_values_named": {
+        "mode": "on empty queue",
+        "volume": 0.5,
+        "file": "notify.mp3"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 345,
+      "type": "int",
+      "pos": [
+        2670,
+        610
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            916
+          ]
+        }
+      ],
+      "title": "Batch Size",
+      "properties": {
+        "Node name for S&R": "int"
+      },
+      "widgets_values": [
+        1
+      ],
+      "widgets_values_named": {
+        "value": 1
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 344,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2920,
+        290
+      ],
+      "size": [
+        520,
+        210
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            863
+          ]
+        }
+      ],
+      "title": "Positive Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus"
+      ],
+      "widgets_values_named": {
+        "value": "Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 328,
+      "type": "PreviewImage",
+      "pos": [
+        4390,
+        290
+      ],
+      "size": [
+        520,
+        710
       ],
       "flags": {},
       "order": 28,
       "mode": 0,
       "inputs": [
         {
-          "name": "image",
+          "name": "images",
           "type": "IMAGE",
-          "link": 1002
-        },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1021
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 1000
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 996
-        },
-        {
-          "name": "upscale_model",
-          "shape": 7,
-          "type": "UPSCALE_MODEL",
-          "link": 995
-        },
-        {
-          "name": "negative",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 1017
-        },
-        {
-          "name": "cfg",
-          "type": "FLOAT",
-          "widget": {
-            "name": "cfg"
-          },
-          "link": 997
+          "link": 992
         }
       ],
       "outputs": [
         {
-          "name": "IMAGE",
+          "name": "images",
           "type": "IMAGE",
           "links": [
-            992
+            947,
+            948,
+            1023,
+            1038
           ]
         }
       ],
       "properties": {
-        "Node name for S&R": "ContextAnchoredTileUpscaleVL"
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 346,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2920,
+        540
+      ],
+      "size": [
+        520,
+        160
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            865
+          ]
+        }
+      ],
+      "title": "Negative Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        42,
-        "fixed",
-        "dpmpp_2m_sde",
-        "sgm_uniform",
-        28,
-        3.5,
-        0.5,
-        4,
-        2048,
-        1536,
-        32,
-        256,
-        "live canvas",
-        "captions"
+        "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
       ],
       "widgets_values_named": {
-        "seed": 42,
-        "control_after_generate": "fixed",
-        "sampler_name": "dpmpp_2m_sde",
-        "scheduler": "sgm_uniform",
-        "steps": 28,
-        "cfg": 3.5,
-        "denoise": 0.5,
-        "upscale_by": 4,
-        "max_tile_width": 2048,
-        "max_tile_height": 1536,
-        "context_anchor": 32,
-        "context_overlap": 256,
-        "anchor_source": "live canvas",
-        "vlm_method": "captions"
+        "value": "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -1497,7 +1659,7 @@
         520
       ],
       "flags": {},
-      "order": 33,
+      "order": 32,
       "mode": 0,
       "inputs": [
         {
@@ -1563,7 +1725,7 @@
         0.35,
         2,
         2048,
-        1536,
+        1728,
         32,
         256,
         "source image",
@@ -1579,7 +1741,7 @@
         "denoise": 0.35,
         "upscale_by": 2,
         "max_tile_width": 2048,
-        "max_tile_height": 1536,
+        "max_tile_height": 1728,
         "context_anchor": 32,
         "context_overlap": 256,
         "anchor_source": "source image",
@@ -1589,285 +1751,157 @@
       "bgcolor": "#533"
     },
     {
-      "id": 371,
-      "type": "LiebsPicker",
+      "id": 364,
+      "type": "ContextAnchoredTileUpscaleVL",
       "pos": [
-        4970,
-        680
+        4030,
+        290
       ],
       "size": [
-        210,
-        90
+        340,
+        520
       ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 32,
+      "flags": {},
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
-          "name": "images",
+          "name": "image",
           "type": "IMAGE",
-          "link": 1023
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGES",
-          "type": "IMAGE",
-          "links": []
+          "link": 1002
         },
         {
-          "name": "IMAGES",
-          "shape": 6,
-          "type": "IMAGE",
-          "links": []
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LiebsPicker"
-      },
-      "widgets_values": [
-        "none",
-        null,
-        null
-      ],
-      "widgets_values_named": {
-        "selected": "none",
-        "picker_tab_id": null,
-        "title": null
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 286,
-      "type": "SaveImage",
-      "pos": [
-        5010,
-        490
-      ],
-      "size": [
-        210,
-        290
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 30,
-      "mode": 0,
-      "inputs": [
+          "name": "model",
+          "type": "MODEL",
+          "link": 1021
+        },
         {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 947
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1000
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 996
+        },
+        {
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": 995
+        },
+        {
+          "name": "negative",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 1017
+        },
+        {
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": 997
         }
       ],
       "outputs": [
         {
-          "name": "images",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.75"
-      },
-      "widgets_values": [
-        "ComfyUI-2x"
-      ],
-      "widgets_values_named": {
-        "filename_prefix": "ComfyUI-2x"
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 375,
-      "type": "SaveImage",
-      "pos": [
-        6210,
-        450
-      ],
-      "size": [
-        210,
-        290
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 36,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 1036
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.75"
-      },
-      "widgets_values": [
-        "ComfyUI-2x"
-      ],
-      "widgets_values_named": {
-        "filename_prefix": "ComfyUI-2x"
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 287,
-      "type": "PlaySound|pysssss",
-      "pos": [
-        4950,
-        840
-      ],
-      "size": [
-        240,
-        110
-      ],
-      "flags": {},
-      "order": 31,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "any",
-          "type": "*",
-          "link": 948
-        }
-      ],
-      "outputs": [
-        {
-          "name": "*",
-          "shape": 6,
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PlaySound|pysssss"
-      },
-      "widgets_values": [
-        "on empty queue",
-        0.5,
-        "notify.mp3"
-      ],
-      "widgets_values_named": {
-        "mode": "on empty queue",
-        "volume": 0.5,
-        "file": "notify.mp3"
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 373,
-      "type": "PreviewImage",
-      "pos": [
-        5590,
-        290
-      ],
-      "size": [
-        520,
-        710
-      ],
-      "flags": {},
-      "order": 34,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 1033
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
+          "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            1034,
-            1036,
-            1037
+            992
           ]
         }
       ],
       "properties": {
-        "Node name for S&R": "PreviewImage",
-        "cnr_id": "comfy-core",
-        "ver": "0.3.19"
-      },
-      "widgets_values": [],
-      "widgets_values_named": {},
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
-      "id": 376,
-      "type": "PlaySound|pysssss",
-      "pos": [
-        6130,
-        750
-      ],
-      "size": [
-        240,
-        110
-      ],
-      "flags": {},
-      "order": 37,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "any",
-          "type": "*",
-          "link": 1037
-        }
-      ],
-      "outputs": [
-        {
-          "name": "*",
-          "shape": 6,
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PlaySound|pysssss"
+        "Node name for S&R": "ContextAnchoredTileUpscaleVL"
       },
       "widgets_values": [
-        "on empty queue",
+        42,
+        "fixed",
+        "dpmpp_2m_sde",
+        "sgm_uniform",
+        28,
+        3.5,
         0.5,
-        "notify.mp3"
+        4,
+        2048,
+        1728,
+        32,
+        256,
+        "live canvas",
+        "vision tokens and captions"
       ],
       "widgets_values_named": {
-        "mode": "on empty queue",
-        "volume": 0.5,
-        "file": "notify.mp3"
+        "seed": 42,
+        "control_after_generate": "fixed",
+        "sampler_name": "dpmpp_2m_sde",
+        "scheduler": "sgm_uniform",
+        "steps": 28,
+        "cfg": 3.5,
+        "denoise": 0.5,
+        "upscale_by": 4,
+        "max_tile_width": 2048,
+        "max_tile_height": 1728,
+        "context_anchor": 32,
+        "context_overlap": 256,
+        "anchor_source": "live canvas",
+        "vlm_method": "vision tokens and captions"
       },
-      "color": "#232",
-      "bgcolor": "#353"
+      "color": "#322",
+      "bgcolor": "#533"
     },
     {
-      "id": 345,
-      "type": "int",
+      "id": 315,
+      "type": "PrimitiveFloat",
       "pos": [
-        2670,
-        610
+        2400,
+        910
       ],
       "size": [
         210,
         60
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            937,
+            997,
+            1031
+          ]
+        }
+      ],
+      "title": "CFG",
+      "properties": {
+        "Node name for S&R": "PrimitiveFloat"
+      },
+      "widgets_values": [
+        3.5
+      ],
+      "widgets_values_named": {
+        "value": 3.5
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 339,
+      "type": "PrimitiveNode",
+      "pos": [
+        2660,
+        440
+      ],
+      "size": [
+        210,
+        110
       ],
       "flags": {},
       "order": 14,
@@ -1875,105 +1909,32 @@
       "inputs": [],
       "outputs": [
         {
-          "name": "INT",
-          "type": "INT",
+          "name": "COMBO",
+          "type": "COMBO",
+          "widget": {
+            "name": "scheduler"
+          },
           "links": [
-            916
+            919
           ]
         }
       ],
-      "title": "Batch Size",
+      "title": "Scheduler",
       "properties": {
-        "Node name for S&R": "int"
+        "Run widget replace on values": false
       },
       "widgets_values": [
-        1
+        "sgm_uniform",
+        "fixed",
+        ""
       ],
       "widgets_values_named": {
-        "value": 1
+        "value": "sgm_uniform",
+        "control_after_generate": "fixed",
+        "control_filter_list": ""
       },
       "color": "#2a363b",
       "bgcolor": "#3f5159"
-    },
-    {
-      "id": 344,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        2920,
-        290
-      ],
-      "size": [
-        520,
-        210
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            863
-          ]
-        }
-      ],
-      "title": "Positive Prompt",
-      "properties": {
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus"
-      ],
-      "widgets_values_named": {
-        "value": "Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus"
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 328,
-      "type": "PreviewImage",
-      "pos": [
-        4390,
-        290
-      ],
-      "size": [
-        520,
-        710
-      ],
-      "flags": {},
-      "order": 29,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 992
-        }
-      ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": [
-            947,
-            948,
-            1023,
-            1038
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PreviewImage",
-        "cnr_id": "comfy-core",
-        "ver": "0.3.19"
-      },
-      "widgets_values": [],
-      "widgets_values_named": {},
-      "color": "#432",
-      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -2459,10 +2420,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1.0267928228949363,
+      "scale": 1.12947210518443,
       "offset": [
-        -2973.983005970784,
-        -135.9203487349999
+        -2093.0956850195666,
+        -185.60323472286532
       ]
     },
     "frontendVersion": "1.49.6"
