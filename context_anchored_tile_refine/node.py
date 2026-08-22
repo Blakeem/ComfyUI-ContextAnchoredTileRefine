@@ -17,13 +17,15 @@ def _anchor_source():
 
 def _vlm_method():
     # The conditioning-surface select, defined once so both VL nodes' wording cannot drift.
-    # The options come from captions.py, so the strings the widget offers and the strings
-    # sampling.py's pre-pass branches on cannot diverge; the list is copied per call like
-    # every other widget here, so no caller can poison a shared object. Lazy import:
-    # node.py's module scope stays comfy-free (pinned by a subprocess test).
+    # The options come from captions.py, so the strings the widget offers and the strings the
+    # engine branches on cannot diverge; the list is copied per call like every other widget
+    # here, so no caller can poison a shared object. captions.vlm_methods() is built once per
+    # session, which is what keeps this list identical to the one the frontend cached at
+    # startup. Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess
+    # test).
     from . import captions
 
-    return (list(captions.VLM_METHODS), {"default": captions.VLM_METHOD_VISION_CAPTIONS, "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile: it carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt: more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. A caption is always written from that tile's pixels alone — the whole image is never in view while captioning. Speed: vision tokens is fastest, because the whole-image encode is built ONCE and every tile takes a slice of it. captions writes one caption per tile and builds no whole-image encode at all. vision tokens and captions costs the two added together: the same single whole-image encode, plus one caption per tile. Writing captions is what scales with tile count; the whole-image encode does not."})
+    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile. The slice carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt. That is more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. Each tile caption is written from that tile's pixels alone. The name in parentheses is a caption preset from settings.toml in the node's folder, which holds the prompts every caption option asks. Edit a preset there to change its wording, and edits apply on the next run. Add a preset to add its own pair of options, which needs a ComfyUI restart. When a preset sets global_style_instruction, one style caption of the whole image is written per picture and placed on top of every tile caption so that all tiles follow one style description. vision tokens is fastest, since the whole-image encode is built once and every tile takes a slice of it. captions writes one caption per tile and builds no whole-image encode. vision tokens and captions costs the two added together. Writing captions is what scales with tile count, and the whole-image encode does not."})
 
 
 def _validate_image(image):
@@ -79,11 +81,27 @@ class ContextAnchoredTileRefine:
     CATEGORY = "image/upscaling"
 
     @classmethod
-    def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
+    def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None, vlm_method=None):
         # Naming widgets here disables ComfyUI's default min/max validation for them,
         # so ranges are re-checked alongside the /8 constraint (widget step is UI-only;
         # API-submitted workflows can send arbitrary INTs, and all derived geometry
         # must stay on the /8 grid the VAE requires).
+        # vlm_method is named for the OTHER validation the same bypass covers: core rejects
+        # a combo value that is not in the widget's own list (execution.py:1047, inside the
+        # `x not in validate_function_inputs` guard). Every caption option gained a preset
+        # label in 2026-08-22, so a workflow saved before that carries a bare
+        # "vision tokens and captions" the current list no longer holds and would fail to
+        # queue. captions.method_surface accepts it and resolve_method routes it to the
+        # first preset. The SURFACE is all that is checked here — a label naming an absent
+        # preset is named by resolve_method, which reads the file the run will actually use.
+        # This is None on the base node, which offers no such widget.
+        if vlm_method is not None:
+            from . import captions
+
+            try:
+                captions.method_surface(vlm_method)
+            except ValueError as error:
+                return str(error)
         checks = (
             ("max_tile_width", max_tile_width, 256, MAX_RESOLUTION),
             ("max_tile_height", max_tile_height, 256, MAX_RESOLUTION),
@@ -220,7 +238,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
-        from . import progress, sampling, upscale
+        from . import captions, progress, sampling, upscale
 
         empty_cond = None
         upscaled = None
@@ -230,6 +248,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         noise = None
 
         _validate_image(image)
+        # The settings file is read FIRST on the caption surfaces: this node runs the
+        # upscale-model pass and the text-encoder load before the engine's own read in
+        # sync._prepare_run, so a typo in the file would otherwise cost minutes of GPU
+        # time to reach. "vision tokens" never reads it.
+        captions.resolve_method(vlm_method)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
         # pass), and `with` scopes the comfy.utils.ProgressBar shim to the whole run.

@@ -188,6 +188,20 @@ _file_sha = krea2_run._file_sha
 
 # ------------------------------------------------------------------ captions (shared)
 
+def _live_instruction():
+    # PINNED to the (standard) preset, whose tile_caption_instruction IS
+    # RICH_GROUPED_INSTRUCTION character for character — what every arm on disk was
+    # captioned with. Resolving the UNLABELED surface would take the settings file's FIRST
+    # preset instead, which is (artwork) and a different question entirely, so a re-run
+    # would silently re-caption this campaign while every label and cache key still named
+    # the old one. Read in one place so the cache key and the PNG stamp can never name a
+    # different question than the captions were generated from.
+    from context_anchored_tile_refine import captions
+
+    preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
+    return preset.tile_instruction, preset.tile_max_tokens
+
+
 def load_or_generate_captions(clip, padded, tiles, force):
     """The production caption pre-pass, run ONCE and cached: the settled instruction,
     thinking=True, strip_thinking + clean_caption — exactly what refine_image would do
@@ -195,7 +209,7 @@ def load_or_generate_captions(clip, padded, tiles, force):
     byte-identical text (and reruns skip ~4 clip.generate calls)."""
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_VISION_CAPTIONS]
+    instruction, max_length = _live_instruction()
     key = {"base_sha": _file_sha(BASE_PNG), "rects": _rects(tiles), "instruction": instruction,
            "max_length": max_length, "clip": CLIP_NAME, "surface": "settled-position"}
     digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
@@ -206,7 +220,8 @@ def load_or_generate_captions(clip, padded, tiles, force):
         print(f"[caption] cache hit  {cached.name}")
     else:
         with torch.inference_mode():
-            tile_captions = captions.generate_tile_captions(clip, padded, tiles, instruction, max_length)
+            tile_captions = captions.generate_tile_captions(
+                clip, padded, tiles, ab_env.caption_preset(instruction, max_length))
         cached.parent.mkdir(parents=True, exist_ok=True)
         cached.write_text(json.dumps(dict(key, captions=tile_captions), indent=1), encoding="utf-8")
         print(f"[caption] generated and cached  {cached.name}")
@@ -224,7 +239,9 @@ def inject_captions(tile_captions, tiles):
 
     expected = _rects(tiles)
 
-    def hook(clip, source, hook_tiles, instruction, max_length, batch_size=1, batch_index=0):
+    # **_kwargs swallows the engine's ledger argument (progress=). The injected arms pin
+    # their cached text, so the preset's own style caption never rides on top of it.
+    def hook(clip, source, hook_tiles, preset, batch_size=1, batch_index=0, **_kwargs):
         if _rects(hook_tiles) != expected:
             raise RuntimeError("tile layout diverged between caption pre-pass and refine")
         return tile_captions
@@ -627,7 +644,7 @@ def ring_override(kind):
 def build_settings(arm, tile_captions, cut_sigma=None):
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_VISION_CAPTIONS]
+    instruction, max_length = _live_instruction()
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm,

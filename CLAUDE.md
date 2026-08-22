@@ -63,7 +63,7 @@ without that doc's temporal design.
   defined ONCE each as `_anchor_source()` / `_vlm_method()` so their option lists and tooltips
   cannot drift apart, and both APPENDED after `context_overlap` (see the ANCHOR RING invariant
   for why never mid-list). `anchor_source` takes its option strings from `sync.ANCHOR_SOURCES`
-  and `vlm_method` from `captions.VLM_METHODS`, so what the widget offers and what the engine
+  and `vlm_method` from `captions.vlm_methods()`, so what the widget offers and what the engine
   branches on cannot diverge. Comfy-free at module scope (the combo lists come from a lazy
   `import comfy.samplers` inside `INPUT_TYPES`, and the option strings from lazy package
   imports).
@@ -222,13 +222,37 @@ without that doc's temporal design.
   encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
   `clip.generate(do_sample=False, repetition_penalty=1.05)` -> `strip_thinking` (mandatory —
   core's plain `TextGenerate` does NOT strip, and an unstripped `<think>` block reaches the
-  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. The settled
-  instructions are A/B-decided and **character-for-character frozen, EU spelling included**
-  (US spelling measurably dropped detail in the owner's A/B). BOTH caption surfaces ask
-  `RICH_GROUPED_INSTRUCTION` (768) since 2026-08-16; `SETTLED_POSITION_INSTRUCTION` (512) is
-  RETIRED from the table but stays defined, because tests-AB's judged "pos" arms pin
-  themselves to it. The caption input is an area-resampled COPY at 384^2
-  total px — never the sampled tile (prime directive 1). `build_caption_conds` encodes the
+  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. **The
+  instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED PRESETS
+  since 2026-08-22** (`load_settings` / `resolve_method` / `vlm_methods`), deployed with the
+  node. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,
+  which is what makes an edit survive a node update (`.gitignore`d, never written by the
+  package). TWO READ CADENCES, deliberately: the PRESET LIST is read once per session by
+  `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
+  a new or renamed preset needs a restart, while a preset's own wording is re-read per run by
+  `resolve_method` so tuning a prompt does not. Each `[presets.<label>]` block adds ONE option
+  per caption surface, `"<surface> (<label>)"`, grouped by preset and in file order; an
+  UNLABELED caption option (what a pre-preset workflow saved) resolves to the FIRST preset,
+  and "vision tokens" reads nothing at all (pinned end to end). A broken file is a hard error
+  before any clip.generate, and the all-in-one node resolves it FIRST, before its
+  upscale-model pass and text-encoder load. The engine resolves ONCE per picture in
+  `sync._prepare_run` and hands the `Preset` down, so the ledger's caption count and the
+  pre-pass's own can never come from two different reads.
+  BOTH caption surfaces ask the one `tile_caption_instruction`. A non-empty
+  `global_style_instruction` adds ONE whole-image style caption per
+  picture, generated FIRST from the vision-encode source (the FULL image on the mask path)
+  and prepended to every tile caption, so all tiles follow one style description; "" turns
+  it off, and the ledger's caption segment counts it (`preset_picture(style_rows=)` must
+  match `build_tile_positives`' open). The two shipped presets' wording is pinned
+  character-for-character by `test_settings_toml_ships_the_owner_tested_wording` (the owner's
+  testing found small wording changes lose consistency), so a deliberate prompt change updates
+  pin and file together. The retired settled pair (`RICH_GROUPED_INSTRUCTION`,
+  `SETTLED_POSITION_INSTRUCTION`) stays defined, character-frozen EU spelling included,
+  because tests-AB's judged arms pin themselves to it (`ab_env.caption_preset` is how a
+  harness asks its own pinned question). The caption input is an area-resampled COPY sized by
+  the preset's `*_megapixels`, defaulting to the settled 384^2 total px and never the sampled
+  tile (prime directive 1); `0` reads the crop's own size, capped at
+  `VL_INPUT_CAP_MEGAPIXELS`. `build_caption_conds` encodes the
   caption as plain text; `build_slice_caption_conds` concatenates, on the ROW axis, the
   tile's slice of ONE shared pure-vision canvas encode and that tile's caption encoded
   TEXT-ONLY — so the canvas encode cost is one for the whole image, exactly as on the

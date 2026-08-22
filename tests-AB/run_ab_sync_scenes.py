@@ -143,18 +143,25 @@ def _digest(payload):
 
 
 def _arm_instruction(method):
-    """This campaign's instruction table, pinned — NOT captions.CAPTION_INSTRUCTIONS.
+    """This campaign's instruction table, with the "pos" arms pinned rather than resolved
+    through the live lookup.
 
-    That table moved VLM_METHOD_VISION_CAPTIONS from the SETTLED_POSITION wording to
-    RICH_GROUPED on 2026-08-16. Resolving through it now would silently re-caption the "pos"
+    The live wording (captions.resolve_method over settings.toml, prompts.toml before that,
+    CAPTION_INSTRUCTIONS before that) moved VLM_METHOD_VISION_CAPTIONS from SETTLED_POSITION
+    to RICH_GROUPED on 2026-08-16. Resolving through it would silently re-caption the "pos"
     arms with the "vlcap" arms' text, making the two render identically while every label,
     PNG tEXt stamp and cache key still said "settled-position". The "pos" arms stay pinned to
-    the instruction they were judged with."""
+    the instruction they were judged with, and the other arms are pinned to the (standard)
+    preset, whose tile_caption_instruction IS RICH_GROUPED_INSTRUCTION character for
+    character. Resolving the bare method would take the settings file's FIRST preset, which
+    is (artwork) and a different question, re-captioning the -cap/-vlcap arms while their
+    cache key still stamped "rich-grouped"."""
     from context_anchored_tile_refine import captions
 
     if method == captions.VLM_METHOD_VISION_CAPTIONS:
         return captions.SETTLED_POSITION_INSTRUCTION, captions.SETTLED_POSITION_MAX_TOKENS
-    return captions.CAPTION_INSTRUCTIONS[method]
+    preset = captions.resolve_method(f"{method} (standard)")
+    return preset.tile_instruction, preset.tile_max_tokens
 
 
 def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):
@@ -180,7 +187,8 @@ def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):
         print(f"[caption] {scene.key:<10} cache hit  {cached.name}")
     else:
         with torch.inference_mode():
-            tile_captions = captions.generate_tile_captions(clip, padded, tiles, instruction, max_length)
+            tile_captions = captions.generate_tile_captions(
+                clip, padded, tiles, ab_env.caption_preset(instruction, max_length))
         cached.parent.mkdir(parents=True, exist_ok=True)
         cached.write_text(json.dumps(dict(key, captions=tile_captions), indent=1), encoding="utf-8")
         print(f"[caption] {scene.key:<10} generated and cached  {cached.name}")

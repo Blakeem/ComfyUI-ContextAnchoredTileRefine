@@ -206,39 +206,43 @@ def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, ba
     return canvas_noise
 
 
-def build_tile_positives(vl_clip, source, tiles, vlm_method, batch_size=1, batch_index=0,
+def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_index=0,
                          vl_context=None, progress=None):
     # The VL conditioning pre-pass, run by the ENGINE over the tiles it is about to sample —
     # the same three surfaces the raster branch built. It runs before the first lane so the
     # text encoder is resident exactly once, before the diffusion model loads.
+    # `preset` is the run's resolved vlm_method (captions.resolve_method), so the settings
+    # file is read ONCE per run by the caller and every count below reads the same block.
     # Cost differs per surface: "vision tokens" is ONE whole-canvas encode for the run,
     # "captions" is one clip.generate plus one cheap text encode per tile, and
-    # "vision tokens and captions" is that one shared encode plus both per tile. Only the
-    # clip.generate pre-pass scales with tile count; captions.generate_tile_captions owns the
-    # interrupt check and the ProgressBar that keep it cancellable.
+    # "vision tokens and captions" is that one shared encode plus both per tile. A preset
+    # carrying a style instruction adds one whole-image clip.generate per row on both caption
+    # surfaces. Only the clip.generate pre-pass scales with tile count.
+    # captions.generate_tile_captions owns the interrupt check and the ProgressBar that
+    # keep it cancellable.
     # vl_context (region path only) is (full_image, offset_x, offset_y): the VISION encode
     # reads the FULL image and each region tile's rect is offset into its frame, so a masked
     # refine stays globally informed instead of only seeing its own crop. CAPTIONS always
     # describe THIS run's own canvas — the region crop the tiles actually sample — which is
-    # why `source` is kept separate from the encode source.
+    # why `source` is kept separate from the encode source. The STYLE caption is the one
+    # exception and reads encode_source, so a masked refine's style stays global.
     # PROGRESS: this function owns the pre-pass's ledger segments, and their ORDER is the
     # code's own — the captions are written FIRST and the conditioning built after, so the
     # bar never claims an encode that has not started. "vision tokens" opens one segment,
     # the two caption surfaces open two.
-    if vlm_method not in captions.VLM_METHODS:
-        raise ValueError(f"vlm_method must be one of {captions.VLM_METHODS}, got {vlm_method!r}")
     encode_source, offset_x, offset_y = (source, 0, 0) if vl_context is None else vl_context
     n_tiles, rows = len(tiles), int(source.shape[0])
-    if vlm_method == captions.VLM_METHOD_VISION:
+    if preset.surface == captions.VLM_METHOD_VISION:
         if progress is not None:
             progress.open(VISION_ENCODE, W_ENCODE)
         return vl.build_global_slices(vl_clip, encode_source, tiles, offset_x=offset_x, offset_y=offset_y)
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[vlm_method]
+    n_captions = (n_tiles + (1 if preset.style_instruction else 0)) * rows
     if progress is not None:
-        progress.open(CAPTIONS, n_tiles * rows * K_CAPTION, chunks=n_tiles * rows)
-    tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, instruction, max_length,
-                                                    batch_size, batch_index, progress=progress)
-    if vlm_method == captions.VLM_METHOD_VISION_CAPTIONS:
+        progress.open(CAPTIONS, n_captions * K_CAPTION, chunks=n_captions)
+    tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, preset,
+                                                    batch_size, batch_index, progress=progress,
+                                                    style_source=encode_source)
+    if preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
         # ONE whole-canvas vision encode plus one caption TEXT encode per tile — the text
         # half scales with the grid, so it is budgeted rather than folded into W_ENCODE.
         if progress is not None:
@@ -311,6 +315,10 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
         raise ValueError(
             "Context-Anchored Tile Refine (sync): the sync engine is the VL path — every lane's "
             "positive is its tile's slice of the VL encode, so it needs the VL CLIP.")
+    # ONE settings read for the whole picture, before any GPU time: the ledger's caption
+    # count and the pre-pass's own must come from the same block, and a file edited mid-run
+    # would otherwise give the two different answers.
+    preset = captions.resolve_method(vlm_method)
     check_preconditions(guider.model_patcher, sigmas, anchor_source)
 
     pixels = image[..., :3]
@@ -345,9 +353,13 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     # visibly dropping), the value itself monotone the whole time.
     if progress is not None and sampler is not None:
         total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
-        progress.preset_picture(vlm_method, len(tiles), batch, total_evals)
+        # The style caption count mirrors build_tile_positives' own arithmetic, off the ONE
+        # preset resolved above, so the segment the ledger sizes is the segment the pre-pass
+        # then opens.
+        style_rows = batch if preset.style_instruction else 0
+        progress.preset_picture(vlm_method, len(tiles), batch, total_evals, style_rows=style_rows)
 
-    tile_positives = build_tile_positives(vl_clip, padded, tiles, vlm_method, batch_size, batch_index,
+    tile_positives = build_tile_positives(vl_clip, padded, tiles, preset, batch_size, batch_index,
                                           vl_context=vl_context, progress=progress)
     if len(tile_positives) != len(tiles):
         raise RuntimeError(

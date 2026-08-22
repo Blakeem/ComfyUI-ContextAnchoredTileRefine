@@ -563,7 +563,9 @@ def inject_captions_by_core(tile_captions, expected_cores):
     property that matters."""
     from context_anchored_tile_refine import captions
 
-    def hook(clip, source, hook_tiles, instruction, max_length, batch_size=1, batch_index=0):
+    # **_kwargs swallows the engine's ledger argument (progress=). The injected arms pin
+    # their cached text, so the preset's own style caption never rides on top of it.
+    def hook(clip, source, hook_tiles, preset, batch_size=1, batch_index=0, **_kwargs):
         cores = [[t.core.x0, t.core.y0, t.core.x1, t.core.y1] for t in hook_tiles]
         if cores != expected_cores:
             raise RuntimeError("stage-1 tile cores diverged from the canonical layout")
@@ -1119,7 +1121,11 @@ def load_or_render_draft(arm, canvas, tiles, clip, model, vae, negative, empty,
 def build_settings(arm, tile_captions, mid, head, tail, stage="final"):
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_VISION_CAPTIONS]
+    # PINNED to (standard), whose wording IS RICH_GROUPED_INSTRUCTION: the unlabeled
+    # surface would resolve to the settings file's first preset, re-captioning this
+    # campaign under a different question while the stamps still named the old one.
+    preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
+    instruction, max_length = preset.tile_instruction, preset.tile_max_tokens
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm if stage == "final" else f"{arm}-{stage}",

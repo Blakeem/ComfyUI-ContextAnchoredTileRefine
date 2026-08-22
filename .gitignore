@@ -5,6 +5,9 @@ aipg/
 # A/B harness scratch: cached upscaled input tensors, regenerated on demand
 tests-AB/cache/
 
+# The user's own copy of settings.toml, which no update may replace
+settings.user.toml
+
 # Python
 __pycache__/
 *.py[cod]

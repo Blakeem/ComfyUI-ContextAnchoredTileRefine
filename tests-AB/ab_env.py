@@ -245,6 +245,27 @@ def bootstrap():
     return root, note
 
 
+def caption_preset(instruction, max_tokens, surface=None):
+    """A caption preset carrying ONE pinned instruction, for a harness that asks its own
+    question rather than the settings file's.
+
+    captions.generate_tile_captions takes a resolved settings block since 2026-08-22, and
+    every judged arm here predates the presets: no whole-image style caption, and the
+    384-square input budget every render on disk was captioned at. Both are what keeps a
+    re-run byte-identical to the arm it is labelled as. `surface` names which conditioning
+    the arm builds — nothing reads it today, so it is stated rather than assumed.
+    """
+    from context_anchored_tile_refine import captions
+
+    return captions.Preset(
+        surface=captions.VLM_METHOD_VISION_CAPTIONS if surface is None else surface,
+        label="pinned",
+        tile_instruction=instruction, tile_max_tokens=max_tokens,
+        tile_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS,
+        style_instruction="", style_max_tokens=max_tokens,
+        style_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS)
+
+
 def version(root):
     """ComfyUI's reported version string, or '?' if the file is missing."""
     marker = Path(root) / "comfyui_version.py"

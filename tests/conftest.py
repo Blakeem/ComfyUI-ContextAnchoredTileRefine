@@ -56,6 +56,25 @@ def _resolve_comfyui_root():
     return None, trace
 
 
+@pytest.fixture(autouse=True)
+def shipped_settings_file(monkeypatch):
+    """Every test reads the SHIPPED settings.toml, never a developer's own copy.
+
+    settings.user.toml is the documented edit surface (README) and wins over the shipped
+    file whenever it exists, so a developer who follows that instruction would otherwise
+    turn the whole gate red on prompts they changed deliberately. Renaming the constant is
+    what neutralizes it: `captions.settings_path` still runs, and a test that needs the
+    override mechanism itself restores the real name at its own tmp_path.
+    The method list is cached for a session by design, so it is cleared around every test.
+    """
+    from context_anchored_tile_refine import captions
+
+    monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml.absent-in-tests")
+    captions.vlm_methods.cache_clear()
+    yield
+    captions.vlm_methods.cache_clear()
+
+
 @pytest.fixture(scope="session")
 def comfy_env():
     """Resolve a real ComfyUI install and put its root on sys.path.

@@ -563,23 +563,25 @@ def test_caption_surfaces_route_through_the_same_tiles(comfy_stubs, vl_clip, mon
     # The other two vlm_methods build their positives from the same layout.tiles object.
     seen = {}
 
-    def recording_captions(clip, source, tiles, instruction, max_length, batch_size=1, batch_index=0,
-                           progress=None):
+    def recording_captions(clip, source, tiles, preset, batch_size=1, batch_index=0,
+                           progress=None, **kwargs):
         seen["tiles"] = tiles
-        seen["instruction"] = instruction
+        seen["preset"] = preset
         return [[f"tile {index}"] for index in range(len(tiles))]
 
     monkeypatch.setattr(captions, "generate_tile_captions", recording_captions)
     monkeypatch.setattr(captions, "build_caption_conds",
                         lambda clip, tile_captions: [[{"cross_attn": torch.zeros(1, 1, 8)}]] * len(tile_captions))
-    run = prepare(vl_clip, vlm_method=captions.VLM_METHOD_CAPTIONS)
+    method = "captions (artwork)"
+    run = prepare(vl_clip, vlm_method=method)
 
     assert seen["tiles"] is run.layout.tiles
-    assert seen["instruction"] == captions.CAPTION_INSTRUCTIONS[captions.VLM_METHOD_CAPTIONS][0]
+    # The engine resolves the settings file ONCE and hands that block through unchanged.
+    assert seen["preset"] == captions.resolve_method(method)
 
 
 def test_unknown_vlm_method_is_rejected(comfy_stubs, vl_clip):
-    with pytest.raises(ValueError, match="vlm_method must be one of"):
+    with pytest.raises(ValueError, match="names no conditioning surface"):
         prepare(vl_clip, vlm_method="interpretive dance")
 
 
@@ -1554,8 +1556,9 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
     # no canvas encode at all. The builders are stubbed — what is pinned is the ORDER.
     positive = lambda count: [[{"cross_attn": torch.zeros(1, 1, 8)}] for _ in range(count)]
     monkeypatch.setattr(captions, "generate_tile_captions",
-                        lambda clip, source, tiles, instruction, max_length, batch_size=1,
-                        batch_index=0, progress=None: [[f"tile {i}"] for i in range(len(tiles))])
+                        lambda clip, source, tiles, preset, batch_size=1,
+                        batch_index=0, progress=None, **style_kwargs: [
+                            [f"tile {i}"] for i in range(len(tiles))])
     monkeypatch.setattr(captions, "build_slice_caption_conds",
                         lambda clip, source, tiles, tile_captions, offset_x=0, offset_y=0: positive(len(tiles)))
     monkeypatch.setattr(captions, "build_caption_conds",
@@ -1567,6 +1570,71 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
 
     # The pre-pass segments, then the canvas encode — never an encode before its captions.
     assert segment_names(ledger) == [*expected, progress.CANVAS_ENCODE]
+
+
+def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stubs, vl_clip, monkeypatch):
+    # The shipped default carries a style caption, so the caption segment is (n_tiles + 1)
+    # chunks. preset_picture's style_rows and build_tile_positives' open() must carry the
+    # IDENTICAL count: the recorder pins that no open moves the total the preset settled.
+    monkeypatch.setattr(captions, "generate_tile_captions",
+                        lambda clip, source, tiles, preset, batch_size=1,
+                        batch_index=0, progress=None, **kwargs: [
+                            [f"tile {i}"] for i in range(len(tiles))])
+    monkeypatch.setattr(captions, "build_caption_conds",
+                        lambda clip, tile_captions: [[{"cross_attn": torch.zeros(1, 1, 8)}]
+                                                     for _ in tile_captions])
+    ledger = ledger_for(captions.VLM_METHOD_CAPTIONS)
+    totals = []
+    real_open = ledger.open
+
+    def recording_open(name, units=None, chunks=1):
+        before = ledger.total
+        real_open(name, units, chunks)
+        totals.append((name, before, ledger.total))
+
+    monkeypatch.setattr(ledger, "open", recording_open)
+
+    with ledger:
+        run = sync._prepare_run(image_canvas(), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
+                                CAP, CAP, CTX, OVERLAP, vl_clip,
+                                vlm_method=captions.VLM_METHOD_CAPTIONS,
+                                progress=ledger, sampler=euler_sampler())
+
+    n_captions = len(run.layout.tiles) + 1
+    assert segment_units(ledger, progress.CAPTIONS) == [n_captions * progress.K_CAPTION]
+    assert all(before == after for _name, before, after in totals)
+
+
+def test_the_settings_file_is_read_once_per_picture(comfy_stubs, vl_clip, monkeypatch):
+    # The ledger's caption count and the pre-pass's own must come from ONE read: with two,
+    # a file edited between them would size a segment for a preset the captions never asked.
+    # A "vision tokens" run reads nothing at all.
+    reads = []
+    real_load = captions.load_settings
+    monkeypatch.setattr(captions, "load_settings",
+                        lambda path=None: reads.append(path) or real_load(path))
+    monkeypatch.setattr(captions, "generate_tile_captions",
+                        lambda clip, source, tiles, preset, batch_size=1,
+                        batch_index=0, progress=None, **kwargs: [
+                            [f"tile {i}"] for i in range(len(tiles))])
+    monkeypatch.setattr(captions, "build_caption_conds",
+                        lambda clip, tile_captions: [[{"cross_attn": torch.zeros(1, 1, 8)}]
+                                                     for _ in tile_captions])
+
+    with ledger_for(captions.VLM_METHOD_CAPTIONS) as ledger:
+        sync._prepare_run(image_canvas(), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
+                          CAP, CAP, CTX, OVERLAP, vl_clip,
+                          vlm_method=captions.VLM_METHOD_CAPTIONS,
+                          progress=ledger, sampler=euler_sampler())
+    assert len(reads) == 1
+
+    reads.clear()
+    with ledger_for(captions.VLM_METHOD_VISION) as ledger:
+        sync._prepare_run(image_canvas(), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
+                          CAP, CAP, CTX, OVERLAP, vl_clip,
+                          vlm_method=captions.VLM_METHOD_VISION,
+                          progress=ledger, sampler=euler_sampler())
+    assert reads == []
 
 
 def test_two_pictures_with_different_grids_stay_one_continuous_bar(comfy_stubs, vl_clip, lane_stamp):

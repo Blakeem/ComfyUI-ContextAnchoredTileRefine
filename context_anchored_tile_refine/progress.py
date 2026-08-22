@@ -59,8 +59,8 @@ methods that need it (a subprocess test pins all three).
 W_UPSCALE_STEP = 0.1          # one comfy tiled_scale step of the upscale model
 W_CLIP_LOAD = 4.0             # the upscale node's FIRST CLIP call: CLIP.load_model + the
                               # text encoder's move onto the GPU, which no other bar covers
-K_CAPTION = 12.0              # one VLM caption: an autoregressive decode of up to
-                              # SETTLED_RICH_MAX_TOKENS tokens, the run's slowest per-tile step
+K_CAPTION = 12.0              # one VLM caption: an autoregressive decode of up to the
+                              # preset's max_tokens, the run's slowest per-tile step
 W_ENCODE = 4.0                # the ONE whole-canvas vision encode, shared by every tile
 W_ENCODE_CAPTION_TEXT = 0.5   # one per-tile caption TEXT encode (scales with tile count:
                               # captions.py encodes each tile's caption separately)
@@ -165,15 +165,16 @@ def build_plan(vlm_method, steps, batch=1, upscale_model=False, clip_load=False)
     """
     from . import captions
 
+    surface = captions.method_surface(vlm_method)
     plan = []
     if upscale_model:
         plan.append((UPSCALE, W_UPSCALE_STEP))
     if clip_load:
         plan.append((CLIP_LOAD, W_CLIP_LOAD))
     for _picture in range(max(int(batch), 1)):
-        if vlm_method == captions.VLM_METHOD_VISION:
+        if surface == captions.VLM_METHOD_VISION:
             plan.append((VISION_ENCODE, W_ENCODE))
-        elif vlm_method == captions.VLM_METHOD_VISION_CAPTIONS:
+        elif surface == captions.VLM_METHOD_VISION_CAPTIONS:
             plan.append((CAPTIONS, K_CAPTION))
             plan.append((VISION_ENCODE, W_ENCODE + W_ENCODE_CAPTION_TEXT))
         else:
@@ -286,18 +287,20 @@ class Ledger:
                 entry[1] = float(units)
         self._emit()
 
-    def preset_picture(self, vlm_method, n_tiles, rows, eval_total):
+    def preset_picture(self, vlm_method, n_tiles, rows, eval_total, style_rows=0):
         # One picture's whole block at true sizes, called at that picture's grid solve —
         # the mirror of build_plan's per-picture entries with the real multipliers, and
         # the same arithmetic the engine's open() calls carry (they re-set the identical
-        # numbers, so open never moves the total again).
+        # numbers, so open never moves the total again). `style_rows` counts the
+        # whole-image style captions (one per row when the run's preset asks for one).
         from . import captions
 
+        surface = captions.method_surface(vlm_method)
         count = max(int(n_tiles), 1)
-        caption_count = count * max(int(rows), 1)
-        if vlm_method == captions.VLM_METHOD_VISION:
+        caption_count = count * max(int(rows), 1) + max(int(style_rows), 0)
+        if surface == captions.VLM_METHOD_VISION:
             self.preset(VISION_ENCODE, W_ENCODE)
-        elif vlm_method == captions.VLM_METHOD_VISION_CAPTIONS:
+        elif surface == captions.VLM_METHOD_VISION_CAPTIONS:
             self.preset(CAPTIONS, caption_count * K_CAPTION)
             self.preset(VISION_ENCODE, W_ENCODE + count * W_ENCODE_CAPTION_TEXT)
         else:

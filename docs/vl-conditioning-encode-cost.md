@@ -38,6 +38,22 @@ unrun.
 > Section 6's causality result is the load-bearing one and it is unchanged: it is why the
 > vision half of the new surface is the same information the old one produced.
 
+> ## ADDENDUM 2026-08-21 — the instructions moved into a settings file
+>
+> What the caption surfaces ask no longer comes from a code constant. `settings.toml` at the
+> repo root holds them and `CAPTION_INSTRUCTIONS` is deleted. Every instruction table below
+> is therefore the record of what shipped when the measurements were taken, and the settled
+> constants they name stay defined for the tests-AB pins.
+>
+> Since 2026-08-22 the file holds NAMED PRESETS. Each `[presets.<label>]` block carries
+> `tile_caption_instruction`, an optional `global_style_instruction` (one whole-image style
+> caption per picture, prepended to every tile caption), a `*_max_tokens` budget for each,
+> and a `*_megapixels` input budget for each. A block adds one `vlm_method` option per
+> caption surface, and `captions.resolve_method` reads the block per run.
+> `*_megapixels` is the one measurement below that the file can now move: section 5's
+> per-tile caption cost is quoted at the shipped 384-square input, and raising a preset's
+> budget raises the caption prefill in proportion to its area.
+
 ---
 
 ## 1. Vocabulary: there are exactly two calls
@@ -57,7 +73,8 @@ conditioning tensors happens on the output side, with `torch.cat` on the row axi
 Two image budgets are involved, and they differ by 5.3x:
 
 ```
-caption input   captions.py:104   VL_INPUT_BUDGET      = 384 x 384   =  147,456 px
+caption input   captions.py       VL_INPUT_BUDGET      = 384 x 384   =  147,456 px
+                (the DEFAULT since 2026-08-22; a preset's tile_caption_megapixels moves it)
 encode input    vl.py:44          GLOBAL_SLICE_BUDGET  = 768 x 1024  =  786,432 px
 ```
 

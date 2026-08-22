@@ -3,7 +3,7 @@ name = "contextanchoredtilerefine"
 description = "Seamless tiled refinement and upscaling. Refine an image tile by tile with no visible seams, or refine only a masked region of a large image without processing the rest. Each tile is conditioned on its already-refined neighbors held as frozen context. The VL nodes (Krea 2) need no prompt at all: each tile's conditioning is a slice of one whole-image vision encode, so prompt objects never reappear in the wrong tile. Works with any guider, including NAG (Normalized Attention Guidance)."
 version = "1.6.0"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = []
 classifiers = [
     "Operating System :: OS Independent",

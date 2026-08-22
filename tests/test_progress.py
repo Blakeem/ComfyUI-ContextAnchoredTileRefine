@@ -604,3 +604,20 @@ def test_preset_picture_settles_the_total_before_any_fill(comfy_stubs):
     ledger.open(progress.DECODE, 30 * progress.W_DECODE_TILE)
     ledger.finish()
     assert ledger.total == settled and ledger.value == settled
+
+
+def test_preset_picture_counts_the_style_caption_like_the_engines_open(comfy_stubs):
+    # style_rows is the whole-image style caption count (one per row when the run's preset sets
+    # a style prompt). The preset and the engine's open must carry the identical caption
+    # count, or open would move the total the preset exists to settle.
+    ledger = progress.Ledger(progress.build_plan("captions", 4))
+    ledger.preset_picture("captions", 30, 1, 4, style_rows=1)
+    settled = ledger.total
+
+    ledger.open(progress.CAPTIONS, 31 * progress.K_CAPTION, chunks=31)
+    ledger.open(progress.CAPTION_ENCODE, 30 * progress.W_ENCODE_CAPTION_TEXT)
+    ledger.open(progress.CANVAS_ENCODE, 30 * progress.W_ENCODE_TILE)
+    ledger.open(progress.SAMPLING, 4 * 30)
+    ledger.open(progress.DECODE, 30 * progress.W_DECODE_TILE)
+    ledger.finish()
+    assert ledger.total == settled and ledger.value == settled
