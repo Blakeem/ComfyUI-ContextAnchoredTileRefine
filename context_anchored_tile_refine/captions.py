@@ -284,10 +284,18 @@ def load_settings(path=None):
 def build_vlm_methods(presets):
     """The vlm_method selector's options: the vision-only surface, then both caption surfaces
     of every preset. Grouped by preset and in file order, so a preset's two options sit
-    together and the list is ordered by whoever wrote the settings file."""
+    together and the list is ordered by whoever wrote the settings file.
+
+    The FIRST preset is the DEFAULT and its two options carry NO label, so they read
+    "vision tokens and captions" and "captions". Those are the exact strings a workflow saved
+    before the presets existed holds, so such a workflow keeps its own value and its own
+    result with nothing to re-pick. Labelling them instead would have made every one of them
+    a value the selector no longer offers.
+    """
     options = [VLM_METHOD_VISION]
-    for label in presets:
-        options.extend(f"{surface} ({label})" for surface in CAPTION_SURFACES)
+    for index, label in enumerate(presets):
+        suffix = "" if index == 0 else f" ({label})"
+        options.extend(f"{surface}{suffix}" for surface in CAPTION_SURFACES)
     return options
 
 
@@ -303,8 +311,10 @@ def vlm_methods():
 
 
 def default_vlm_method():
-    # The first preset's slice+caption option. The vision-only surface leads the list and is
-    # not it: the two halves together are what the campaign settled on.
+    # The default preset's slice+caption option, which carries no label (build_vlm_methods),
+    # so this is the plain "vision tokens and captions" the widget defaulted to before the
+    # presets existed. The vision-only surface leads the list and is not it: the two halves
+    # together are what the campaign settled on.
     return vlm_methods()[1]
 
 
@@ -327,7 +337,8 @@ def method_surface(vlm_method):
 
 def method_label(vlm_method):
     """The preset label a vlm_method option carries. "" for the vision-only surface, and for
-    the unlabeled caption options a workflow saved before the presets existed."""
+    the two unlabeled caption options, which are the DEFAULT preset's (`build_vlm_methods`)
+    and are what a workflow saved before the presets existed holds."""
     surface = method_surface(vlm_method)
     if vlm_method == surface:
         return ""
@@ -339,8 +350,9 @@ def resolve_method(vlm_method):
 
     "vision tokens" reads no settings at all. A caption option reads the settings file HERE,
     once per run, so an edit to a preset's wording applies with no ComfyUI restart. An
-    unlabeled caption option takes the first preset: that is what a workflow saved before the
-    presets existed carries, and the alternative is failing a workflow that used to run.
+    unlabeled caption option takes the first preset, which is the default one the selector
+    offers unlabeled. Its label still resolves when a workflow spells it out, so the two forms
+    of the default preset are one block and a workflow saved under either keeps running.
     """
     surface = method_surface(vlm_method)
     if surface == VLM_METHOD_VISION:

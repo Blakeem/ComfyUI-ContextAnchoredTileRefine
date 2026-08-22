@@ -53,11 +53,13 @@ TYPE_BY_NAME = {
 ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
 # One option per caption surface per settings.toml preset, grouped by preset and in file
 # order, with the vision-only surface leading. Pinned as the SHIPPED file writes it: a preset
-# added or renamed there changes what every saved workflow's combo can hold.
+# added or renamed there changes what every saved workflow's combo can hold. The FIRST
+# preset's two options carry no label, so they are byte-identical to what the widget offered
+# before the presets existed.
 VLM_METHOD_OPTIONS = [
     "vision tokens",
+    "vision tokens and captions", "captions",
     "vision tokens and captions (artwork)", "captions (artwork)",
-    "vision tokens and captions (standard)", "captions (standard)",
 ]
 
 INT_WIDGET_OPTIONS = {
@@ -149,13 +151,14 @@ def test_validate_inputs_rejects_below_min():
     assert "max_tile_width" in result
 
 
-def test_validate_inputs_accepts_a_caption_option_saved_before_the_presets():
+def test_validate_inputs_accepts_a_caption_option_the_selector_no_longer_offers():
     # Naming vlm_method in VALIDATE_INPUTS is what bypasses core's own combo-list check
-    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). Without
-    # the bypass a workflow saved before 2026-08-22 fails to queue with "Value not in list",
-    # because its bare "vision tokens and captions" is no longer one of the options.
-    for legacy in ("vision tokens", "vision tokens and captions", "captions"):
-        assert ContextAnchoredTileRefineVL.VALIDATE_INPUTS(vlm_method=legacy) is True, legacy
+    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). The
+    # default preset's LABELED form is the case that needs it: the selector offers that preset
+    # unlabeled, so a workflow saved while it was labeled would otherwise fail to queue with
+    # "Value not in list" even though resolve_method finds its block.
+    for saved in ("vision tokens and captions (standard)", "captions (standard)"):
+        assert ContextAnchoredTileRefineVL.VALIDATE_INPUTS(vlm_method=saved) is True, saved
     for current in VLM_METHOD_OPTIONS:
         assert ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(vlm_method=current) is True, current
 
@@ -200,7 +203,7 @@ def test_vl_method_widget_is_pinned(comfy_stubs):
     for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
         definition = node.INPUT_TYPES()["required"]["vlm_method"]
         assert definition[0] == VLM_METHOD_OPTIONS, node.__name__
-        assert definition[1]["default"] == "vision tokens and captions (artwork)", node.__name__
+        assert definition[1]["default"] == "vision tokens and captions", node.__name__
         assert definition[1]["default"] in definition[0], node.__name__
     assert list(captions.vlm_methods()) == VLM_METHOD_OPTIONS
 
@@ -333,7 +336,7 @@ UPSCALE_WIDGET_OPTIONS = {
     "max_tile_width": {"default": 1536, "min": 256, "max": 16384, "step": 8},
     "max_tile_height": {"default": 2048, "min": 256, "max": 16384, "step": 8},
     "anchor_source": {"default": "source image"},
-    "vlm_method": {"default": "vision tokens and captions (artwork)"},
+    "vlm_method": {"default": "vision tokens and captions"},
     "context_anchor": {"default": 32, "min": 0, "max": 512, "step": 8},
     "context_overlap": {"default": 32, "min": 0, "max": 512, "step": 8},
 }

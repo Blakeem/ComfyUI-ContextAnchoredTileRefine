@@ -238,9 +238,16 @@ without that doc's temporal design.
   `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
   a new or renamed preset needs a restart, while a preset's own wording is re-read per run by
   `resolve_method` so tuning a prompt does not. Each `[presets.<label>]` block adds ONE option
-  per caption surface, `"<surface> (<label>)"`, grouped by preset and in file order; an
-  UNLABELED caption option (what a pre-preset workflow saved) resolves to the FIRST preset,
-  and "vision tokens" reads nothing at all (pinned end to end). A broken file is a hard error
+  per caption surface, grouped by preset and in file order. The FIRST preset is the DEFAULT
+  and its two options carry NO label (`"captions"`, `"vision tokens and captions"`), which are
+  the exact strings a pre-preset workflow saved, so labelling them would have turned every
+  saved VL workflow into a value the selector no longer offers. Every later preset's options
+  read `"<surface> (<label>)"`. An unlabeled option resolves to the first preset, and that
+  preset's label still resolves when a workflow spells it out even though the selector no
+  longer offers the labeled form. "vision tokens" reads nothing at all (pinned end to end).
+  The shipped default is `standard`, whose wording and budgets are the pre-settings-file
+  constants character for character (`RICH_GROUPED_INSTRUCTION`, 768 tokens, 384^2 px), so the
+  default option samples what it sampled before the file existed. A broken file is a hard error
   before any clip.generate, and the all-in-one node resolves it FIRST, before its
   upscale-model pass and text-encoder load. The engine resolves ONCE per picture in
   `sync._prepare_run` and hands the `Preset` down, so the ledger's caption count and the

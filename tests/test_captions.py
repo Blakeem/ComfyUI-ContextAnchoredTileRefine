@@ -171,7 +171,12 @@ def test_settings_toml_ships_the_owner_tested_wording():
     # wording changes lose consistency, so an accidental edit fails here. A deliberate
     # prompt change updates this pin alongside settings.toml.
     presets = captions.load_settings()
-    assert list(presets) == ["artwork", "standard"]
+    # `standard` is FIRST, which is what makes it the default preset the selector offers
+    # unlabeled. Its block is the pre-settings-file constants character for character, so the
+    # unlabeled options a pre-preset workflow carries still ask what they asked then.
+    assert list(presets) == ["standard", "artwork"]
+    assert presets["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
+    assert presets["standard"]["global_style_instruction"] == ""
     artwork = presets["artwork"]
     assert artwork["tile_caption_instruction"] == (
         "succinct prose containing relative and absolute positions of specific things with "
@@ -179,10 +184,6 @@ def test_settings_toml_ships_the_owner_tested_wording():
     assert artwork["global_style_instruction"] == (
         "succinct flowing prose of only the overall style and artistic medium and physical "
         "medium. No objects or items in the scene.")
-    # (standard) is the wording every caption surface asked before 2026-08-21, kept selectable
-    # rather than only commented out, and it carries no style caption.
-    assert presets["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
-    assert presets["standard"]["global_style_instruction"] == ""
     for preset in presets.values():
         assert preset["tile_caption_max_tokens"] == 768
         assert preset["global_style_max_tokens"] == 768
@@ -193,31 +194,47 @@ def test_settings_toml_ships_the_owner_tested_wording():
 def test_every_preset_adds_one_option_per_caption_surface():
     # A preset's own two options sit together and in file order, so the selector reads the way
     # the settings file was written. The vision-only surface leads and carries no label,
-    # because it asks the VLM nothing.
+    # because it asks the VLM nothing. The FIRST preset's two options carry no label either,
+    # which is what makes them the strings a pre-preset workflow already holds.
     assert list(captions.vlm_methods()) == [
         "vision tokens",
+        "vision tokens and captions", "captions",
         "vision tokens and captions (artwork)", "captions (artwork)",
-        "vision tokens and captions (standard)", "captions (standard)",
     ]
-    assert captions.default_vlm_method() == "vision tokens and captions (artwork)"
+    assert captions.default_vlm_method() == captions.VLM_METHOD_VISION_CAPTIONS
+
+
+def test_the_default_preset_answers_to_both_forms_of_its_name():
+    # The selector offers the default preset unlabeled, but a workflow that spells its label
+    # out (what a workflow saved between 1.6.0 and the default preset carries) must reach the
+    # SAME block rather than a "no such preset" error.
+    unlabeled = captions.resolve_method("vision tokens and captions")
+    labeled = captions.resolve_method("vision tokens and captions (standard)")
+    assert unlabeled == labeled
+    assert unlabeled.label == "standard"
+    assert labeled.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
 
 
 def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
     # The frontend caches a node's definition at startup, so a list that changed between
     # calls would offer values the backend then rejects. A preset added mid-session must
     # therefore NOT appear until a restart, which is what the cache buys — so the file is
-    # rewritten here with no clear and the first answer has to stand.
-    path = write_settings(tmp_path, GOOD_PRESET, monkeypatch)
+    # rewritten here with no clear and the first answer has to stand. The renamed preset is
+    # the SECOND one, because the first is the unlabeled default and a rename there would not
+    # show in the list at all.
+    two_presets = GOOD_PRESET + GOOD_PRESET.replace("[presets.demo]", "[presets.extra]")
+    unlabeled = ["vision tokens", "vision tokens and captions", "captions"]
+    path = write_settings(tmp_path, two_presets, monkeypatch)
     assert list(captions.vlm_methods()) == [
-        "vision tokens", "vision tokens and captions (demo)", "captions (demo)"]
+        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
 
-    path.write_text(GOOD_PRESET.replace("[presets.demo]", "[presets.added]"))
+    path.write_text(two_presets.replace("[presets.extra]", "[presets.added]"))
     assert list(captions.vlm_methods()) == [
-        "vision tokens", "vision tokens and captions (demo)", "captions (demo)"]
+        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
 
     captions.vlm_methods.cache_clear()             # a restart, and the new preset appears
     assert list(captions.vlm_methods()) == [
-        "vision tokens", "vision tokens and captions (added)", "captions (added)"]
+        *unlabeled, "vision tokens and captions (added)", "captions (added)"]
 
 
 @pytest.mark.parametrize(("vlm_method", "surface", "label"), [
@@ -233,11 +250,14 @@ def test_a_method_splits_into_its_surface_and_its_label(vlm_method, surface, lab
     assert captions.method_label(vlm_method) == label
 
 
-def test_an_unlabeled_caption_method_takes_the_first_preset():
-    # A workflow saved before the presets existed still runs, on the file's first block.
+def test_an_unlabeled_caption_method_takes_the_first_preset(tmp_path, monkeypatch):
+    # A workflow saved before the presets existed still runs, on the file's first block —
+    # whichever block that is, so a user who reorders their own copy moves the default with it.
+    write_settings(tmp_path, GOOD_PRESET, monkeypatch)
     legacy = captions.resolve_method("vision tokens and captions")
-    assert legacy.label == "artwork"
+    assert legacy.label == "demo"
     assert legacy.surface == captions.VLM_METHOD_VISION_CAPTIONS
+    assert legacy.tile_instruction == "ask about the tile"
 
 
 def test_each_caption_method_asks_its_own_presets_question():
@@ -879,9 +899,9 @@ def pipeline_clip(monkeypatch):
 
 @pytest.fixture
 def style_off(monkeypatch):
-    # The shipped (artwork) preset turns the whole-image style caption on. Tests that pin the
-    # caption surfaces' own per-tile shape run with it off, and the style tests below cover
-    # it on.
+    # A preset may turn the whole-image style caption on, and the shipped (artwork) one does.
+    # Tests that pin the caption surfaces' own per-tile shape run with it off whichever preset
+    # they name, and the style tests below cover it on.
     resolve = captions.resolve_method
     monkeypatch.setattr(captions, "resolve_method",
                         lambda method: dataclasses.replace(resolve(method), style_instruction=""))
@@ -989,13 +1009,15 @@ def test_vision_and_captions_cats_the_shared_slice_and_a_text_only_caption(comfy
 
 
 def test_the_shipped_style_caption_rides_on_top_of_every_tile_caption(comfy_stubs, pipeline_clip):
-    # What the DiT reads on the shipped default: every tile's caption is encoded with the
-    # one style caption on top, newline-joined.
-    style_text = captions.resolve_method("captions").style_instruction
+    # What the DiT reads on a preset that asks for a style caption: every tile's caption is
+    # encoded with the one style caption on top, newline-joined. (artwork) is the shipped
+    # preset that turns it on, and the default (standard) leaves it off.
+    method = "captions (artwork)"
+    style_text = captions.resolve_method(method).style_instruction
     pipeline_clip.answer = lambda img, instruction: (
         "oil on canvas" if instruction == style_text else "a plain caption")
 
-    _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions")
+    _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, method)
 
     assert pipeline_clip.encoded == ["oil on canvas\na plain caption"] * 4
 
@@ -1008,7 +1030,7 @@ def test_the_mask_path_styles_from_the_full_image(comfy_stubs, pipeline_clip):
     mask = torch.zeros(1, 80, 80)
     mask[:, 16:64, 16:64] = 1.0
 
-    _run(image, VLGuider(), pipeline_clip, "captions", mask=mask, ctx=8)
+    _run(image, VLGuider(), pipeline_clip, "captions (artwork)", mask=mask, ctx=8)
 
     style_shape = comfy_stubs["common_upscale_calls"][0][0]
     assert style_shape == (1, 3, 80, 80)

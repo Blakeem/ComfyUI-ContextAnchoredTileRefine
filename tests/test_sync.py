@@ -1573,9 +1573,10 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
 
 
 def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stubs, vl_clip, monkeypatch):
-    # The shipped default carries a style caption, so the caption segment is (n_tiles + 1)
-    # chunks. preset_picture's style_rows and build_tile_positives' open() must carry the
-    # IDENTICAL count: the recorder pins that no open moves the total the preset settled.
+    # A preset that carries a style caption makes the caption segment (n_tiles + 1) chunks,
+    # and (artwork) is the shipped preset that does. preset_picture's style_rows and
+    # build_tile_positives' open() must carry the IDENTICAL count: the recorder pins that no
+    # open moves the total the preset settled.
     monkeypatch.setattr(captions, "generate_tile_captions",
                         lambda clip, source, tiles, preset, batch_size=1,
                         batch_index=0, progress=None, **kwargs: [
@@ -1583,7 +1584,8 @@ def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stu
     monkeypatch.setattr(captions, "build_caption_conds",
                         lambda clip, tile_captions: [[{"cross_attn": torch.zeros(1, 1, 8)}]
                                                      for _ in tile_captions])
-    ledger = ledger_for(captions.VLM_METHOD_CAPTIONS)
+    style_method = f"{captions.VLM_METHOD_CAPTIONS} (artwork)"
+    ledger = ledger_for(style_method)
     totals = []
     real_open = ledger.open
 
@@ -1597,7 +1599,7 @@ def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stu
     with ledger:
         run = sync._prepare_run(image_canvas(), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
                                 CAP, CAP, CTX, OVERLAP, vl_clip,
-                                vlm_method=captions.VLM_METHOD_CAPTIONS,
+                                vlm_method=style_method,
                                 progress=ledger, sampler=euler_sampler())
 
     n_captions = len(run.layout.tiles) + 1

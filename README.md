@@ -171,7 +171,7 @@ The default method combines the tile's vision slice and its own caption in a sin
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. Two ship. `artwork` is the default, which holds placement and demographics and carries one medium to every tile. `standard` is the wording every caption method asked before 2026-08-21, with no style caption.
+The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. The first block is the default preset and its options carry no label. Two ship. `standard` is the default and is the wording every caption method asked before 2026-08-21, with no style caption. `artwork` holds placement and demographics and carries one medium to every tile.
 
 A preset holds six keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the whole image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer and a `_megapixels` budget for how much of the image the VL model reads, where 0 means the crop's own size.
 

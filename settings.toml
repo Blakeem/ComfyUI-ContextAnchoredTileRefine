@@ -6,10 +6,13 @@
 # made here is lost. Nothing ever writes settings.user.toml, so your own copy survives.
 #
 # PRESETS
-# Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes,
-# "vision tokens and captions (<label>)" and "captions (<label>)". The selector follows the
-# order of the blocks below, so a preset's two options sit together. Add, rename or remove a
-# block to change what the selector offers.
+# Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes.
+# The FIRST block is the default preset. Its two options carry no label and read "vision
+# tokens and captions" and "captions". Every later block labels its own two options, "vision
+# tokens and captions (<label>)" and "captions (<label>)". The selector follows the order of
+# the blocks below, so a preset's two options sit together.
+# Move a block to the top to make it the default. Add, rename or remove a block to change
+# what the selector offers.
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
 # A mistake in this file is a hard error that names the file and the problem. It hides both
@@ -37,22 +40,24 @@
 # A prompt needs its own stop condition, such as a length word (succinct), a count ceiling,
 # or a fixed region list. Without one the answer runs to max_tokens.
 
-# The default. The tile prompt holds placement and demographics, and the style prompt carries
-# one medium to every tile. It tends to read an image as a painting or an illustration.
-[presets.artwork]
-tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics."
-tile_caption_max_tokens = 768
-tile_caption_megapixels = 0.147456
-global_style_instruction = "succinct flowing prose of only the overall style and artistic medium and physical medium. No objects or items in the scene."
-global_style_max_tokens = 768
-global_style_megapixels = 0.147456
-
-# What every caption surface asked before 2026-08-21, with no style caption. EU spelling is
-# deliberate, since it measured better than US spelling in A/B testing.
+# The default preset, since it is the first block. It asks what every caption option asked
+# before the presets existed and it writes no style caption, so a workflow saved then keeps
+# its own value and its own result. EU spelling is deliberate, since it measured better than
+# US spelling in A/B testing.
 [presets.standard]
 tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry."
 tile_caption_max_tokens = 768
 tile_caption_megapixels = 0.147456
 global_style_instruction = ""
+global_style_max_tokens = 768
+global_style_megapixels = 0.147456
+
+# The tile prompt holds placement and demographics, and the style prompt carries one medium
+# to every tile. It tends to read an image as a painting or an illustration.
+[presets.artwork]
+tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics."
+tile_caption_max_tokens = 768
+tile_caption_megapixels = 0.147456
+global_style_instruction = "succinct flowing prose of only the overall style and artistic medium and physical medium. No objects or items in the scene."
 global_style_max_tokens = 768
 global_style_megapixels = 0.147456
