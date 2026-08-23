@@ -178,6 +178,29 @@ without that doc's temporal design.
   order) and scatters every window back, so no two lanes disagree on a shared cell at a step
   start; then per-tile decode of the CANVAS windows — never a lane's own `x`, whose ring cells
   carry the unrefined source — composited by the stock pixel feather.
+- **The two VAE windows are sized to what each stage KEEPS, not to the sampled extent**
+  (`VAE_ENCODE_MARGIN` / `VAE_DECODE_MARGIN` and `encode_window` / `decode_window` in
+  `sync.py`). Both calls used the whole `crop_rect` until 2026-08-22, which is
+  `r = context_anchor + context_overlap` wider than either keeps, and every discarded cell was
+  already computed by the neighbour whose core covers it. At the owner's 8K config that was 53%
+  of every encode and 32% of every decode, 15.5s and ~2.4 GiB per pass. The LANES are untouched:
+  a lane's latent is still the full `crop_rect` slice of C_0, so every tile still sees its whole
+  ring. `None` restores the old window and is what the A/B harness sweeps. The two shipped
+  values are NOT interchangeable and are pinned by a test:
+  **DECODE 0** (the kept rect exactly) is provably free, because every `paste_rect` border lands
+  where the pixel feather weights that tile ZERO — top and left are where its own alpha starts
+  at 0, right and bottom are a neighbour's core start where the neighbour's alpha is 1 — which
+  is why the measured seam delta was exactly 0.000/255 on all 5 scenes.
+  **ENCODE 32**, not 0, because the encode's kept rect is the CORE and cores butt into C_0 with
+  weight 1 on both sides, with no feather protecting that boundary. At margin 0 the window edge
+  coincides with it and `tests-AB/probe_c0_core_seam.py` measures the decoded C_0 boundary
+  damped to 0.807 of its neighbourhood against 1.184 shipped; at 32 it is 1.184, and 32 is the
+  smallest tested margin that is. A bigger margin is NOT safer in general: the Wan 2.1 VAE runs
+  a full spatial attention block at the /8 bottleneck in both `Encoder3d.middle` and
+  `Decoder3d.middle` whatever its empty `attn_scales` suggests, so every kept cell reads the
+  whole window and the error has no analytic bound. Settled by owner A/B 2026-08-22
+  (`tests-AB/run_ab_vae_window.py`, 5 scenes x 5 decode margins sharing ONE sampled canvas, then
+  3 encode margins as full renders); `tests-AB/probe_vae_window_vram.py` holds the timings.
   **CANVAS SPACE, the rule every block follows**: a lane's `latent_image` is handed over in RAW
   space (comfy applies `process_latent_in` itself inside `guider.sample`) and is always a SLICE
   of the one C_0, so two overlapping lanes hold equal values on every shared cell at step 0;

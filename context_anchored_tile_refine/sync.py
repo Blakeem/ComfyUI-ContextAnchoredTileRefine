@@ -119,6 +119,59 @@ def _latent_rect(rect):
     return grid.Rect(rect.x0 // 8, rect.y0 // 8, rect.x1 // 8, rect.y1 // 8)
 
 
+# The VAE's view window for stage E and stage D, neither of which is the tile's SAMPLED
+# extent. `None` means the whole crop_rect, which is what both stages used until 2026-08-22
+# and is r = context_anchor + context_overlap wider than either one keeps. A number caps the
+# window at the rect that call keeps (core for the encode, paste_rect for the decode) plus
+# that many pixels, clamped inside crop_rect, so the cap is a no-op wherever r is already
+# smaller. The lanes are untouched either way: a lane's latent is still the full crop_rect
+# slice of C_0, so every tile still sees its whole ring.
+#
+# Not a free saving, and not a margin that trades safety for size. Both Encoder3d.middle and
+# Decoder3d.middle run a full spatial attention block at the /8 bottleneck
+# (comfy/ldm/wan/vae.py), whatever the empty attn_scales suggests, so every kept cell reads
+# the whole window and the framing error has no analytic bound. The two values below are the
+# owner's A/B (tests-AB/run_ab_vae_window.py, 5 scenes) plus two probes, never an argument.
+#
+# DECODE 0, the kept rect exactly. Every window border of paste_rect lands where the pixel
+# feather gives that tile ZERO weight: the top and left borders are where its own alpha
+# starts at 0, and the right and bottom borders are a neighbour's core start, where the
+# neighbour's alpha is 1. A margin there buys context for pixels that are then multiplied by
+# zero, which is why the measured delta at the seam was exactly 0.000/255 across all 5 scenes.
+#
+# ENCODE 32, not 0. The encode's kept rect is the CORE, and cores butt into C_0 with weight 1
+# on both sides, so its border has no feather protecting it. At margin 0 the window edge
+# coincides with that boundary and probe_c0_core_seam.py measures the decoded C_0 boundary
+# damped to 0.807 of its neighbourhood, against 1.184 for the shipped window. At 32 it is
+# 1.184, indistinguishable from shipped, and 32 is the smallest tested value that is.
+VAE_ENCODE_MARGIN = 32
+VAE_DECODE_MARGIN = 0
+
+
+def _capped_window(tile, kept, margin):
+    # `kept` grown by `margin` and clamped inside crop_rect, or crop_rect when margin is None.
+    # core, paste_rect, crop_rect and a /8 margin are all multiples of 8, and max/min of /8
+    # values stays /8, so _latent_rect keeps its guarantee.
+    if margin is None:
+        return tile.crop_rect
+    if margin % 8:
+        raise ValueError(f"a VAE window margin must be a multiple of 8, got {margin}")
+    crop = tile.crop_rect
+    return grid.Rect(max(crop.x0, kept.x0 - margin), max(crop.y0, kept.y0 - margin),
+                     min(crop.x1, kept.x1 + margin), min(crop.y1, kept.y1 + margin))
+
+
+def encode_window(tile, margin=None):
+    # Stage E keeps the CORE alone, because C_0 is assembled from butted cores.
+    return _capped_window(tile, tile.core, margin)
+
+
+def decode_window(tile, margin=None):
+    # Stage D keeps paste_rect, which already sits exactly context_anchor inside crop_rect on
+    # the top and left borders, so a cap only ever binds on the right and bottom.
+    return _capped_window(tile, tile.paste_rect, margin)
+
+
 def encode_canvas_latent(vae, padded, tiles, progress=None):
     # C_0: per-tile vae.encode of the raw crop windows at the stock tile sizes, the butted
     # CORES pasted into one canvas latent. Coverage is asserted — the cores tile the canvas
@@ -130,16 +183,17 @@ def encode_canvas_latent(vae, padded, tiles, progress=None):
     canvas = None
     covered = torch.zeros((h8, w8), dtype=torch.bool)
     for index, tile in enumerate(tiles):
-        crop, core = tile.crop_rect, tile.core
-        latent = sampling.encode_pixels(vae, padded[:, crop.y0:crop.y1, crop.x0:crop.x1, :]).detach()
-        if latent.shape[-2:] != ((crop.y1 - crop.y0) // 8, (crop.x1 - crop.x0) // 8):
+        core = tile.core
+        window = encode_window(tile, VAE_ENCODE_MARGIN)
+        latent = sampling.encode_pixels(vae, padded[:, window.y0:window.y1, window.x0:window.x1, :]).detach()
+        if latent.shape[-2:] != ((window.y1 - window.y0) // 8, (window.x1 - window.x0) // 8):
             raise RuntimeError(
-                f"window encode shape {tuple(latent.shape[-2:])} != crop {crop} at /8. "
+                f"window encode shape {tuple(latent.shape[-2:])} != window {window} at /8. "
                 "This VAE's spatial compression is not the /8 the grid math models")
         if canvas is None:
             canvas = torch.zeros((*latent.shape[:-2], h8, w8), dtype=latent.dtype, device=latent.device)
-        cy0, cy1 = (core.y0 - crop.y0) // 8, (core.y1 - crop.y0) // 8
-        cx0, cx1 = (core.x0 - crop.x0) // 8, (core.x1 - crop.x0) // 8
+        cy0, cy1 = (core.y0 - window.y0) // 8, (core.y1 - window.y0) // 8
+        cx0, cx1 = (core.x0 - window.x0) // 8, (core.x1 - window.x0) // 8
         canvas[..., core.y0 // 8:core.y1 // 8, core.x0 // 8:core.x1 // 8] = latent[..., cy0:cy1, cx0:cx1]
         covered[core.y0 // 8:core.y1 // 8, core.x0 // 8:core.x1 // 8] = True
         if progress is not None:
@@ -638,8 +692,9 @@ def decode_composite(vae, model, canvas, padded, layout, progress=None):
     # only band delta left is VAE window framing, which the campaign measured at the floor.
     result = padded.clone()
     for index, tile in enumerate(layout.tiles):
-        crop, paste, core = tile.crop_rect, tile.paste_rect, tile.core
-        rect = _latent_rect(crop)
+        paste, core = tile.paste_rect, tile.core
+        window = decode_window(tile, VAE_DECODE_MARGIN)
+        rect = _latent_rect(window)
         # RAW space for the VAE: the canvas is maintained in the model's process space (the
         # lanes' `x` lives there), and process_latent_out is the exact inverse comfy applies
         # to every sampler result on the way out (samplers.py:1238).
@@ -653,7 +708,7 @@ def decode_composite(vae, model, canvas, padded, layout, progress=None):
         # .to(): under --gpu-only the decode lands on the GPU intermediate device while the
         # canvas stays on the input device; a no-op when they already match.
         decoded = decoded.to(result.device)
-        sub = decoded[:, paste.y0 - crop.y0:paste.y1 - crop.y0, paste.x0 - crop.x0:paste.x1 - crop.x0, :]
+        sub = decoded[:, paste.y0 - window.y0:paste.y1 - window.y0, paste.x0 - window.x0:paste.x1 - window.x0, :]
         region = result[:, paste.y0:paste.y1, paste.x0:paste.x1, :]
         alpha = sampling.feather_alpha(paste, core, layout.overlap, tile.kept_top,
                                        tile.kept_left).to(result.device)[..., None]

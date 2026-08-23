@@ -795,6 +795,70 @@ def expected_canvas(eval_index=RUN_STEPS - 1):
     return canvas
 
 
+# ---- the VAE view windows --------------------------------------------------
+
+
+def _run_layout(overlap=RUN_OVERLAP):
+    sx = grid.solve_axis(CANVAS, RUN_CAP_W, CTX, overlap, axis="width")
+    sy = grid.solve_axis(CANVAS, RUN_CAP_H, CTX, overlap, axis="height")
+    return grid.build_layout(CANVAS, CANVAS, sx, sy, CTX, overlap)
+
+
+def test_a_none_margin_is_the_whole_crop_rect_on_both_stages():
+    # The pre-2026-08-22 behaviour, kept reachable so a harness can render the old windows.
+    for tile in _run_layout().tiles:
+        assert sync.encode_window(tile, None) == tile.crop_rect
+        assert sync.decode_window(tile, None) == tile.crop_rect
+
+
+def test_a_window_always_contains_what_its_stage_keeps():
+    # The invariant the offset arithmetic in both stages depends on. Stage E slices `core` out
+    # of its window and stage D slices `paste_rect` out of its own, so a window that failed to
+    # contain them would index out of the decoded tensor rather than fail a shape check.
+    for tile in _run_layout().tiles:
+        for margin in (None, 0, 8, 32, 4096):
+            encode, decode = sync.encode_window(tile, margin), sync.decode_window(tile, margin)
+            for window, kept in ((encode, tile.core), (decode, tile.paste_rect)):
+                assert window.x0 <= kept.x0 and window.y0 <= kept.y0
+                assert window.x1 >= kept.x1 and window.y1 >= kept.y1
+                # Never wider than the sampled extent either: a margin past crop_rect would
+                # read pixels the tile was never given.
+                assert window.x0 >= tile.crop_rect.x0 and window.y0 >= tile.crop_rect.y0
+                assert window.x1 <= tile.crop_rect.x1 and window.y1 <= tile.crop_rect.y1
+
+
+def test_a_margin_at_or_past_r_is_the_crop_rect_again():
+    # r = context_anchor + context_overlap is how far crop_rect sits outside `core`, so any
+    # margin at least that big is a no-op and the cap can never cost a config that is already
+    # tight. RUN_OVERLAP 16 + CTX 8 = 24. Compared by coordinate, because a window is a plain
+    # Rect while crop_rect is an ExpandedRect carrying a `clamped` flag a VAE window has no
+    # use for.
+    def coords(rect):
+        return rect.x0, rect.y0, rect.x1, rect.y1
+
+    for tile in _run_layout().tiles:
+        assert coords(sync.encode_window(tile, CTX + RUN_OVERLAP)) == coords(tile.crop_rect)
+        assert coords(sync.decode_window(tile, CTX + RUN_OVERLAP)) == coords(tile.crop_rect)
+
+
+def test_a_margin_off_the_eight_grid_is_refused():
+    # _latent_rect shears a rect that is not /8, and it would be the WINDOW that failed rather
+    # than the margin, so the margin is checked where it is read.
+    tile = _run_layout().tiles[0]
+    for stage in (sync.encode_window, sync.decode_window):
+        with pytest.raises(ValueError, match="multiple of 8"):
+            stage(tile, 12)
+
+
+def test_the_shipped_margins_are_the_ab_settled_pair():
+    # tests-AB/run_ab_vae_window.py over 5 scenes, plus probe_c0_core_seam.py. Decode 0 is
+    # exact: every paste_rect border lands where the pixel feather weights that tile zero.
+    # Encode 32 is the smallest tested margin whose decoded C_0 shows no step where cores
+    # butt, which has no feather protecting it. Changing either re-opens a settled A/B.
+    assert sync.VAE_ENCODE_MARGIN == 32
+    assert sync.VAE_DECODE_MARGIN == 0
+
+
 # ---- the latent feather ----------------------------------------------------
 
 
@@ -892,9 +956,10 @@ def test_the_canvas_holds_one_value_where_the_two_lanes_meet(comfy_stubs, vl_cli
     run_sync(vl_clip, vae=vae, guider=RunGuider())
 
     left, right = vae.decoded
-    assert left.shape == (1, 3, 10, 8) and right.shape == (1, 3, 10, 8)
-    # Canvas cells 2..7 are in BOTH windows: the left window's cells 2..7, the right's 0..5.
-    assert torch.equal(left[..., 2:8], right[..., 0:6])
+    # The decode windows are paste_rect (VAE_DECODE_MARGIN 0): canvas cells 0..4 and 3..9.
+    assert left.shape == (1, 3, 10, 5) and right.shape == (1, 3, 10, 7)
+    # Canvas cells 3..4 are in BOTH windows: the left window's cells 3..4, the right's 0..1.
+    assert torch.equal(left[..., 3:5], right[..., 0:2])
 
 
 def test_the_decode_reads_the_canvas_never_a_lanes_own_window(comfy_stubs, vl_clip, lane_stamp):
@@ -908,13 +973,17 @@ def test_the_decode_reads_the_canvas_never_a_lanes_own_window(comfy_stubs, vl_cl
 
     left, right = lane_value(0, RUN_STEPS - 1), lane_value(1, RUN_STEPS - 1)
     expected = expected_canvas()
-    assert torch.equal(vae.decoded[0], expected[..., 0:8])
-    assert torch.equal(vae.decoded[1], expected[..., 2:10])
-    assert torch.equal(vae.decoded[0][..., 5:8], torch.full((1, 3, 10, 3), right))
+    # The windows are paste_rect (VAE_DECODE_MARGIN 0): cells 0..4 for tile 0, 3..9 for tile 1.
+    assert torch.equal(vae.decoded[0], expected[..., 0:5])
+    assert torch.equal(vae.decoded[1], expected[..., 3:10])
+    # Cell 4 is the discriminating one. It is inside tile 0's own core, so tile 0's lane holds
+    # its OWN prediction there, while the canvas holds tile 1's — because tile 1's paste covers
+    # it and the consolidation is in raster order.
+    assert torch.equal(vae.decoded[0][..., 4], torch.full((1, 3, 10), right))
     # The LAST eval's values, not the previous step's: the stepper's hook is PRE-step, so the
     # final step's results are consolidated only after it returns.
     assert torch.equal(vae.decoded[0][..., 0:3], torch.full((1, 3, 10, 3), left))
-    assert not torch.equal(vae.decoded[0], expected_canvas(RUN_STEPS - 2)[..., 0:8])
+    assert not torch.equal(vae.decoded[0], expected_canvas(RUN_STEPS - 2)[..., 0:5])
     # ... and the one fractional cell really is the feather, not a hard handover.
     assert left < float(vae.decoded[0][0, 0, 0, 3]) < right
 
@@ -946,9 +1015,9 @@ def test_the_decode_window_is_the_canvas_converted_back_to_raw_space(comfy_stubs
     run_sync(vl_clip, vae=vae, guider=RunGuider(model=model))
 
     raw = (expected_canvas() - 1.0) / 2.0        # process_latent_out spelled out
-    assert torch.equal(vae.decoded[0], raw[..., 0:8])
-    assert torch.equal(vae.decoded[1], raw[..., 2:10])
-    assert not torch.equal(vae.decoded[0], expected_canvas()[..., 0:8])
+    assert torch.equal(vae.decoded[0], raw[..., 0:5])
+    assert torch.equal(vae.decoded[1], raw[..., 3:10])
+    assert not torch.equal(vae.decoded[0], expected_canvas()[..., 0:5])
 
 
 # ---- progress, preview, interrupt ------------------------------------------
@@ -1196,15 +1265,17 @@ def test_the_region_lanes_diffuse_only_the_masked_rows(comfy_stubs, vl_clip, lan
     y0, y1, _x0, _x1 = REGION_CROP
     latent = image_canvas()[:, y0:y1, :, :][:, ::8, ::8, :].movedim(-1, 1)
     assert len(vae.decoded) == 2
-    left = vae.decoded[0]
-    window = latent[..., 0:8]
-    assert left.shape == (1, 3, 6, 8)
-    # Columns 0..2 are tile 0's own core and 5..7 tile 1's — neither lies in the 2-cell band,
-    # so each cell is exactly one lane's value with no feather arithmetic in between.
-    for cols in (slice(0, 3), slice(5, 8)):
-        assert torch.equal(left[:, :, 0, cols], window[:, :, 0, cols])
-        assert torch.equal(left[:, :, 5, cols], window[:, :, 5, cols])
-        assert not torch.equal(left[:, :, 1:5, cols], window[:, :, 1:5, cols])
+    left, right = vae.decoded
+    # paste_rect windows again: canvas cells 0..4 for tile 0, 3..9 for tile 1.
+    assert left.shape == (1, 3, 6, 5) and right.shape == (1, 3, 6, 7)
+    # Tile 0's window cells 0..2 are its own core outside the 2-cell band, and tile 1's window
+    # cells 2..6 are its own core outside it, so each cell there is exactly one lane's value
+    # with no feather arithmetic in between.
+    for decoded, window, cols in ((left, latent[..., 0:5], slice(0, 3)),
+                                  (right, latent[..., 3:10], slice(2, 7))):
+        assert torch.equal(decoded[:, :, 0, cols], window[:, :, 0, cols])
+        assert torch.equal(decoded[:, :, 5, cols], window[:, :, 5, cols])
+        assert not torch.equal(decoded[:, :, 1:5, cols], window[:, :, 1:5, cols])
 
 
 def test_an_empty_mask_refines_nothing_and_never_reaches_the_engine(comfy_stubs, vl_clip):
