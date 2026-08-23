@@ -109,12 +109,25 @@ def test_seam_behaviour_is_not_exposed_as_widgets():
         assert retired not in all_inputs, retired
 
 
+# Widgets that carry NO tooltip on purpose. Each is a core sampling widget that behaves
+# exactly as it does on every other node, so a tooltip there is noise the reader has to skip
+# past to reach the ones that say something. Owner's call, 2026-08-22. A new input still has
+# to explain itself, which is what the tests below keep enforcing.
+NO_TOOLTIP = {"sampler_name", "scheduler", "steps", "cfg", "denoise"}
+
+
+def has_tooltip(name, definition):
+    tooltip = definition[1].get("tooltip")
+    if name in NO_TOOLTIP:
+        return tooltip is None
+    return isinstance(tooltip, str) and bool(tooltip)
+
+
 def test_every_input_has_a_tooltip():
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        tooltip = definition[1].get("tooltip")
-        assert isinstance(tooltip, str) and tooltip, name
+        assert has_tooltip(name, definition), name
 
 
 def test_node_class_attributes():
@@ -190,8 +203,7 @@ def test_vl_every_input_has_a_tooltip():
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        tooltip = definition[1].get("tooltip")
-        assert isinstance(tooltip, str) and tooltip, name
+        assert has_tooltip(name, definition), name
 
 
 def test_vl_method_widget_is_pinned(comfy_stubs):
@@ -394,8 +406,7 @@ def test_upscale_every_input_has_a_tooltip(comfy_stubs):
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        tooltip = definition[1].get("tooltip")
-        assert isinstance(tooltip, str) and tooltip, name
+        assert has_tooltip(name, definition), name
 
 
 def test_upscale_node_class_attributes(comfy_stubs):

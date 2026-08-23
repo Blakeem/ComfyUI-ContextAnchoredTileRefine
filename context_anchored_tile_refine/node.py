@@ -12,7 +12,7 @@ def _anchor_source():
     # VL nodes ONLY: the base node is the raster path, whose ring is always the source.
     from . import sync
 
-    return (list(sync.ANCHOR_SOURCES), {"default": sync.ANCHOR_SOURCE_IMAGE, "tooltip": "What the frozen context ring around each tile shows the model. source image shows the unmodified input, presented on the settled lead schedule. That is maximum fidelity, so placement, style and objects stay locked to the input, including its flaws. live canvas shows the in-progress result itself. The refine may reinterpret or repair damaged content the captions describe. Expect more invention and slightly brighter output."})
+    return (list(sync.ANCHOR_SOURCES), {"default": sync.ANCHOR_SOURCE_IMAGE, "tooltip": "What fills context_anchor. source image keeps the result true to the input. live canvas adds more detail and drifts further from the input."})
 
 
 def _vlm_method():
@@ -25,7 +25,7 @@ def _vlm_method():
     # test).
     from . import captions
 
-    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "What the model is told about each tile. vision tokens slices one whole-image vision encode per tile. The slice carries the original style, what is in that tile, and global coherence, and invents nothing. captions writes a short description of each tile with the same VL model and uses it as that tile's prompt. That is more creative, and it can repair messy backgrounds and hallucinations in the source by steering the tile toward something coherent. vision tokens and captions carries both. Each tile caption is written from that tile's pixels alone. The name in parentheses is a caption preset from settings.toml in the node's folder, which holds the prompts every caption option asks. An option with no name in parentheses uses the first preset in that file, which is the default one. Edit a preset there to change its wording, and edits apply on the next run. Add a preset to add its own pair of options, which needs a ComfyUI restart. When a preset sets global_style_instruction, one style caption of the whole image is written per picture and placed on top of every tile caption so that all tiles follow one style description. vision tokens is fastest, since the whole-image encode is built once and every tile takes a slice of it. captions writes one caption per tile and builds no whole-image encode. vision tokens and captions costs the two added together. Writing captions is what scales with tile count, and the whole-image encode does not."})
+    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on its slice of the entire image's vision encode, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to write your own tile prompts."})
 
 
 def _validate_image(image):
@@ -60,19 +60,19 @@ class ContextAnchoredTileRefine:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "image": ("IMAGE", {"tooltip": "The upscaled image to refine tile by tile."}),
-                "guider": ("GUIDER", {"tooltip": "The guider (e.g. from CFGGuider) that denoises each tile."}),
+                "image": ("IMAGE", {"tooltip": "The image to refine. Upscale it before this node."}),
+                "guider": ("GUIDER", {"tooltip": "The guider that denoises each tile."}),
                 "sampler": ("SAMPLER", {"tooltip": "The sampler used to denoise each tile."}),
                 "sigmas": ("SIGMAS", {"tooltip": "The sigma schedule used when sampling each tile."}),
-                "vae": ("VAE", {"tooltip": "The VAE used to encode each tile for sampling and decode the result."}),
-                "noise": ("NOISE", {"tooltip": "The noise source (e.g. from RandomNoise) used when sampling each tile."}),
+                "vae": ("VAE", {"tooltip": "The VAE that encodes and decodes each tile."}),
+                "noise": ("NOISE", {"tooltip": "Noise is drawn once for the entire image and then sliced for each tile."}),
                 "max_tile_width": ("INT", {"default": 1024, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
                 "max_tile_height": ("INT", {"default": 1024, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge, including up against a mask, then cropped away. With a mask it also sets the frozen-background halo the masked region conditions against, so keep it above 0. It is always additive, so the ring outside a tile core is context_overlap + context_anchor. The useful range is 32 to 256 and 32 suits most scenes."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width, on multi-tile runs only. It is never applied at a mask boundary. Each tile is sampled oversized. On sides bordering an already-processed neighbor (top and left) this band is fully diffused and feathered into that neighbor, at 100% on the seam falling to 0% over the band. Elsewhere it is context, then cropped. The useful range is 32 to 256. DETAILED scenes need LESS, and 32 is invisible even when you know where the seam is, because the seam has texture to hide in and to route through. A large smooth gradient such as an open night sky is the hard case and wants 128 or more. 0 gives hard seams."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Pixels around each tile that are frozen and shown to the model as context, then cropped away. With a mask it is also the frozen background the region is refined against, so keep it above 0."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Overlapped context that is diffused from both sides and then blended. It anchors the tiles to each other, like context_anchor anchors each tile to its surroundings."}),
             },
             "optional": {
-                "mask": ("MASK", {"tooltip": "Optional region mask. Only the masked region is refined, hardened at 0.5, cropped to the mask plus context_anchor, with a 1px anti-aliased edge. The unmasked background is left untouched. Feed an inverted mask for a second pass."}),
+                "mask": ("MASK", {"tooltip": "Only the masked region is refined and the rest is left untouched. Feed an inverted mask for a second pass."}),
             },
         }
 
@@ -154,7 +154,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # their defaults — which is the pre-select behaviour.
         input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
-        input_types["required"]["clip"] = ("CLIP", {"tooltip": "The workflow's CLIP, which must be a vision-language text encoder (Krea 2 family). The whole image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode. The guider's positive prompt is ignored and the negative still applies."})
+        input_types["required"]["clip"] = ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). The guider's positive prompt is ignored and its negative still applies."})
         # The node's own id, so the ledger can write the live phase line under its progress
         # bar. Hidden inputs create no socket and no widget and never enter widgets_values,
         # so this is invisible to the append-only widget rule above. ComfyUI passes it to
@@ -201,21 +201,21 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
 
         return {
             "required": {
-                "image": ("IMAGE", {"tooltip": "The image to upscale and then refine tile by tile."}),
-                "model": ("MODEL", {"tooltip": "The diffusion model used to denoise each tile."}),
-                "clip": ("CLIP", {"tooltip": "The workflow's CLIP, which must be a vision-language text encoder (Krea 2 family). The whole upscaled image is encoded once through its vision path and each tile's positive conditioning becomes its slice of that encode."}),
-                "vae": ("VAE", {"tooltip": "The VAE used to encode each tile for sampling and decode the result."}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Seed for the noise. Noise is drawn once for the whole image and sliced per tile, so a tile's noise does not change when the grid does."}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m", "tooltip": "The sampler used to denoise each tile."}),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform", "tooltip": "The sigma schedule used when sampling each tile."}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "Sampling steps per tile. As in BasicScheduler, the schedule is built for steps/denoise steps and only the last steps+1 sigmas are used."}),
-                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01, "tooltip": "Classifier-free guidance scale applied against the negative conditioning."}),
-                "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much of the schedule to run per tile: 1.0 rewrites the tile, lower values keep more of the upscaled pixels. 0.0 skips diffusion entirely and returns the upscale alone."}),
-                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "Target scale for the whole-image upscale stage that runs before any tiling. The optional upscale_model runs first and this factor sets the final size. 1.0 with no model leaves the input pixels untouched."}),
+                "image": ("IMAGE", {"tooltip": "The image to upscale and then refine."}),
+                "model": ("MODEL", {"tooltip": "The diffusion model that denoises each tile."}),
+                "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). There is no positive prompt input, since each tile is conditioned on the image itself."}),
+                "vae": ("VAE", {"tooltip": "The VAE that encodes and decodes each tile."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Noise is drawn once for the entire image and then sliced for each tile."}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m"}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform"}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
+                "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "The upscale multiplier. The optional upscale_model runs first when one is connected."}),
                 "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
                 "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Width of the fully-frozen, visible-only context ring sampled beyond the overlap on every edge, then cropped away. It is always additive, so the ring outside a tile core is context_overlap + context_anchor. The useful range is 32 to 256 and 32 suits most scenes."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Inter-tile directional feather width, on multi-tile runs only. Each tile is sampled oversized. On sides bordering an already-processed neighbor (top and left) this band is fully diffused and feathered into that neighbor, at 100% on the seam falling to 0% over the band. Elsewhere it is context, then cropped. The useful range is 32 to 256. DETAILED scenes need LESS, and 32 is invisible even when you know where the seam is. A large smooth gradient such as an open night sky wants 128 or more. 0 gives hard seams."}),
+                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Pixels around each tile that are frozen and shown to the model as context, then cropped away."}),
+                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Overlapped context that is diffused from both sides and then blended. It anchors the tiles to each other, like context_anchor anchors each tile to its surroundings."}),
                 # Last, never beside the ring it describes: the frontend restores a saved
                 # workflow's widgets_values POSITIONALLY, so a widget added mid-list shifts
                 # every value after it. Past the end of a legacy array the restore loop stops
@@ -224,8 +224,8 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 "vlm_method": _vlm_method(),
             },
             "optional": {
-                "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model run over the whole image before tiling. Its fixed integer scale rarely lands on upscale_by, so a single lanczos pass then takes the result to the exact target."}),
-                "negative": ("CONDITIONING", {"tooltip": "Optional negative conditioning. Left unconnected it is an empty encode of this node's CLIP, which is what cfg needs to be meaningful at all."}),
+                "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model, run over the entire image before any tiling."}),
+                "negative": ("CONDITIONING", {"tooltip": "Optional negative conditioning. Unconnected it is an empty encode of this node's CLIP."}),
             },
             # The node's own id, so the ledger can write the live phase line under its
             # progress bar. Hidden inputs create no socket and no widget and never enter
