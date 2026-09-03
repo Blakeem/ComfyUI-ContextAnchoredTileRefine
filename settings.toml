@@ -4,6 +4,39 @@
 # Copy this file to settings.user.toml and edit the copy. The nodes read settings.user.toml
 # whenever it exists and ignore this file. A node update replaces settings.toml, so an edit
 # made here is lost. Nothing ever writes settings.user.toml, so your own copy survives.
+# A mistake in this file is a hard error that names the file and the problem. It hides both
+# VL nodes from the menu until it is fixed, and ComfyUI prints the reason to its console.
+#
+# VISION
+# The [vision] table sets how each tile's conditioning samples the image. It applies to every
+# vlm_method option and is read on every run, so an edit applies on the next queued run.
+# canvas_tokens       Vision tokens each tile takes from one encode of the entire image, as
+#                     its own slice of that encode. The image is sampled at the size where a
+#                     tile's share of it holds about this many tokens, so the sample grows
+#                     with the tile count, up to a cap of 2 megapixels. Past the cap each tile
+#                     gets fewer. These tokens carry the tile's scale and its place in the
+#                     image. Use 0 to turn them off.
+# crop_tokens         Vision tokens from an encode of the tile's own crop, sampled at
+#                     crop_tokens x 1024 pixels whatever the image size. These tokens hold the
+#                     tile to what it contains, so an empty tile does not grow a copy of an
+#                     object from elsewhere in the image. Too many redraw the tile's own
+#                     subject. Use 0 to turn them off. At least one of the two must be above 0.
+# caption_megapixels  How much of the tile the VL model reads when it writes a tile caption,
+#                     and how much of the entire image it reads for a style caption. Range
+#                     0.01 to 2.0. Use 0 for the picture's own size, capped at 2.0. A larger input
+#                     makes the caption more literal and a smaller one drops detail. The
+#                     default was settled by A/B on three scenes.
+#
+# TOKENS AND MEGAPIXELS
+# One vision token covers 32 x 32 pixels of the picture the encoder reads, so the count is
+# linear in the pixels and a picture of N megapixels gives about N x 977 tokens. The snap to
+# whole 32 pixel cells moves a count by a few percent.
+#   0.1 megapixels   about 98 tokens
+#   1 megapixel      about 977 tokens
+#   2 megapixels     about 1953 tokens, the cap
+# The defaults below were settled on an 8K image with 24 tiles. crop_tokens 100 samples each
+# crop at 0.1 megapixels, and canvas_tokens 165 samples the image at the 2 megapixel cap. The
+# tiles received 90 to 100 crop tokens and 132 to 195 canvas tokens each.
 #
 # PRESETS
 # Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes.
@@ -15,49 +48,44 @@
 # what the selector offers.
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
-# A mistake in this file is a hard error that names the file and the problem. It hides both
-# VL nodes from the menu until it is fixed, and ComfyUI prints the reason to its console.
 #
 # KEYS PER PRESET
 # tile_caption_instruction   What the VL model is asked about each tile's own crop. The
 #                            answer becomes that tile's conditioning text.
 # tile_caption_max_tokens    Generation budget for that answer. Default 768, max 4096. The
 #                            budget also covers the model's hidden reasoning turn, so it
-#                            sits far above the visible answer length.
-# tile_caption_megapixels    How much of the tile the VL model reads. Default 0.147456,
-#                            which is 384 x 384 pixels. Range 0.01 to 2.0. Use 0 for the
-#                            tile's own size, capped at 2.0. A larger budget reads finer
-#                            detail and makes every caption slower.
+#                            sits far above the visible answer length. The answer stops at
+#                            this many tokens at most, and the VL model sets the length
+#                            below that.
 # global_style_instruction   What the VL model is asked about the whole image, once per
 #                            picture. The answer is placed on top of every tile caption so
 #                            that all tiles follow one style description. Use "" to skip it.
 # global_style_max_tokens    Generation budget for the style answer. Same rules as
 #                            tile_caption_max_tokens.
-# global_style_megapixels    How much of the whole image the VL model reads for the style
-#                            answer. Same rules as tile_caption_megapixels.
 #
 # PROMPT RULES
 # A prompt needs its own stop condition, such as a length word (succinct), a count ceiling,
 # or a fixed region list. Without one the answer runs to max_tokens.
 
+[vision]
+canvas_tokens = 165
+crop_tokens = 110
+caption_megapixels = 0.786432
+
 # The default preset, since it is the first block. It asks what every caption option asked
 # before the presets existed and it writes no style caption, so a workflow saved then keeps
-# its own value and its own result. EU spelling is deliberate, since it measured better than
-# US spelling in A/B testing.
+# its own value. EU spelling is deliberate, since it measured better than US spelling in A/B
+# testing.
 [presets.standard]
 tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry."
 tile_caption_max_tokens = 768
-tile_caption_megapixels = 0.147456
 global_style_instruction = ""
 global_style_max_tokens = 768
-global_style_megapixels = 0.147456
 
 # The tile prompt holds placement and demographics, and the style prompt carries one medium
 # to every tile. It tends to read an image as a painting or an illustration.
 [presets.artwork]
 tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics."
 tile_caption_max_tokens = 768
-tile_caption_megapixels = 0.147456
 global_style_instruction = "succinct flowing prose of only the overall style and artistic medium and physical medium. No objects or items in the scene."
 global_style_max_tokens = 768
-global_style_megapixels = 0.147456

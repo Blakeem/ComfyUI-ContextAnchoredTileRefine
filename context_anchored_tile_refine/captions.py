@@ -3,10 +3,10 @@
 The `vlm_method` select routes every tile's positive through one of three surfaces, and
 this module owns the two that involve the VL model's text generator:
 
-    vision tokens               vl.build_global_slices — ONE whole-canvas vision encode,
-                                row-sliced per tile. Positionally exact, demand-free, and
-                                it invents nothing. The default, and untouched by this
-                                module.
+    vision tokens               vl.build_global_slices — each tile's rows out of an encode of
+                                its own crop and its row slice of one encode of the entire
+                                image. Positionally exact, demand-free, and it invents
+                                nothing. This module only hands it the [vision] table.
     captions                    build_caption_conds — the VL model writes a description of
                                 each tile's own crop and that text IS the tile's whole
                                 positive. Creative: it can repair a messy background or a
@@ -14,19 +14,19 @@ this module owns the two that involve the VL model's text generator:
                                 something coherent, at the cost of inventing detail the
                                 source lacks.
     vision tokens and captions  build_slice_caption_conds — both halves, concatenated: the
-                                tile's row slice of ONE shared pure-vision canvas encode,
+                                tile's vision rows exactly as `vision tokens` builds them,
                                 followed by that tile's caption encoded TEXT-ONLY.
 
 Cost: both caption surfaces pay one clip.generate per tile per picture, then one cheap TEXT
-encode per caption. `vision tokens and captions` adds exactly ONE whole-canvas vision encode
-for the run — the same single encode `vision tokens` pays, shared by every tile. When the
-run's preset carries a global_style_instruction, both caption surfaces also pay ONE
-whole-image style clip.generate per picture, prepended to every tile caption before it is
-encoded.
+encode per caption. `vision tokens and captions` adds the same vision encodes `vision tokens`
+pays, one of the entire image per picture and one small one per tile. When the run's preset
+carries a global_style_instruction, both caption surfaces also pay ONE whole-image style
+clip.generate per picture, prepended to every tile caption before it is encoded.
 
-The instructions themselves live in the settings file in the node's folder (load_settings
-below), so the owner and node users can edit them without touching code. Each preset there
-is one vlm_method option per caption surface (`resolve_method`).
+The instructions live in the settings file in the node's folder (load_settings below), so
+the owner and node users can edit them without touching code. Each preset there is one
+vlm_method option per caption surface (`resolve_method`), and the file's [vision] table
+holds the row counts and picture sizes every surface samples at.
 
 Everything here is lifted from tests-AB/run_ab_matrix.py, which produced the renders the
 owner judged on 2026-08-13; nothing is newly invented. Module scope is torch-only; comfy
@@ -40,14 +40,13 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
-
 from . import vl
 
 # The three conditioning SURFACES — what a vlm_method option builds, with any preset label
-# stripped. "vision tokens" is served by vl.build_global_slices with nothing from this module
-# in the path, so its output stays byte-identical structurally rather than by promise, and it
-# reads no settings at all. The two caption surfaces each gain one labeled option per preset
+# stripped. "vision tokens" is served by vl.build_global_slices and reads only the settings
+# file's [vision] table, never a preset. This module's slice+caption surface takes its vision
+# half from the same vl.build_vision_rows the vision-only surface uses, so the two can never
+# drift apart. The two caption surfaces each gain one labeled option per preset
 # (`vlm_methods` below).
 VLM_METHOD_VISION = "vision tokens"
 VLM_METHOD_VISION_CAPTIONS = "vision tokens and captions"
@@ -130,49 +129,77 @@ USER_SETTINGS_NAME = "settings.user.toml"
 # per-tile step, so a stray extra digit would multiply the whole run's wall time.
 MAX_CAPTION_TOKENS = 4096
 
-# Caption input budget (total pixels, aspect preserved) — AB27's prep, and the default the
-# shipped *_megapixels state. Conditioning-side only: what the VLM reads is a COPY of the
-# tile's crop, never the sampled tile itself (prime directive 1: a sampled tile is never
-# resized, resampled or otherwise degraded).
+# Caption input budget (total pixels, aspect preserved) — AB27's prep, what resample_for_vl
+# falls back to, and the size every judged tests-AB arm was captioned at (ab_env.caption_preset
+# pins it). Conditioning-side only: what the VLM reads is a COPY of the tile's crop, never the
+# sampled tile itself (prime directive 1: a sampled tile is never resized, resampled or
+# otherwise degraded).
 VL_INPUT_BUDGET = 384 * 384
 VL_INPUT_BUDGET_MEGAPIXELS = VL_INPUT_BUDGET / 1_000_000
 
-# Ceiling for a preset-chosen input budget, and what `0` (the crop's own size) is capped at.
-# Qwen3-VL's position table is native at 768x768 px and everything past it is interpolated,
-# so spatial precision softens as the stretch grows. Above this a single caption also costs
-# more prefill than the answer it produces, once per tile.
-VL_INPUT_CAP_MEGAPIXELS = 2.0
+# The caption input size the shipped file reads at, 768x1024 px. The owner's three-scene A/B
+# (TESTS.md test 3) found the VLM's sample size decides whether a caption invents or drops
+# content, and this is the size where it does neither.
+SHIPPED_CAPTION_MEGAPIXELS = 768 * 1024 / 1_000_000
 
-# Floor for a non-zero budget. Below roughly 5e-7 MP the budget rounds to no pixels at all
-# and the resample builds a 0 x 0 image, which reaches torch as an opaque error instead of a
-# named one. 0.01 MP is 100 x 100 px, already past anything a caption can read.
+# Floor for a non-zero caption budget. Below roughly 5e-7 MP the budget rounds to no pixels
+# at all and the resample builds a 0 x 0 image, which reaches torch as an opaque error
+# instead of a named one. 0.01 MP is 100 x 100 px, already past anything a caption can read.
 VL_INPUT_MIN_MEGAPIXELS = 0.01
+
+_VISION_KEYS = {
+    "canvas_tokens": int,
+    "crop_tokens": int,
+    "caption_megapixels": float,
+}
 
 _PRESET_KEYS = {
     "tile_caption_instruction": str,
     "tile_caption_max_tokens": int,
-    "tile_caption_megapixels": float,
     "global_style_instruction": str,
     "global_style_max_tokens": int,
-    "global_style_megapixels": float,
 }
+
+# Per-preset keys this version no longer reads: the caption picture size moved to the
+# [vision] table on 2026-09-02, one size for both caption surfaces. Named so a user's own
+# copy from before then fails with the fix, not with "unknown key".
+_REMOVED_PRESET_KEYS = ("tile_caption_megapixels", "global_style_megapixels")
+
+
+@dataclass(frozen=True)
+class VisionSettings:
+    """The settings file's [vision] table: how every tile's conditioning samples the image.
+    `canvas_tokens` and `crop_tokens` are the vision rows a tile takes from the entire
+    image's encode and from its own crop's (vl.build_vision_rows; 0 turns a source off), and
+    `caption_megapixels` is the picture both caption surfaces write from."""
+
+    canvas_tokens: int
+    crop_tokens: int
+    caption_megapixels: float
+
+
+@dataclass(frozen=True)
+class Settings:
+    """The validated settings file: its [vision] table and its presets in file order."""
+
+    vision: VisionSettings
+    presets: dict
 
 
 @dataclass(frozen=True)
 class Preset:
-    """One vlm_method option, resolved: the conditioning surface it builds and, on the two
-    caption surfaces, everything its settings block asks for. `label` is "" for the
-    vision-only surface, which reads no settings, and `style_instruction` is "" when this
-    preset asks for no whole-image style caption."""
+    """One vlm_method option, resolved: the conditioning surface it builds, the [vision]
+    table every surface samples by, and, on the two caption surfaces, everything its settings
+    block asks for. `label` is "" for the vision-only surface, which reads no preset, and
+    `style_instruction` is "" when this preset asks for no whole-image style caption."""
 
     surface: str
     label: str
+    vision: VisionSettings
     tile_instruction: str = ""
     tile_max_tokens: int = 0
-    tile_megapixels: float = 0.0
     style_instruction: str = ""
     style_max_tokens: int = 0
-    style_megapixels: float = 0.0
 
 
 def settings_path():
@@ -219,6 +246,13 @@ def _check_preset(path, label, block):
     if missing:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} is missing {missing}.")
+    removed = sorted(set(block) & set(_REMOVED_PRESET_KEYS))
+    if removed:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries {removed}, "
+            "which this version no longer reads. The caption picture size is now "
+            "caption_megapixels in the [vision] table. Copy settings.toml to settings.user.toml "
+            "again and move your own values over.")
     unknown = sorted(set(block) - set(_PRESET_KEYS))
     if unknown:
         raise RuntimeError(
@@ -242,30 +276,72 @@ def _check_preset(path, label, block):
             raise RuntimeError(
                 f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} must be "
                 f"between 1 and {MAX_CAPTION_TOKENS}, got {block[key]}.")
-    for key in ("tile_caption_megapixels", "global_style_megapixels"):
-        value = block[key]
-        if value != 0 and not VL_INPUT_MIN_MEGAPIXELS <= value <= VL_INPUT_CAP_MEGAPIXELS:
+
+
+def _check_vision(path, block):
+    # The [vision] table, checked key by key like a preset. A table that silently lost a key
+    # would sample every tile at a size nobody chose.
+    if not isinstance(block, dict):
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): [vision] in {path} must be a table, got "
+            f"{type(block).__name__}.")
+    missing = sorted(set(_VISION_KEYS) - set(block))
+    if missing:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): the [vision] table in {path} is missing {missing}.")
+    unknown = sorted(set(block) - set(_VISION_KEYS))
+    if unknown:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): the [vision] table in {path} carries unknown keys "
+            f"{unknown}. A misspelled key would otherwise change nothing, silently.")
+    for key, expected in _VISION_KEYS.items():
+        allowed = (int, float) if expected is float else expected
+        if not isinstance(block[key], allowed) or isinstance(block[key], bool):
             raise RuntimeError(
-                f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} must be "
-                f"0, which reads the crop's own size, or between {VL_INPUT_MIN_MEGAPIXELS} and "
-                f"{VL_INPUT_CAP_MEGAPIXELS}. Got {value}.")
+                f"Context-Anchored Tile Refine (VL): [vision] key {key} in {path} must be of type "
+                f"{expected.__name__}, got {type(block[key]).__name__}.")
+    for key in ("canvas_tokens", "crop_tokens"):
+        if not 0 <= block[key] <= vl.MAX_VISION_TOKENS:
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): [vision] key {key} in {path} must be between 0 "
+                f"and {vl.MAX_VISION_TOKENS} (0 turns that source off), got {block[key]}.")
+    if block["canvas_tokens"] == 0 and block["crop_tokens"] == 0:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): [vision] in {path} sets canvas_tokens and "
+            "crop_tokens both to 0. A tile needs vision rows from at least one of the two.")
+    value = block["caption_megapixels"]
+    if value != 0 and not VL_INPUT_MIN_MEGAPIXELS <= value <= vl.PICTURE_CAP_MEGAPIXELS:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): [vision] key caption_megapixels in {path} must be "
+            f"0, which reads the picture's own size, or between {VL_INPUT_MIN_MEGAPIXELS} and "
+            f"{vl.PICTURE_CAP_MEGAPIXELS}. Got {value}.")
 
 
 def load_settings(path=None):
-    """The validated presets from the settings file, in the order the file lists them.
+    """The validated settings file: its [vision] table and its presets in file order.
 
     Every defect is a hard error here, which is reached twice: once at startup when the
-    vlm_method selector is built, and once per run before any clip.generate spends GPU time.
+    vlm_method selector is built, and once per run before any encode spends GPU time.
     `path` exists for tests.
     """
     settings_path_ = settings_path() if path is None else path
     data = _read_toml(settings_path_)
 
-    unknown = sorted(set(data) - {"presets"})
+    unknown = sorted(set(data) - {"vision", "presets"})
     if unknown:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): {settings_path_} carries unknown top-level keys "
-            f"{unknown}. Every prompt belongs to a [presets.<label>] block.")
+            f"{unknown}. The file holds one [vision] table and [presets.<label>] blocks.")
+    if "vision" not in data:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): {settings_path_} has no [vision] table. This "
+            "version needs one. Copy settings.toml to settings.user.toml again and move your "
+            "own values over.")
+    _check_vision(settings_path_, data["vision"])
+    vision = VisionSettings(
+        canvas_tokens=int(data["vision"]["canvas_tokens"]),
+        crop_tokens=int(data["vision"]["crop_tokens"]),
+        caption_megapixels=float(data["vision"]["caption_megapixels"]))
     presets = data.get("presets")
     if not isinstance(presets, dict) or not presets:
         raise RuntimeError(
@@ -278,7 +354,7 @@ def load_settings(path=None):
                 "not usable. A label carries the vlm_method option's own parentheses, so it must "
                 "be non-blank and hold neither '(' nor ')'.")
         _check_preset(settings_path_, label, block)
-    return presets
+    return Settings(vision=vision, presets=presets)
 
 
 def build_vlm_methods(presets):
@@ -307,7 +383,7 @@ def vlm_methods():
     would offer values the backend then rejects, or hide values a saved workflow carries.
     A new or renamed preset therefore needs a restart, while a preset's own wording does not.
     """
-    return tuple(build_vlm_methods(load_settings()))
+    return tuple(build_vlm_methods(load_settings().presets))
 
 
 def default_vlm_method():
@@ -348,16 +424,17 @@ def method_label(vlm_method):
 def resolve_method(vlm_method):
     """One vlm_method option resolved to the `Preset` the engine runs on.
 
-    "vision tokens" reads no settings at all. A caption option reads the settings file HERE,
-    once per run, so an edit to a preset's wording applies with no ComfyUI restart. An
-    unlabeled caption option takes the first preset, which is the default one the selector
-    offers unlabeled. Its label still resolves when a workflow spells it out, so the two forms
-    of the default preset are one block and a workflow saved under either keeps running.
+    The settings file is read HERE, once per run, so an edit applies with no ComfyUI restart.
+    "vision tokens" takes only the [vision] table. A caption option takes its preset as well;
+    an unlabeled one takes the first preset, which is the default one the selector offers
+    unlabeled. Its label still resolves when a workflow spells it out, so the two forms of the
+    default preset are one block and a workflow saved under either keeps running.
     """
     surface = method_surface(vlm_method)
+    settings = load_settings()
     if surface == VLM_METHOD_VISION:
-        return Preset(surface=surface, label="")
-    presets = load_settings()
+        return Preset(surface=surface, label="", vision=settings.vision)
+    presets = settings.presets
     label = method_label(vlm_method) or next(iter(presets))
     if label not in presets:
         raise RuntimeError(
@@ -369,24 +446,22 @@ def resolve_method(vlm_method):
     return Preset(
         surface=surface,
         label=label,
+        vision=settings.vision,
         tile_instruction=block["tile_caption_instruction"],
         tile_max_tokens=block["tile_caption_max_tokens"],
-        tile_megapixels=float(block["tile_caption_megapixels"]),
         # Whitespace-only is "off" too, so a user clearing the line by hand cannot leave a
         # blank style caption riding on top of every tile.
         style_instruction=style if style.strip() else "",
         style_max_tokens=block["global_style_max_tokens"],
-        style_megapixels=float(block["global_style_megapixels"]),
     )
 
 
 def caption_budget_pixels(megapixels, source):
-    # The *_megapixels semantics, in one place: 0 (or less) is the source's own area, so the
-    # VL model reads every pixel the crop has, capped by VL_INPUT_CAP_MEGAPIXELS. Above 0 the
-    # value is the budget itself, already range-checked by _check_preset.
+    # The caption_megapixels semantics, in one place: 0 (or less) is the source's own area, so
+    # the VL model reads every pixel the crop has, capped at vl.PICTURE_CAP_PIXELS. Above 0
+    # the value is the budget itself, already range-checked by _check_vision.
     if megapixels <= 0:
-        return min(int(source.shape[1]) * int(source.shape[2]),
-                   round(VL_INPUT_CAP_MEGAPIXELS * 1_000_000))
+        return min(int(source.shape[1]) * int(source.shape[2]), vl.PICTURE_CAP_PIXELS)
     return round(megapixels * 1_000_000)
 
 
@@ -403,7 +478,7 @@ _META_LINE = ("wait,", "wait ", "here's a revised", "here is a revised", "revise
 
 def resample_for_vl(tile_pixels, budget=None):
     # AB27's caption input prep: area-resample a COPY of the tile's crop to `budget` total
-    # pixels, VL_INPUT_BUDGET by default. Unlike vl.resample_for_global there is no
+    # pixels, VL_INPUT_BUDGET by default. Unlike vl.resample_picture there is no
     # /MERGED_CELL snap, because nothing slices this encode by row — the tokenizer's own
     # rounding is free to apply.
     import comfy.utils
@@ -469,7 +544,7 @@ def clean_caption(text):
 
 
 def _tokenize_images(clip, text, image, **kwargs):
-    # vl._encode_canvas' two tokenizer guards, worded for this surface, plus the tail length
+    # vl._encode_one's two tokenizer guards, worded for this surface, plus the tail length
     # the slice+caption layout is derived from: the rows AFTER vision_end, i.e. the caption
     # text and the template tail. Returns (tokens, tail_len). Nothing is encoded here.
     try:
@@ -530,7 +605,8 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
     picture's place in the run, which is all the ProgressBar below needs to span it.
 
     `preset` is the run's resolved settings block (`resolve_method`), which carries the tile
-    question, both generation budgets and both input budgets. A non-empty
+    question, both generation budgets and the [vision] table's caption picture size, read for
+    the tile caption and the style caption alike. A non-empty
     `preset.style_instruction` adds ONE whole-image style caption per batch row, generated
     FIRST from `style_source` (default `source`, and the region path passes the full image so
     that a masked refine's style stays global) and prepended to every tile caption of that
@@ -571,7 +647,7 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
         comfy.model_management.throw_exception_if_processing_interrupted()
         for b in range(batch):
             row = style_canvas[b:b + 1]
-            vl_input = resample_for_vl(row, caption_budget_pixels(preset.style_megapixels, row))
+            vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
             text = generate_caption(clip, vl_input, preset.style_instruction,
                                     preset.style_max_tokens, thinking=True)
             style_texts.append(clean_caption(text))
@@ -587,7 +663,7 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
         row_captions = []
         for b in range(batch):
             row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
-            vl_input = resample_for_vl(row, caption_budget_pixels(preset.tile_megapixels, row))
+            vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
             text = generate_caption(clip, vl_input, preset.tile_instruction,
                                     preset.tile_max_tokens, thinking=True)
             caption = clean_caption(text)
@@ -603,23 +679,6 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
     return captions
 
 
-def _entry_extras(entry):
-    # A slice's extras: the encode's own, minus the full-canvas attention mask (its absence
-    # means "attend to everything", which is exact for the rows kept).
-    extras = dict(entry[1])
-    extras.pop("attention_mask", None)
-    return extras
-
-
-def _slice_rows(encoded, indices):
-    # vl.build_global_slices' per-tile selection, verbatim.
-    sliced = []
-    for entry in encoded:
-        index = torch.tensor(indices, device=entry[0].device)
-        sliced.append([entry[0].index_select(1, index), _entry_extras(entry)])
-    return sliced
-
-
 def build_caption_conds(clip, captions):
     """Captions WITHOUT slices: each caption re-encoded text-only, exactly what
     CLIPTextEncode would produce for that string. `captions` keeps the [tile][batch row]
@@ -630,15 +689,6 @@ def build_caption_conds(clip, captions):
         encoded = clip.encode_from_tokens_scheduled(clip.tokenize(tile_captions[0]))
         tile_positives.append(vl._convert(encoded))
     return tile_positives
-
-
-def _slice_vision_rows(encoded, crop, canvas_h, canvas_w, enc_h, enc_w, n_rows, offset_x, offset_y):
-    # [vision_start][this tile's grid cells][vision_end] out of the ONE pure-vision canvas
-    # encode — the shipped slice MINUS its template tail. Passing expected_seq = n_rows + 2
-    # makes vl.slice_indices' trailing range empty; the one template tail the stream may carry
-    # arrives with the caption rows that are concatenated after these.
-    indices = vl.slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, n_rows + 2, offset_x, offset_y)
-    return _slice_rows(encoded, indices)
 
 
 def _caption_tail_len(clip, caption, probe_image):
@@ -667,35 +717,11 @@ def _encode_caption_text_only(clip, caption, expected_rows):
     return encoded
 
 
-def _cat_rows(vision_entries, caption_entries):
-    # One tile's positive: its sliced vision rows, then its caption rows, on the ROW axis.
-    # Extras are the VISION encode's — the caption encode's are dropped — so anything the
-    # caption encode carries that the vision encode does not would vanish silently. Both are
-    # hard errors instead: a stray extra key, and a real pooled_output (Krea 2 produces None
-    # on both encodes, measured; a CLIP that does not is outside what this surface settled on).
-    merged = []
-    for vision, caption in zip(vision_entries, caption_entries, strict=True):
-        vision_extras, caption_extras = _entry_extras(vision), _entry_extras(caption)
-        stray = sorted(set(caption_extras) - set(vision_extras))
-        if stray:
-            raise RuntimeError(
-                "Context-Anchored Tile Refine (VL): the caption encode carries conditioning "
-                f"extras the vision encode lacks ({stray}). Concatenating the rows would drop "
-                "them silently.")
-        if caption_extras.get("pooled_output") is not None:
-            raise RuntimeError(
-                "Context-Anchored Tile Refine (VL): the caption encode has a real "
-                "pooled_output. The concatenated positive keeps the vision encode's, so this "
-                "one would be dropped silently.")
-        rows = torch.cat([vision[0], caption[0].to(vision[0].device, vision[0].dtype)], dim=1)
-        merged.append([rows, vision_extras])
-    return merged
-
-
-def build_slice_caption_conds(clip, encode_source, tiles, captions, offset_x=0, offset_y=0):
-    """VL slices AND captions: each tile's positive is its row slice of ONE shared pure-vision
-    canvas encode, followed by that tile's own caption encoded TEXT-ONLY, concatenated on the
-    row axis.
+def build_slice_caption_conds(clip, encode_source, tiles, captions, vision, offset_x=0, offset_y=0):
+    """VL rows AND captions: each tile's positive is its vision rows exactly as the `vision
+    tokens` surface builds them (vl.build_vision_rows: its own crop's cells, then its slice
+    of the entire image), followed by that tile's own caption encoded TEXT-ONLY, concatenated
+    on the row axis.
 
     Settled 2026-08-16 by the owner's A/B (tests-AB/run_ab_split.py arm 2 against the previous
     arm 1, then the sync-tiles campaign). Until then the caption rode INSIDE a whole-canvas
@@ -706,16 +732,12 @@ def build_slice_caption_conds(clip, encode_source, tiles, captions, offset_x=0, 
     (docs/vl-conditioning-encode-cost.md sections 6-7, measured bit-identical at matched
     stream length).
 
-    `encode_source` is the canvas the OFFSET tile rects index and is taken separately from
-    the canvas the captions describe — mirroring vl.build_global_slices: on the whole-image
-    path both are the padded canvas at offset 0, while on the mask path the captions describe
-    each region tile's own crop and this encodes the FULL image with the bbox origin as the
+    `encode_source` is the image the OFFSET tile rects index, taken separately from the canvas
+    the captions describe — mirroring vl.build_vision_rows: on the whole-image path both are
+    the padded canvas at offset 0, while on the mask path the captions describe each region
+    tile's own crop and the canvas rows come from the FULL image with the bbox origin as the
     offset, so a masked refine stays globally informed."""
-    canvas_copy, enc_h, enc_w = vl.resample_for_global(encode_source)
-    grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
-    n_rows = grid_h * grid_w
-    canvas_h, canvas_w = int(encode_source.shape[1]), int(encode_source.shape[2])
-    batch = int(canvas_copy.shape[0])
+    batch = int(encode_source.shape[0])
     tile_positives = []
 
     if any(len(tile_captions) != batch for tile_captions in captions):
@@ -724,20 +746,22 @@ def build_slice_caption_conds(clip, encode_source, tiles, captions, offset_x=0, 
             "captioned a different number of times. Every batch row must carry its own caption "
             "or a row would be conditioned on another row's picture.")
 
-    # ONE pure-vision encode for the whole picture, shared by every tile — literally the encode
-    # `vision tokens` pays, and the reason this surface no longer scales its encode cost with
-    # tile count. Core's tokenizer attaches images[0] alone, so the canvas is narrowed to one
-    # picture here; refine_image's picture loop is what makes that the whole batch.
-    encoded, _expected_seq = vl._encode_canvas(clip, canvas_copy[:1], grid_h, grid_w)
+    # The vision half is vl's own, so this surface and `vision tokens` can never build
+    # differently shaped rows. Core's tokenizer attaches images[0] alone, so the source is
+    # narrowed to one picture here; refine_image's picture loop is what makes that the whole
+    # batch. The tail is left off: the one template tail the stream may carry arrives with
+    # the caption rows concatenated after the vision rows.
+    tile_rows, probe_image = vl.build_vision_rows(clip, encode_source[:1], tiles, vision,
+                                                  offset_x, offset_y, with_tail=False)
 
-    for tile, tile_captions in zip(tiles, captions, strict=True):
+    for tile_captions, rows in zip(captions, tile_rows, strict=True):
         # Exactly ONE row, so nothing is concatenated across rows: the count guard above ties
-        # len(tile_captions) to the encode canvas's batch, and refine_image's picture loop
+        # len(tile_captions) to the encode source's batch, and refine_image's picture loop
         # makes that batch 1.
         caption = tile_captions[0]
-        tail_len = _caption_tail_len(clip, caption, canvas_copy[:1])
-        vision_entries = _slice_vision_rows(encoded, tile.crop_rect, canvas_h, canvas_w,
-                                            enc_h, enc_w, n_rows, offset_x, offset_y)
+        # The probe is never encoded and _tokenize_images counts the rows after a single image
+        # token, so any resampled copy gives the same tail length.
+        tail_len = _caption_tail_len(clip, caption, probe_image)
         caption_entries = _encode_caption_text_only(clip, caption, tail_len)
-        tile_positives.append(vl._convert(_cat_rows(vision_entries, caption_entries)))
+        tile_positives.append(vl._convert(vl.cat_rows(rows, caption_entries, "caption encode")))
     return tile_positives

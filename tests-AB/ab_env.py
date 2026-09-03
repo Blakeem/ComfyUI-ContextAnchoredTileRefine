@@ -16,6 +16,7 @@ the 0.3.45 desktop tree under AppData has no z-image support at all
 loading the UNET there fails outright. `Z_IMAGE_MARKER` probes for that support and
 roots that have it win. Set COMFYUI_ROOT to override the whole search.
 """
+import dataclasses
 import importlib.util
 import os
 import sys
@@ -257,13 +258,14 @@ def caption_preset(instruction, max_tokens, surface=None):
     """
     from context_anchored_tile_refine import captions
 
+    # The vision half is the run's own [vision] table; only the caption picture is pinned.
+    vision = captions.load_settings().vision
     return captions.Preset(
         surface=captions.VLM_METHOD_VISION_CAPTIONS if surface is None else surface,
         label="pinned",
+        vision=dataclasses.replace(vision, caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
         tile_instruction=instruction, tile_max_tokens=max_tokens,
-        tile_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS,
-        style_instruction="", style_max_tokens=max_tokens,
-        style_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS)
+        style_instruction="", style_max_tokens=max_tokens)
 
 
 def version(root):

@@ -585,7 +585,7 @@ def test_preset_picture_settles_the_total_before_any_fill(comfy_stubs):
     # The grid-solve call: every per-tile budget at its true multiplier, in one burst,
     # while the value is still zero — from here to the end the total is a constant.
     ledger = progress.Ledger(progress.build_plan("vision tokens and captions", 4))
-    ledger.preset_picture("vision tokens and captions", 30, 1, 4)
+    ledger.preset_picture("vision tokens and captions", 30, 1, 4, vision_units=progress.W_ENCODE)
     settled = ledger.total
 
     assert ledger.value == 0
@@ -606,12 +606,64 @@ def test_preset_picture_settles_the_total_before_any_fill(comfy_stubs):
     assert ledger.total == settled and ledger.value == settled
 
 
+def test_vision_encode_units_count_one_canvas_and_one_crop_per_tile():
+    # The mirror of vl.build_vision_rows' tower passes: a source at 0 tokens runs none.
+    from context_anchored_tile_refine.captions import VisionSettings
+
+    both = VisionSettings(canvas_tokens=165, crop_tokens=100, caption_megapixels=0.5)
+    canvas_only = VisionSettings(canvas_tokens=165, crop_tokens=0, caption_megapixels=0.5)
+    crop_only = VisionSettings(canvas_tokens=0, crop_tokens=100, caption_megapixels=0.5)
+    assert progress.vision_encode_units(30, both) == progress.W_ENCODE + 30 * progress.W_ENCODE_CROP
+    assert progress.vision_encode_units(30, canvas_only) == progress.W_ENCODE
+    assert progress.vision_encode_units(30, crop_only) == 30 * progress.W_ENCODE_CROP
+
+
+def test_preset_picture_sizes_the_vision_segment_by_the_vision_units(comfy_stubs):
+    # vision_units is the pre-pass's vision encode cost (vision_encode_units), and the
+    # engine's open must carry the identical number or open would move the total the preset
+    # exists to settle.
+    units = progress.W_ENCODE + 30 * progress.W_ENCODE_CROP
+    ledger = progress.Ledger(progress.build_plan("vision tokens and captions", 4))
+    ledger.preset_picture("vision tokens and captions", 30, 1, 4, vision_units=units)
+    settled = ledger.total
+
+    assert settled == scaled(
+        30 * progress.K_CAPTION
+        + units + 30 * progress.W_ENCODE_CAPTION_TEXT
+        + 30 * progress.W_ENCODE_TILE
+        + 4 * 30
+        + 30 * progress.W_DECODE_TILE
+    )
+
+    ledger.open(progress.CAPTIONS, 30 * progress.K_CAPTION, chunks=30)
+    ledger.open(progress.VISION_ENCODE, units + 30 * progress.W_ENCODE_CAPTION_TEXT)
+    ledger.open(progress.CANVAS_ENCODE, 30 * progress.W_ENCODE_TILE)
+    ledger.open(progress.SAMPLING, 4 * 30)
+    ledger.open(progress.DECODE, 30 * progress.W_DECODE_TILE)
+    ledger.finish()
+    assert ledger.total == settled and ledger.value == settled
+
+
+def test_preset_picture_sizes_the_vision_only_segment_by_the_vision_units(comfy_stubs):
+    units = progress.W_ENCODE + 9 * progress.W_ENCODE_CROP
+    ledger = progress.Ledger(progress.build_plan("vision tokens", 4))
+    ledger.preset_picture("vision tokens", 9, 1, 4, vision_units=units)
+    settled = ledger.total
+
+    ledger.open(progress.VISION_ENCODE, units)
+    ledger.open(progress.CANVAS_ENCODE, 9 * progress.W_ENCODE_TILE)
+    ledger.open(progress.SAMPLING, 4 * 9)
+    ledger.open(progress.DECODE, 9 * progress.W_DECODE_TILE)
+    ledger.finish()
+    assert ledger.total == settled and ledger.value == settled
+
+
 def test_preset_picture_counts_the_style_caption_like_the_engines_open(comfy_stubs):
     # style_rows is the whole-image style caption count (one per row when the run's preset sets
     # a style prompt). The preset and the engine's open must carry the identical caption
     # count, or open would move the total the preset exists to settle.
     ledger = progress.Ledger(progress.build_plan("captions", 4))
-    ledger.preset_picture("captions", 30, 1, 4, style_rows=1)
+    ledger.preset_picture("captions", 30, 1, 4, vision_units=progress.W_ENCODE, style_rows=1)
     settled = ledger.total
 
     ledger.open(progress.CAPTIONS, 31 * progress.K_CAPTION, chunks=31)

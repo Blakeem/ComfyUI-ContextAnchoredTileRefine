@@ -9,7 +9,7 @@ not a maintained suite).
 Section 10 of that doc: before any timing matrix or render A/B, verify on the REAL installed
 model that the vision rows (indices 0 .. N+1) of a caption-carrying encode are bit-identical
 to the same rows of (a) an encode carrying a DIFFERENT caption and (b) the pure-vision encode
-`vl._encode_canvas` produces. If they are, the "plain split" design's vision half is provably
+`vl._encode_one` produces. If they are, the "plain split" design's vision half is provably
 free and only the caption rows need a render A/B. If they are not, section 6's causality
 claim is wrong and the whole split design is void.
 
@@ -18,7 +18,7 @@ Five encoder calls, no clip.generate, no sampling:
     E1  _encode_slice_caption(canvas, CAPTION_A)     today's stream, caption A
     E2  _encode_slice_caption(canvas, CAPTION_A)     the SAME call again — determinism floor
     E3  _encode_slice_caption(canvas, CAPTION_B)     today's stream, caption B
-    E4  vl._encode_canvas(canvas)                    pure vision — the plain split's ONE encode
+    E4  vl._encode_one(canvas)                    pure vision — the plain split's ONE encode
     E5  encode_from_tokens_scheduled(tokenize(A))    text-only caption A — the plain split's
                                                      cat operand (build_caption_conds' call)
     E6  _encode_slice_caption(canvas, CAPTION_B      caption B padded until its token count
@@ -136,7 +136,7 @@ def compare(label, left, right, floor=0.0):
 
 def main():
     base = load_base()
-    canvas, enc_h, enc_w = vl.resample_for_global(base)
+    canvas, enc_h, enc_w = vl.resample_picture(base, 768 * 1024)
     grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
     n_rows = grid_h * grid_w
     print(f"canvas {enc_w}x{enc_h}, grid {grid_w}x{grid_h}, n_rows={n_rows}")
@@ -152,7 +152,7 @@ def main():
         e3, seq_b = timed("E3 caption B (today's stream)",
                           lambda: captions._encode_slice_caption(clip, canvas, CAPTION_B, n_rows))
         e4, seq_pure = timed("E4 pure vision (plain split's one encode)",
-                             lambda: vl._encode_canvas(clip, canvas, grid_h, grid_w))
+                             lambda: vl._encode_one(clip, canvas, grid_h, grid_w))
         e5 = timed("E5 caption A text-only (split's operand)",
                    lambda: clip.encode_from_tokens_scheduled(clip.tokenize(CAPTION_A)))
         caption_b_padded = pad_to_length(clip, canvas, CAPTION_B,

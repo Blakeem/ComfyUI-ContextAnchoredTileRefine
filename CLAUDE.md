@@ -225,24 +225,46 @@ without that doc's temporal design.
   the guard keeps the pipeline byte-identical. `gligen`/`area`/`mask`/`reference_latents` pass
   through untouched by design (unresolved mask-path coordinate semantics; cropping
   `reference_latents` would regress Kontext-style workflows).
-- `context_anchored_tile_refine/vl.py`: the VL node's conditioning. The whole padded canvas is
-  area-resampled ONCE to `GLOBAL_SLICE_BUDGET` (/32-snapped so the merged-patch grid is exact)
-  and encoded through the CLIP's vision path with NO text (Krea 2's own template, explicit —
-  the default image template would survive the strip and shift the layout). Each tile's
-  positive becomes its row slice of that encode: `[0]=vision_start, [1..N]=grid rows (raster),
-  [N+1]=vision_end, tail]`, cells intersecting the tile's `crop_rect` (boundary cells shared by
-  both neighbors — the row-space overlap band). A/B-settled (AB26-AB36): vision rows are
-  positionally exact and demand-free, one shared encode keeps the cross-tile story coherent,
-  and ANY text (user prompt, generated style, captions) re-admits phantom objects in proportion
-  to its volume — hence no prompt input at all. Fail-fast guards: non-VL CLIP (tokenizer
-  rejects images / no image token), encoder seq-length vs token-derived layout. The slices are
-  built ONCE per run by the sync engine's pre-pass and handed to `sync.build_lane_guiders`, which
-  gives each lane its OWN guider copy carrying that tile's positive — the caller's guider is
-  never swapped and there is nothing to restore; it must keep `positive` in `original_conds`
-  (CFGGuider convention). On the mask path
-  the FULL image is encoded and each region tile's rect is offset by the bbox origin
-  (`slice_indices` offsets), so a masked refine stays globally informed. **torch-only at
-  module scope**, comfy lazy (subprocess test pins it).
+- `context_anchored_tile_refine/vl.py`: the VL node's conditioning. Each tile's positive is
+  two pure vision encodes through the CLIP's vision path with NO text (Krea 2's own template,
+  explicit, since the default image template would survive the strip and shift the layout),
+  concatenated on the row axis by `build_vision_rows`: the CROP rows, every cell of the
+  tile's own crop resampled to `crop_tokens` x 1024 px and encoded ALONE (one encode per
+  tile), then the CANVAS rows, the tile's row slice of ONE encode of the entire image
+  (`slice_indices`: `[0]=vision_start, [1..N]=grid rows (raster), [N+1]=vision_end, tail]`,
+  cells intersecting the tile's `crop_rect`, boundary cells shared by both neighbors, the
+  row-space overlap band), with the template tail once after the last block. Both counts are
+  the settings file's `[vision]` table (`captions.VisionSettings`, read per run through the
+  `Preset` every surface carries). 0 turns a source off and both at 0 is rejected at load.
+  The canvas is sampled so a tile's share of it holds about `canvas_tokens` cells
+  (`canvas_budget_pixels`: tokens x 1024 x canvas area / MEAN crop area, capped at
+  `PICTURE_CAP_MEGAPIXELS` = 2 MP, past which the owner measured the VLM breaking down), so
+  the sample grows with the tile count and a tile gets the same rows at every image size.
+  Rows still vary by tile, since edge tiles are smaller and boundary cells are shared.
+  Settled by the owner's block A/B of 2026-09-02 (TESTS.md test 10,
+  `tests-AB/run_ab_tile_phantom.py`): a cell carries the picture it was encoded in, so the
+  canvas slice of a flat sky tile grows a copy of the image's salient object (a tower in the
+  clouds), larger the more canvas rows it gets (70 rows at 0.79 MP grew two towers, 165 rows
+  at 2 MP a skyline), and the crop rows of that tile hold only sky and cancel the demand.
+  About 100 crop rows do that without redrawing a content tile, where 200 swirl the tile's
+  own subject and 768 gouge it, so the shipped 165 canvas and 100 crop tokens are the judged
+  point. A 3x3 NEIGHBORHOOD WINDOW encode (2026-09-01 to 2026-09-02) sat between the two and
+  failed like the canvas slice, so it was removed, not flagged off. A/B-settled (AB26-AB36):
+  vision rows are positionally exact and demand-free, and ANY text (user prompt, generated
+  style, captions) re-admits phantom objects in proportion to its volume, so there is no
+  prompt input at all. The rows are a bag. Krea 2's DiT gives every conditioning row RoPE
+  position 0 (measured bit-exact under a shuffle), so the block order carries nothing.
+  Fail-fast guards: non-VL CLIP (tokenizer rejects images / no image token), encoder
+  seq-length vs token-derived layout, and a real `pooled_output` or stray extras on a
+  concatenated block (`cat_rows`. Krea 2 returns None on every encode). One interrupt check
+  per tower pass. The rows are built ONCE per run by the sync engine's pre-pass and handed to
+  `sync.build_lane_guiders`, which gives each lane its OWN guider copy carrying that tile's
+  positive. The caller's guider is never swapped and there is nothing to restore. It must
+  keep `positive` in `original_conds` (CFGGuider convention). On the mask path the encode
+  source is the FULL image at the bbox origin (`slice_indices` offsets, `crop_picture`
+  clamps), so a region's canvas rows are the entire image's and a masked refine sees the
+  image around the mask. **torch-only at module scope**, comfy lazy (subprocess test pins
+  it).
 - `context_anchored_tile_refine/captions.py`: the `vlm_method` surfaces that are not pure
   vision rows. Per-tile VLM captions generated from the tile's own crop by the SAME CLIP that
   encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
@@ -252,10 +274,11 @@ without that doc's temporal design.
   carries core's own `(?:</think>|$)` alternation and it is load-bearing: without the `|$` a
   tile whose reasoning turn exhausts `max_tokens` returns that REASONING as its caption,
   non-empty, so `generate_caption`'s fallback chain never fires and the model's deliberation
-  becomes the tile's whole positive. **The
-  instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED PRESETS
-  since 2026-08-22** (`load_settings` / `resolve_method` / `vlm_methods`), deployed with the
-  node. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,
+  becomes the tile's whole positive. **The instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED
+  PRESETS since 2026-08-22, beside a `[vision]` table since 2026-09-02** (`load_settings`
+  returns `Settings(vision, presets)`, `resolve_method` / `vlm_methods`), deployed with the
+  node. The `[vision]` table (`canvas_tokens`, `crop_tokens`, `caption_megapixels`) is
+  validated like a preset, rides on every `Preset`, and is what vl.py samples by. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,
   which is what makes an edit survive a node update (`.gitignore`d, never written by the
   package). TWO READ CADENCES, deliberately: the PRESET LIST is read once per session by
   `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
@@ -267,10 +290,14 @@ without that doc's temporal design.
   saved VL workflow into a value the selector no longer offers. Every later preset's options
   read `"<surface> (<label>)"`. An unlabeled option resolves to the first preset, and that
   preset's label still resolves when a workflow spells it out even though the selector no
-  longer offers the labeled form. "vision tokens" reads nothing at all (pinned end to end).
+  longer offers the labeled form. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
   The shipped default is `standard`, whose wording and budgets are the pre-settings-file
-  constants character for character (`RICH_GROUPED_INSTRUCTION`, 768 tokens, 384^2 px), so the
-  default option samples what it sampled before the file existed. A broken file is a hard error
+  constants character for character (`RICH_GROUPED_INSTRUCTION`, 768 tokens). The caption
+  picture size is the `[vision]` table's `caption_megapixels`, ONE size for the tile caption
+  and the style caption since 2026-09-02 (a user's own copy still carrying the two per-preset
+  `*_megapixels` keys fails with a message naming the move), shipped at
+  `SHIPPED_CAPTION_MEGAPIXELS` (768x1024 px, settled by the owner's three-scene A/B on
+  2026-09-01, TESTS.md test 3, over the 384^2 px it first shipped with). A broken file is a hard error
   before any clip.generate, and the all-in-one node resolves it FIRST, before its
   upscale-model pass and text-encoder load. The engine resolves ONCE per picture in
   `sync._prepare_run` and hands the `Preset` down, so the ledger's caption count and the
@@ -286,14 +313,13 @@ without that doc's temporal design.
   pin and file together. The retired settled pair (`RICH_GROUPED_INSTRUCTION`,
   `SETTLED_POSITION_INSTRUCTION`) stays defined, character-frozen EU spelling included,
   because tests-AB's judged arms pin themselves to it (`ab_env.caption_preset` is how a
-  harness asks its own pinned question). The caption input is an area-resampled COPY sized by
-  the preset's `*_megapixels`, defaulting to the settled 384^2 total px and never the sampled
-  tile (prime directive 1); `0` reads the crop's own size, capped at
-  `VL_INPUT_CAP_MEGAPIXELS`. `build_caption_conds` encodes the
-  caption as plain text; `build_slice_caption_conds` concatenates, on the ROW axis, the
-  tile's slice of ONE shared pure-vision canvas encode and that tile's caption encoded
-  TEXT-ONLY — so the canvas encode cost is one for the whole image, exactly as on the
-  vision-only surface. It used to put the caption INSIDE the canvas encode, at one canvas
+  harness asks its own pinned question). The caption input is an area-resampled COPY sized by `caption_megapixels`
+  (`VL_INPUT_BUDGET` keeps the 384^2 px the judged harness arms were captioned at) and never
+  the sampled tile (prime directive 1). `0` reads the crop's own size, capped at
+  `vl.PICTURE_CAP_MEGAPIXELS`. `build_caption_conds` encodes the
+  caption as plain text; `build_slice_caption_conds` concatenates, on the ROW axis, the tile's vision rows (the
+  same `vl.build_vision_rows` the vision-only surface uses, tail left off) and that tile's
+  caption encoded TEXT-ONLY, so the vision cost is exactly the vision-only surface's. It used to put the caption INSIDE the canvas encode, at one canvas
   encode PER TILE; the owner's A/B retired that (far-canvas content leaked into every tile's
   caption rows — the phantom moon), and the vision rows are provably unchanged by the switch
   because attention is causal (`docs/vl-conditioning-encode-cost.md` sections 6-7 and its
@@ -314,8 +340,9 @@ without that doc's temporal design.
   Only the sampling segment is exact (`stepper.plan_evals` x n_tiles, sized at stepper intake
   and advanced by the step→eval-index map, because a naive per-step increment overshoots a
   2-eval sampler's final step); every other phase is a named module-level constant
-  (`W_UPSCALE_STEP` / `W_CLIP_LOAD` / `K_CAPTION` / `W_ENCODE` / `W_ENCODE_CAPTION_TEXT` /
-  `W_ENCODE_TILE` / `W_DECODE_TILE`), i.e. calibration knobs in ONE place. **The ledger is
+  (`W_UPSCALE_STEP` / `W_CLIP_LOAD` / `K_CAPTION` / `W_ENCODE` / `W_ENCODE_CROP` /
+  `W_ENCODE_CAPTION_TEXT` / `W_ENCODE_TILE` / `W_DECODE_TILE`, with `vision_encode_units`
+  the one place the vision segment is sized from the `[vision]` table), i.e. calibration knobs in ONE place. **The ledger is
   created in node.py and NOWHERE else** (both VL nodes); `sampling.refine_image`,
   `sync.refine_sync`, `sync.build_tile_positives`, `captions.generate_tile_captions` and
   `upscale.prepare_upscaled` only ACCEPT one as `progress=None` and build nothing when it is

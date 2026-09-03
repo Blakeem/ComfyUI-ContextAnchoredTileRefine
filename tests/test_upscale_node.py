@@ -34,7 +34,7 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, **overrides):
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, **overrides):
     """Run refine() with every collaborator faked; return (recorded, result)."""
     recorded = {
         "prepare_upscaled": None,
@@ -44,7 +44,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         "refine_image": None,
         "upscaled": torch.rand(1, 64, 64, 3) if upscaled is None else upscaled,
         "empty_cond": [("empty", {})],
-        "sigmas": torch.linspace(1.0, 0.0, 5),
+        "sigmas": torch.linspace(1.0, 0.0, 5) if sigmas is None else sigmas,
         "refined": torch.rand(1, 64, 64, 3),
     }
 
@@ -251,6 +251,27 @@ def test_the_first_clip_call_gets_its_own_segment_and_the_shim_is_restored(comfy
     recorded, _ = _drive(monkeypatch)
 
     assert progress.CLIP_LOAD in [name for name, _units in recorded["upscale_progress"].segments]
+    assert comfy.utils.ProgressBar is real
+
+
+def test_denoise_zero_returns_the_upscale_before_the_first_clip_call(comfy_stubs, monkeypatch):
+    # denoise 0 is "upscale only": build_sigmas hands back an empty schedule and the node
+    # returns the upscaled picture itself. encode_empty is the run's first CLIP call and pays
+    # the text-encoder load (minutes on a cold cache), so it must never be reached, and
+    # neither may the guider build or the engine. The picture is refine_image's own
+    # zero-step result: RGB-narrowed, a copy, never the caller's tensor.
+    import comfy.utils
+
+    real = comfy.utils.ProgressBar
+    upscaled = torch.rand(1, 64, 64, 4)
+    recorded, result = _drive(monkeypatch, upscaled=upscaled, sigmas=torch.FloatTensor([]), denoise=0.0)
+
+    assert recorded["build_sigmas"] == (recorded["model"], "sgm_uniform", 20, 0.0)
+    assert recorded["encode_empty"] is None
+    assert recorded["build_guider"] is None
+    assert recorded["refine_image"] is None
+    assert torch.equal(result[0], upscaled[..., :3])
+    assert result[0].data_ptr() != upscaled.data_ptr()
     assert comfy.utils.ProgressBar is real
 
 

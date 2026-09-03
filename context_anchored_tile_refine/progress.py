@@ -61,7 +61,8 @@ W_CLIP_LOAD = 4.0             # the upscale node's FIRST CLIP call: CLIP.load_mo
                               # text encoder's move onto the GPU, which no other bar covers
 K_CAPTION = 12.0              # one VLM caption: an autoregressive decode of up to the
                               # preset's max_tokens, the run's slowest per-tile step
-W_ENCODE = 4.0                # the ONE whole-canvas vision encode, shared by every tile
+W_ENCODE = 4.0                # ONE vision encode of the entire canvas (up to the 2 MP cap)
+W_ENCODE_CROP = 0.5           # one tile's own crop encode (crop_tokens x 1024 px, ~0.1 MP)
 W_ENCODE_CAPTION_TEXT = 0.5   # one per-tile caption TEXT encode (scales with tile count:
                               # captions.py encodes each tile's caption separately)
 W_ENCODE_TILE = 0.5           # one tile's VAE window encode
@@ -75,6 +76,17 @@ CAPTION_FILL_RATIO = 0.65
 # comfy's ProgressBar carries integers, while the budget above is fractional; the emitted
 # value is the unit count scaled by this. Purely a resolution choice.
 EMIT_SCALE = 100
+
+
+def vision_encode_units(n_tiles, vision):
+    # One picture's VISION_ENCODE units, the mirror of vl.build_vision_rows' own tower passes:
+    # one canvas encode when the canvas rows are on, one crop encode per tile when the crop
+    # rows are on (`vision` is the settings file's [vision] table). Shared by preset_picture
+    # and the engine's open() so the two can never disagree.
+    units = W_ENCODE if vision.canvas_tokens > 0 else 0.0
+    if vision.crop_tokens > 0:
+        units += W_ENCODE_CROP * max(int(n_tiles), 1)
+    return units
 
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text
@@ -287,22 +299,24 @@ class Ledger:
                 entry[1] = float(units)
         self._emit()
 
-    def preset_picture(self, vlm_method, n_tiles, rows, eval_total, style_rows=0):
+    def preset_picture(self, vlm_method, n_tiles, rows, eval_total, vision_units, style_rows=0):
         # One picture's whole block at true sizes, called at that picture's grid solve —
         # the mirror of build_plan's per-picture entries with the real multipliers, and
         # the same arithmetic the engine's open() calls carry (they re-set the identical
         # numbers, so open never moves the total again). `style_rows` counts the
-        # whole-image style captions (one per row when the run's preset asks for one).
+        # whole-image style captions (one per row when the run's preset asks for one), and
+        # `vision_units` is the pre-pass's vision encode cost (vision_encode_units), required
+        # because a forgotten one would silently size the segment without the crop encodes.
         from . import captions
 
         surface = captions.method_surface(vlm_method)
         count = max(int(n_tiles), 1)
         caption_count = count * max(int(rows), 1) + max(int(style_rows), 0)
         if surface == captions.VLM_METHOD_VISION:
-            self.preset(VISION_ENCODE, W_ENCODE)
+            self.preset(VISION_ENCODE, float(vision_units))
         elif surface == captions.VLM_METHOD_VISION_CAPTIONS:
             self.preset(CAPTIONS, caption_count * K_CAPTION)
-            self.preset(VISION_ENCODE, W_ENCODE + count * W_ENCODE_CAPTION_TEXT)
+            self.preset(VISION_ENCODE, float(vision_units) + count * W_ENCODE_CAPTION_TEXT)
         else:
             self.preset(CAPTIONS, caption_count * K_CAPTION)
             self.preset(CAPTION_ENCODE, count * W_ENCODE_CAPTION_TEXT)

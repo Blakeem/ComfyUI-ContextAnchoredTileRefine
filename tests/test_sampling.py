@@ -307,7 +307,7 @@ def test_the_engine_draws_a_batched_runs_noise_at_the_full_batch(comfy_stubs, mo
 
     from context_anchored_tile_refine import vl
 
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, PIPE_ENC, PIPE_ENC))
     noise = GridNoise()
 
     out = sampling.refine_image(torch.rand(2, 80, 80, 3), VLGuider(), _sync_sampler(), SIGMAS,

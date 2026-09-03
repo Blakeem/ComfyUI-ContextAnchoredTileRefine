@@ -71,9 +71,9 @@ from .progress import (
     SAMPLING,
     VISION_ENCODE,
     W_DECODE_TILE,
-    W_ENCODE,
     W_ENCODE_CAPTION_TEXT,
     W_ENCODE_TILE,
+    vision_encode_units,
 )
 
 # What the frozen context_anchor ring around each tile SHOWS the model. "source image": the
@@ -267,11 +267,11 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
     # text encoder is resident exactly once, before the diffusion model loads.
     # `preset` is the run's resolved vlm_method (captions.resolve_method), so the settings
     # file is read ONCE per run by the caller and every count below reads the same block.
-    # Cost differs per surface: "vision tokens" is ONE whole-canvas encode for the run,
-    # "captions" is one clip.generate plus one cheap text encode per tile, and
-    # "vision tokens and captions" is that one shared encode plus both per tile. A preset
-    # carrying a style instruction adds one whole-image clip.generate per row on both caption
-    # surfaces. Only the clip.generate pre-pass scales with tile count.
+    # Cost differs per surface: "vision tokens" is one encode of the entire canvas plus one
+    # small encode per tile (either skipped at 0 tokens in the [vision] table), "captions" is
+    # one clip.generate plus one cheap text encode per tile, and "vision tokens and captions"
+    # is those same vision encodes plus both per tile. A preset carrying a style instruction
+    # adds one whole-image clip.generate per row on both caption surfaces.
     # captions.generate_tile_captions owns the interrupt check and the ProgressBar that
     # keep it cancellable.
     # vl_context (region path only) is (full_image, offset_x, offset_y): the VISION encode
@@ -286,10 +286,12 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
     # the two caption surfaces open two.
     encode_source, offset_x, offset_y = (source, 0, 0) if vl_context is None else vl_context
     n_tiles, rows = len(tiles), int(source.shape[0])
+    vision_units = vision_encode_units(n_tiles, preset.vision)
     if preset.surface == captions.VLM_METHOD_VISION:
         if progress is not None:
-            progress.open(VISION_ENCODE, W_ENCODE)
-        return vl.build_global_slices(vl_clip, encode_source, tiles, offset_x=offset_x, offset_y=offset_y)
+            progress.open(VISION_ENCODE, vision_units)
+        return vl.build_global_slices(vl_clip, encode_source, tiles, preset.vision,
+                                      offset_x=offset_x, offset_y=offset_y)
     n_captions = (n_tiles + (1 if preset.style_instruction else 0)) * rows
     if progress is not None:
         progress.open(CAPTIONS, n_captions * K_CAPTION, chunks=n_captions)
@@ -297,11 +299,12 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
                                                     batch_size, batch_index, progress=progress,
                                                     style_source=encode_source)
     if preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
-        # ONE whole-canvas vision encode plus one caption TEXT encode per tile — the text
-        # half scales with the grid, so it is budgeted rather than folded into W_ENCODE.
+        # The vision encodes plus one caption TEXT encode per tile — the text half scales
+        # with the grid, so it is budgeted rather than folded into the vision units.
         if progress is not None:
-            progress.open(VISION_ENCODE, W_ENCODE + n_tiles * W_ENCODE_CAPTION_TEXT)
-        return captions.build_slice_caption_conds(vl_clip, encode_source, tiles, tile_captions, offset_x=offset_x, offset_y=offset_y)
+            progress.open(VISION_ENCODE, vision_units + n_tiles * W_ENCODE_CAPTION_TEXT)
+        return captions.build_slice_caption_conds(vl_clip, encode_source, tiles, tile_captions, preset.vision,
+                                                  offset_x=offset_x, offset_y=offset_y)
     if progress is not None:
         # Captions ONLY: no canvas encode at all, but still one text-encoder pass per tile.
         progress.open(CAPTION_ENCODE, n_tiles * W_ENCODE_CAPTION_TEXT)
@@ -407,11 +410,12 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     # visibly dropping), the value itself monotone the whole time.
     if progress is not None and sampler is not None:
         total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
-        # The style caption count mirrors build_tile_positives' own arithmetic, off the ONE
-        # preset resolved above, so the segment the ledger sizes is the segment the pre-pass
-        # then opens.
+        # The style caption count and the vision units both mirror build_tile_positives' own
+        # arithmetic, off the ONE preset resolved above and the SAME tiles, so every segment
+        # the ledger sizes is the segment the pre-pass then opens.
         style_rows = batch if preset.style_instruction else 0
-        progress.preset_picture(vlm_method, len(tiles), batch, total_evals, style_rows=style_rows)
+        progress.preset_picture(vlm_method, len(tiles), batch, total_evals, style_rows=style_rows,
+                                vision_units=vision_encode_units(len(tiles), preset.vision))
 
     tile_positives = build_tile_positives(vl_clip, padded, tiles, preset, batch_size, batch_index,
                                           vl_context=vl_context, progress=progress)

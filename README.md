@@ -147,25 +147,31 @@ The VL path steps every tile against one schedule, so it must time each sampler'
 
 ### Conditioning on the VL nodes
 
-A global prompt describes the whole image while each tile holds only part of it. The diffusion model then recreates prompt objects inside tiles that should not contain them. The VL nodes replace the prompt with conditioning that is true for each tile, built by the same Qwen3-VL encoder wired to `clip`. Two operations are involved: encoding the whole image into vision tokens (shared by all tiles), and writing a caption from one tile's crop (local to that tile). `vlm_method` picks which one fills each tile's conditioning.
+A global prompt describes the entire image while each tile holds only part of it. The diffusion model then recreates prompt objects inside tiles that should not contain them. The VL nodes replace the prompt with conditioning that is true for each tile, built by the same Qwen3-VL encoder wired to `clip`. Two operations are involved. One encodes the image into vision tokens. The other writes a caption from the tile's own crop. `vlm_method` picks which one fills each tile's conditioning. The `[vision]` table in `settings.toml` sets how much of the image each operation reads (see [Vision settings](#vision-settings)).
 
 #### Vision tokens
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The whole image is encoded once into a grid of vision tokens that are loosely aware of their position and carry their area's tone, palette, and objects. Each tile is assigned conditioning for that slice of the grid. No global text prompt is used, so nothing phantom is introduced. The slicing selects tokens by region of interest, the analogue of RoIAlign (He et al., *Mask R-CNN*, ICCV 2017) in conditioning space. This is the fastest method, since one encode is shared by every tile.
+Each tile is assigned vision tokens from two encodes of the image. The first encode is the tile's own crop, sampled small, so its tokens hold the tile to what it contains. The second encode is the entire image, and the tile is assigned its own slice of that grid, the tile plus its context rings, so those tokens carry the tile's scale and its place in the image. The tokens are loosely aware of their position and carry their area's tone, palette, and objects. The crop tokens keep an empty tile from growing a copy of an object from elsewhere in the image, and the canvas tokens keep a person or a building at the right scale. No global text prompt is used, so nothing phantom is introduced. The slicing selects tokens by region of interest, the analogue of RoIAlign (He et al., *Mask R-CNN*, ICCV 2017) in conditioning space. This is the fastest method, since one small encode per tile costs far less than one caption.
 
 #### Captions
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The same VL model writes a short description of each tile from that tile's crop alone, and the description is used as that tile's prompt. Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no whole image encode is built.
+The same VL model writes a short description of each tile from that tile's crop alone, and the description is used as that tile's prompt. Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no vision encode is built.
 
 #### Vision tokens and captions
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The default method combines the tile's vision slice and its own caption in a single conditioning. The shared encode keeps the tile faithful to the picture and coherent with its neighbors. The caption names what is there and adds detail. The cost is one shared encode plus one caption per tile.
+The default method combines the tile's vision tokens and its own caption in a single conditioning. The vision tokens keep the tile faithful to the picture and at the right scale. The caption names what is there and adds detail. The cost is one small encode plus one caption per tile.
+
+#### Vision settings
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The `[vision]` table at the top of `settings.toml` sets how each tile's conditioning samples the image. It applies to every `vlm_method` option and is read on every run. `canvas_tokens` is the number of vision tokens each tile takes from the encode of the entire image. The image is sampled at the size where a tile's share of it holds that many tokens, up to 2 megapixels, so a tile gets the same count on a large image as on a small one. `crop_tokens` is the number of tokens from the encode of the tile's own crop. Too few lets an object from elsewhere in the image appear in an empty tile, and too many redraw the tile's own subject. Set either count to 0 to turn that encode off. `caption_megapixels` is how much of the tile the VL model reads when it writes a caption, and 0 reads the picture's own size up to 2 megapixels. One vision token covers 32 x 32 pixels of the picture the encoder reads, so 0.1 megapixels is about 98 tokens and 1 megapixel is about 977. The defaults of 165 canvas tokens and 100 crop tokens were settled by A/B on an 8K image with 24 tiles.
 
 #### Caption presets
 
@@ -173,7 +179,7 @@ The default method combines the tile's vision slice and its own caption in a sin
 
 The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. The first block is the default preset and its options carry no label. Two ship. `standard` is the default and is the wording every caption method asked before 2026-08-21, with no style caption. `artwork` holds placement and demographics and carries one medium to every tile.
 
-A preset holds six keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the whole image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer and a `_megapixels` budget for how much of the image the VL model reads, where 0 means the crop's own size.
+A preset holds four keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the entire image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer.
 
 Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `settings.user.toml` whenever it exists, and a node update never replaces it. Editing a preset's wording applies on the next run. Adding or renaming a preset changes the selector, so it needs a ComfyUI restart.
 
@@ -183,7 +189,7 @@ Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `
 
 *Nodes: [Tile Refine](#tile-refine) | [Tile Refine (VL)](#tile-refine-vl)*
 
-With a `mask`, the node crops to the masked region plus a `context_anchor` border, refines only that region against the frozen surrounding pixels, and composites it back with a 1px anti-aliased edge. The rest of the image is untouched. On the VL node the whole image is still encoded once and the region's tiles slice their true place in that encode, so the region is refined aware of everything around it. Feed an inverted mask on a second pass to refine the background and the character separately with different settings.
+With a `mask`, the node crops to the masked region plus a `context_anchor` border, refines only that region against the frozen surrounding pixels, and composites it back with a 1px anti-aliased edge. The rest of the image is untouched. On the VL node the canvas tokens come from the full image, so the region is refined aware of its surroundings. Feed an inverted mask on a second pass to refine the background and the character separately with different settings.
 
 #### Batches
 

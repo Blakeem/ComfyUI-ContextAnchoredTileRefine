@@ -26,7 +26,7 @@ import pytest
 import torch
 from test_stepper import run_bounded
 from test_tiling import GridNoise, GridVAE, _layout
-from test_vl import FakeVLClip
+from test_vl import FakeVLClip, layout_tiles
 
 from conftest import BaseModel
 from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, vl
@@ -117,7 +117,7 @@ def vl_clip(monkeypatch):
     # The encode geometry pinned to the fake CLIP's sequence length. _convert is deliberately
     # NOT stubbed: the positives run through comfy.sampler_helpers.convert_cond (comfy_stubs')
     # exactly as production does, so a lane's positive is the flat cond dict core consumes.
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, ENC, ENC))
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, ENC, ENC))
     return FakeVLClip(seq_override=ENC_SEQ)
 
 
@@ -487,7 +487,10 @@ def test_each_lane_guider_carries_its_own_tile_positive(comfy_stubs, vl_clip):
     assert len(run.lanes) == len(layout.tiles) == 4
     rows = []
     for tile, lane in zip(layout.tiles, run.lanes, strict=True):
-        expected = vl.slice_indices(tile.crop_rect, CANVAS, CANVAS, ENC, ENC, ENC_SEQ)
+        # The shipped [vision] table turns both sources on: every cell of the tile's own crop
+        # encode (no tail), then its canvas slice with the one tail. The fake encodes every
+        # picture to the same sequence, so the crop block reads 0..n+1 for every tile.
+        expected = [*range(ENC_ROWS + 2), *vl.slice_indices(tile.crop_rect, CANVAS, CANVAS, ENC, ENC, ENC_SEQ)]
         seen = lane.guider.original_conds
         assert seen["positive"][0]["cross_attn"][0, :, 0].tolist() == expected
         assert seen["negative"] is negative          # only the positive is swapped
@@ -547,10 +550,10 @@ def test_the_conditioning_pre_pass_slices_the_engines_own_tiles(comfy_stubs, vl_
     seen = {}
     real_build = vl.build_global_slices
 
-    def recording_build(clip, source, tiles, offset_x=0, offset_y=0):
+    def recording_build(clip, source, tiles, vision, offset_x=0, offset_y=0):
         seen["tiles"] = tiles
         seen["source"] = source
-        return real_build(clip, source, tiles, offset_x, offset_y)
+        return real_build(clip, source, tiles, vision, offset_x, offset_y)
 
     monkeypatch.setattr(vl, "build_global_slices", recording_build)
     run = prepare(vl_clip)
@@ -1298,11 +1301,11 @@ def test_the_mask_path_encodes_the_full_image_at_the_bbox_offset(comfy_stubs, vl
     seen = {}
     real_build = vl.build_global_slices
 
-    def recording_build(clip, source, tiles, offset_x=0, offset_y=0):
+    def recording_build(clip, source, tiles, vision, offset_x=0, offset_y=0):
         seen["source"] = source
         seen["offsets"] = (offset_x, offset_y)
         seen["tiles"] = tiles
-        return real_build(clip, source, tiles, offset_x, offset_y)
+        return real_build(clip, source, tiles, vision, offset_x, offset_y)
 
     monkeypatch.setattr(vl, "build_global_slices", recording_build)
     run_sync(vl_clip, image=image, mask=mask, guider=RunGuider())
@@ -1498,7 +1501,7 @@ def test_an_unsupported_sampler_passes_the_steppers_error_through(comfy_stubs, v
 # ---- the progress ledger, at run level ---------------------------------------
 #
 # The RUN geometry above is a 2-lane, 4-step run, so the ledger's exact budgets are:
-#   vision encode   W_ENCODE                       (one whole-canvas encode for the run)
+#   vision encode   W_ENCODE + 2 * W_ENCODE_CROP  (one canvas encode, one crop per tile)
 #   canvas encode   2 x W_ENCODE_TILE
 #   sampling        plan_evals x 2 lanes           (4 with euler, 7 with exp_heun_2_x0)
 #   decode          2 x W_DECODE_TILE
@@ -1631,7 +1634,7 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
                         batch_index=0, progress=None, **style_kwargs: [
                             [f"tile {i}"] for i in range(len(tiles))])
     monkeypatch.setattr(captions, "build_slice_caption_conds",
-                        lambda clip, source, tiles, tile_captions, offset_x=0, offset_y=0: positive(len(tiles)))
+                        lambda clip, source, tiles, tile_captions, vision, offset_x=0, offset_y=0: positive(len(tiles)))
     monkeypatch.setattr(captions, "build_caption_conds",
                         lambda clip, tile_captions: positive(len(tile_captions)))
     ledger = ledger_for(vlm_method)
@@ -1641,6 +1644,60 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
 
     # The pre-pass segments, then the canvas encode — never an encode before its captions.
     assert segment_names(ledger) == [*expected, progress.CANVAS_ENCODE]
+
+
+@pytest.mark.parametrize(("vlm_method", "expected"), [
+    (captions.VLM_METHOD_VISION, progress.W_ENCODE + 3 * progress.W_ENCODE_CROP),
+    (captions.VLM_METHOD_VISION_CAPTIONS,
+     progress.W_ENCODE + 3 * progress.W_ENCODE_CROP + 3 * progress.W_ENCODE_CAPTION_TEXT),
+])
+def test_the_vision_segment_is_opened_with_the_vision_units(comfy_stubs, vl_clip,
+                                                            monkeypatch, vlm_method, expected):
+    # A 1x3 strip under the shipped [vision] table is one canvas encode plus three crop
+    # encodes. The caption text half still scales with the tile count. The builders are
+    # stubbed on the combined surface: what is pinned is the SIZE.
+    positive = [[{"cross_attn": torch.zeros(1, 1, 8)}] for _ in range(3)]
+    monkeypatch.setattr(captions, "generate_tile_captions",
+                        lambda clip, source, tiles, preset, batch_size=1,
+                        batch_index=0, progress=None, **style_kwargs: [
+                            [f"tile {i}"] for i in range(len(tiles))])
+    monkeypatch.setattr(captions, "build_slice_caption_conds",
+                        lambda clip, source, tiles, tile_captions, vision, offset_x=0, offset_y=0: positive)
+    tiles = layout_tiles(3, 1, w=CANVAS, h=CANVAS, ctx=CTX, overlap=OVERLAP)
+    ledger = ledger_for(vlm_method)
+
+    with ledger:
+        sync.build_tile_positives(vl_clip, image_canvas(), tiles,
+                                  captions.resolve_method(vlm_method), progress=ledger)
+
+    assert segment_units(ledger, progress.VISION_ENCODE) == [expected]
+
+
+def test_preset_picture_and_the_pre_pass_agree_on_the_vision_units(comfy_stubs, vl_clip,
+                                                                   monkeypatch):
+    # A 160px canvas at cap 88 solves to a 3x3 grid, which is one canvas encode and NINE crop
+    # encodes. preset_picture sizes the segment off the same tiles build_tile_positives then
+    # opens it with, so no open may move the total the preset settled.
+    ledger = ledger_for()
+    totals = []
+    real_open = ledger.open
+
+    def recording_open(name, units=None, chunks=1):
+        before = ledger.total
+        real_open(name, units, chunks)
+        totals.append((name, before, ledger.total))
+
+    monkeypatch.setattr(ledger, "open", recording_open)
+
+    with ledger:
+        run = sync._prepare_run(image_canvas(160), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
+                                88, 88, CTX, OVERLAP, vl_clip, progress=ledger,
+                                sampler=euler_sampler())
+
+    assert len(run.layout.tiles) == 9
+    assert segment_units(ledger, progress.VISION_ENCODE) == [
+        progress.vision_encode_units(9, captions.load_settings().vision)]
+    assert all(before == after for _name, before, after in totals)
 
 
 def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stubs, vl_clip, monkeypatch):
@@ -1681,7 +1738,7 @@ def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stu
 def test_the_settings_file_is_read_once_per_picture(comfy_stubs, vl_clip, monkeypatch):
     # The ledger's caption count and the pre-pass's own must come from ONE read: with two,
     # a file edited between them would size a segment for a preset the captions never asked.
-    # A "vision tokens" run reads nothing at all.
+    # A "vision tokens" run reads the file once as well, for its [vision] table.
     reads = []
     real_load = captions.load_settings
     monkeypatch.setattr(captions, "load_settings",
@@ -1707,7 +1764,7 @@ def test_the_settings_file_is_read_once_per_picture(comfy_stubs, vl_clip, monkey
                           CAP, CAP, CTX, OVERLAP, vl_clip,
                           vlm_method=captions.VLM_METHOD_VISION,
                           progress=ledger, sampler=euler_sampler())
-    assert reads == []
+    assert len(reads) == 1
 
 
 def test_two_pictures_with_different_grids_stay_one_continuous_bar(comfy_stubs, vl_clip, lane_stamp):

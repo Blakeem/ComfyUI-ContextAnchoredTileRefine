@@ -25,7 +25,7 @@ def _vlm_method():
     # test).
     from . import captions
 
-    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on its slice of the entire image's vision encode, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to write your own tile prompts."})
+    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on vision tokens of its own crop and its slice of the entire image, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to set the token counts and write your own tile prompts."})
 
 
 def _validate_image(image):
@@ -129,18 +129,18 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     """The vision-conditioned variant for VLM-encoder models (Krea 2 family).
 
     The tiles are stepped TOGETHER as lanes of one synchronized run (sync.py), and every
-    tile's positive conditioning is replaced by its slice of ONE whole-image vision encode
-    from the required CLIP:
-    positionally exact, free of text demands, and globally informed, so tiles neither
-    re-instantiate prompt objects they don't contain nor drift apart in story
-    (gaze, tone, palette). The guider's positive text is ignored by construction;
-    its negative still applies. No prompt input exists because none is needed.
-    ControlNet is ignored on this node (the per-tile positive carries no control chain);
-    use the base Context-Anchored Tile Refine node for control.
-    vlm_method picks WHICH surface fills that positive: the vision slice (default), a
+    tile's positive conditioning is replaced by vision rows from the required CLIP: the
+    tokens of its own crop plus its slice of one encode of the entire image (vl.py), sized by
+    the settings file's [vision] table. Positionally exact, free of text demands, and aware
+    of its place in the image, so tiles neither re-instantiate prompt objects they don't
+    contain nor drift apart in story (gaze, tone, palette). The guider's positive text is
+    ignored by construction; its negative still applies. No prompt input exists because none
+    is needed. ControlNet is ignored on this node (the per-tile positive carries no control
+    chain); use the base Context-Anchored Tile Refine node for control.
+    vlm_method picks WHICH surface fills that positive: the vision rows (default), a
     per-tile VLM caption of the tile's own crop, or both (see captions.py).
-    With a mask, the WHOLE image is still encoded and the region's tiles slice their
-    true place in it, so a masked refine stays aware of the image around the region.
+    With a mask, the canvas rows come from the FULL image, so a masked refine stays aware
+    of its surroundings.
     """
 
     @classmethod
@@ -187,10 +187,10 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     (NOISE / SAMPLER / SIGMAS / GUIDER) built in-process from widgets by upscale.py, and
     the whole-image upscale stage run first so no tile is ever resampled. No mask input
     (use ContextAnchoredTileRefineVL for a region pass) and no positive prompt input —
-    the positive is a placeholder that every tile's vision slice replaces, so a prompt
+    the positive is a placeholder that every tile's vision rows replace, so a prompt
     here would only re-admit the phantom objects the VL path exists to remove. The
     optional negative is the one text channel that still applies.
-    vlm_method picks WHICH surface fills that positive: the vision slice (default), a
+    vlm_method picks WHICH surface fills that positive: the vision rows (default), a
     per-tile VLM caption of the tile's own crop, or both (see captions.py).
     """
 
@@ -248,10 +248,9 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         noise = None
 
         _validate_image(image)
-        # The settings file is read FIRST on the caption surfaces: this node runs the
-        # upscale-model pass and the text-encoder load before the engine's own read in
-        # sync._prepare_run, so a typo in the file would otherwise cost minutes of GPU
-        # time to reach. "vision tokens" never reads it.
+        # The settings file is read FIRST: this node runs the upscale-model pass and the
+        # text-encoder load before the engine's own read in sync._prepare_run, so a typo in
+        # the file would otherwise cost minutes of GPU time to reach.
         captions.resolve_method(vlm_method)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
@@ -268,9 +267,20 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
                 raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}. The upscaled image must be at least 8x8 pixels")
 
+            # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returns an empty
+            # schedule. Checked BEFORE the first CLIP call below, because that call pays
+            # CLIP.load_model (minutes on a cold cache) for a run that samples nothing. The
+            # return value is refine_image's own zero-step result, so a direct caller of the
+            # engine sees the same picture. finish() counts the never-opened plan as done, so
+            # the bar lands on its total instead of freezing mid-run.
+            sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
+            if sigmas.numel() < 2:
+                ledger.finish()
+                return (upscaled[..., :3].clone(),)
+
             # One empty encode serves as the positive placeholder (vl.py replaces every tile's
-            # positive with its slice of the whole-image vision encode) and, unless the optional
-            # input is connected, as the negative.
+            # positive with its own vision rows) and, unless the optional input is connected,
+            # as the negative.
             # It is also the run's FIRST CLIP call, which pays CLIP.load_model and moves the
             # text encoder onto the GPU — minutes on a cold cache, with nothing else covering
             # it. Its own segment buys it an honest share of the total and its own status
@@ -279,7 +289,6 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             ledger.open(progress.CLIP_LOAD)
             empty_cond = upscale.encode_empty(clip)
             guider = upscale.build_guider(model, empty_cond, empty_cond if negative is None else negative, cfg)
-            sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
             sampler = comfy.samplers.sampler_object(sampler_name)
             noise = upscale.Noise_RandomNoise(seed)
 
@@ -288,8 +297,5 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             # in a private function (dpm_fast -> dpm_fast_function), so resolving the rejection off
             # the OBJECT alone would name something this node's widget never offered.
             refined = sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, progress=ledger)
-            # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returns an empty
-            # schedule and refine_image returns before the picture loop, so most of the plan is
-            # never opened. finish() is what stops the bar freezing mid-run on it.
             ledger.finish()
         return (refined,)

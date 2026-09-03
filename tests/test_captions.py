@@ -11,9 +11,9 @@ import dataclasses
 
 import pytest
 import torch
-from test_vl import VLGuider, sync_sampler
+from test_vl import Tile, VLGuider, layout_tiles, strip_tiles, sync_sampler
 
-from context_anchored_tile_refine import captions, sampling, vl
+from context_anchored_tile_refine import captions, grid, sampling, vl
 from context_anchored_tile_refine.grid import Rect
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
@@ -26,23 +26,25 @@ N_ROWS = 6
 TAIL = 4
 
 
-class Tile:
-    def __init__(self, rect):
-        self.crop_rect = rect
+def a_vision(canvas=1, crop=0, caption_mp=None):
+    # The [vision] table a test hands the pre-pass: under the stubbed resample only on/off
+    # matters for the two token counts, and the caption picture defaults to the 384-budget
+    # every test that predates the presets captioned at.
+    return captions.VisionSettings(
+        canvas_tokens=canvas, crop_tokens=crop,
+        caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS if caption_mp is None else caption_mp)
 
 
 def a_preset(tile="describe", tile_tokens=256, style="", style_tokens=128,
-             surface=None, tile_mp=None, style_mp=None):
+             surface=None, caption_mp=None):
     # A resolved settings block, which is what the caption pipeline takes. The defaults keep
     # every test that predates the presets asking its own question at its own budget.
-    default_mp = captions.VL_INPUT_BUDGET_MEGAPIXELS
     return captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS if surface is None else surface,
         label="test",
+        vision=a_vision(caption_mp=caption_mp),
         tile_instruction=tile, tile_max_tokens=tile_tokens,
-        tile_megapixels=default_mp if tile_mp is None else tile_mp,
-        style_instruction=style, style_max_tokens=style_tokens,
-        style_megapixels=default_mp if style_mp is None else style_mp)
+        style_instruction=style, style_max_tokens=style_tokens)
 
 
 class FakeCaptionClip:
@@ -105,16 +107,18 @@ class FakeCaptionClip:
                           attention_mask=torch.ones(1, seq))
         else:
             seq = 1 + self.n_rows + 1 + tail_rows if self.seq_override is None else self.seq_override
-            extras = {"pooled_output": torch.zeros(1, 4), "attention_mask": torch.ones(1, seq)}
+            # Krea 2 returns pooled_output None on an image encode as well (measured), which is
+            # what lets two vision blocks and a caption concatenate.
+            extras = {"pooled_output": None, "attention_mask": torch.ones(1, seq)}
         tensor = torch.arange(seq, dtype=torch.float32).reshape(1, seq, 1).expand(1, seq, 8).clone()
         return [[tensor, extras]]
 
 
 @pytest.fixture
-def stubbed_slices(monkeypatch):
+def stubbed_slices(comfy_stubs, monkeypatch):
     # Encode geometry pinned to the fixture grid; _convert identity so the slice tensors
-    # stay inspectable without comfy.
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, ENC_H, ENC_W))
+    # stay inspectable. comfy_stubs serves vl.encode_picture's interrupt check.
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, ENC_H, ENC_W))
     monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
 
 
@@ -144,15 +148,21 @@ def test_settled_instructions_are_the_ab_settled_strings():
 
 # --- the settings file ------------------------------------------------------------------
 
-# One valid preset block, as a template every broken-file case below edits one line of.
-GOOD_PRESET = (
+# One valid file, as a template every broken-file case below edits one line of: the
+# [vision] table, then one preset block.
+VISION = (
+    '[vision]\n'
+    'canvas_tokens = 165\n'
+    'crop_tokens = 100\n'
+    'caption_megapixels = 0.147456\n'
+    '\n')
+PRESET = (
     '[presets.demo]\n'
     'tile_caption_instruction = "ask about the tile"\n'
     'tile_caption_max_tokens = 768\n'
-    'tile_caption_megapixels = 0.147456\n'
     'global_style_instruction = ""\n'
-    'global_style_max_tokens = 512\n'
-    'global_style_megapixels = 0.147456\n')
+    'global_style_max_tokens = 512\n')
+GOOD_SETTINGS = VISION + PRESET
 
 
 def write_settings(tmp_path, body, monkeypatch=None):
@@ -170,7 +180,13 @@ def test_settings_toml_ships_the_owner_tested_wording():
     # The live prompts, pinned character for character: the owner's testing found small
     # wording changes lose consistency, so an accidental edit fails here. A deliberate
     # prompt change updates this pin alongside settings.toml.
-    presets = captions.load_settings()
+    settings = captions.load_settings()
+    presets = settings.presets
+    # The [vision] table: the block A/B's settled point (TESTS.md test 10), and the caption
+    # picture at the vision encode's old size, the three-scene A/B's winner.
+    assert settings.vision == captions.VisionSettings(
+        canvas_tokens=165, crop_tokens=100, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
+    assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
     # `standard` is FIRST, which is what makes it the default preset the selector offers
     # unlabeled. Its block is the pre-settings-file constants character for character, so the
     # unlabeled options a pre-preset workflow carries still ask what they asked then.
@@ -187,8 +203,6 @@ def test_settings_toml_ships_the_owner_tested_wording():
     for preset in presets.values():
         assert preset["tile_caption_max_tokens"] == 768
         assert preset["global_style_max_tokens"] == 768
-        assert preset["tile_caption_megapixels"] == captions.VL_INPUT_BUDGET_MEGAPIXELS
-        assert preset["global_style_megapixels"] == captions.VL_INPUT_BUDGET_MEGAPIXELS
 
 
 def test_every_preset_adds_one_option_per_caption_surface():
@@ -222,7 +236,7 @@ def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
     # rewritten here with no clear and the first answer has to stand. The renamed preset is
     # the SECOND one, because the first is the unlabeled default and a rename there would not
     # show in the list at all.
-    two_presets = GOOD_PRESET + GOOD_PRESET.replace("[presets.demo]", "[presets.extra]")
+    two_presets = GOOD_SETTINGS + PRESET.replace("[presets.demo]", "[presets.extra]")
     unlabeled = ["vision tokens", "vision tokens and captions", "captions"]
     path = write_settings(tmp_path, two_presets, monkeypatch)
     assert list(captions.vlm_methods()) == [
@@ -253,7 +267,7 @@ def test_a_method_splits_into_its_surface_and_its_label(vlm_method, surface, lab
 def test_an_unlabeled_caption_method_takes_the_first_preset(tmp_path, monkeypatch):
     # A workflow saved before the presets existed still runs, on the file's first block —
     # whichever block that is, so a user who reorders their own copy moves the default with it.
-    write_settings(tmp_path, GOOD_PRESET, monkeypatch)
+    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
     legacy = captions.resolve_method("vision tokens and captions")
     assert legacy.label == "demo"
     assert legacy.surface == captions.VLM_METHOD_VISION_CAPTIONS
@@ -264,7 +278,8 @@ def test_each_caption_method_asks_its_own_presets_question():
     # Both caption surfaces ask the SAME tile question of a given preset, as they have since
     # 2026-08-16, and the wording comes from the settings file rather than a code constant.
     # The settled constants stay defined for tests-AB's judged arms, and nothing selects them.
-    presets = captions.load_settings()
+    settings = captions.load_settings()
+    presets = settings.presets
     for label, block in presets.items():
         for surface in captions.CAPTION_SURFACES:
             preset = captions.resolve_method(f"{surface} ({label})")
@@ -272,27 +287,25 @@ def test_each_caption_method_asks_its_own_presets_question():
             assert preset.label == label
             assert preset.tile_instruction == block["tile_caption_instruction"]
             assert preset.tile_max_tokens == block["tile_caption_max_tokens"]
-            assert preset.tile_megapixels == block["tile_caption_megapixels"]
+            # Every option carries the one [vision] table.
+            assert preset.vision == settings.vision
     assert presets["artwork"]["tile_caption_instruction"] != captions.SETTLED_POSITION_INSTRUCTION
 
 
-def _never_read(*_args, **_kwargs):
-    raise AssertionError("the settings file must not be read here")
-
-
-def test_vision_tokens_resolves_without_reading_the_settings_file(monkeypatch):
-    # "vision tokens" never reaches the VLM, so a broken settings file must not fail it.
-    monkeypatch.setattr(captions, "load_settings", _never_read)
-
+def test_vision_tokens_resolves_to_the_vision_table_and_no_preset():
+    # "vision tokens" never reaches the VLM's generator, so it takes no preset at all; it
+    # does take the [vision] table, which sizes every surface's vision rows.
     preset = captions.resolve_method(captions.VLM_METHOD_VISION)
     assert preset.surface == captions.VLM_METHOD_VISION
+    assert preset.label == ""
     assert preset.tile_instruction == ""
     assert preset.style_instruction == ""
+    assert preset.vision == captions.load_settings().vision
 
 
 def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeypatch):
     # "" is the documented off switch, and whitespace must not sneak past it.
-    write_settings(tmp_path, GOOD_PRESET.replace('global_style_instruction = ""',
+    write_settings(tmp_path, GOOD_SETTINGS.replace('global_style_instruction = ""',
                                                  'global_style_instruction = "  "'), monkeypatch)
 
     preset = captions.resolve_method("captions (demo)")
@@ -303,7 +316,7 @@ def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeyp
 def test_a_method_naming_an_absent_preset_is_a_named_hard_error(tmp_path, monkeypatch):
     # The selector is built at startup while the wording is read per run, so a preset renamed
     # mid-session leaves a stale option behind. It must name the preset, not fail obscurely.
-    write_settings(tmp_path, GOOD_PRESET, monkeypatch)
+    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
 
     with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
         captions.resolve_method("captions (gone)")
@@ -312,25 +325,40 @@ def test_a_method_naming_an_absent_preset_is_a_named_hard_error(tmp_path, monkey
 @pytest.mark.parametrize(("content", "message"), [
     (None, "is missing at"),
     ('[presets.demo\n', "is not valid TOML"),
-    ('tile_caption_instruction = "x"\n' + GOOD_PRESET, "unknown top-level keys"),
+    ('tile_caption_instruction = "x"\n' + GOOD_SETTINGS, "unknown top-level keys"),
     ('[other.demo]\nx = 1\n', "unknown top-level keys"),
-    ('# nothing at all\n', "defines no presets"),
-    ('[presets]\n', "defines no presets"),
-    ('[presets."bad (label)"]\n', "not usable"),
-    ('[presets]\ndemo = 1\n', r"must be a \[presets.demo\] table"),
-    (GOOD_PRESET.replace('tile_caption_megapixels = 0.147456\n', ''), "missing \\['tile_caption_megapixels'\\]"),
-    (GOOD_PRESET + 'globl_style_instruction = "typo"\n', "unknown keys \\['globl_style_instruction'\\]"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", 'tile_caption_max_tokens = "768"'), "must be of type int"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = true"), "must be of type int"),
-    (GOOD_PRESET.replace("tile_caption_megapixels = 0.147456", 'tile_caption_megapixels = "big"'), "must be of type float"),
-    (GOOD_PRESET.replace('tile_caption_instruction = "ask about the tile"',
-                         'tile_caption_instruction = "  "'), "need a question"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 0"), "between 1 and 4096"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 9999"), "between 1 and 4096"),
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = 8.0"), "between 0.01 and 2.0"),
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = -1.0"), "between 0.01 and 2.0"),
+    ('# nothing at all\n', r"has no \[vision\] table"),
+    (PRESET, r"has no \[vision\] table"),
+    (VISION, "defines no presets"),
+    (VISION + '[presets]\n', "defines no presets"),
+    (VISION + '[presets."bad (label)"]\n', "not usable"),
+    (VISION + '[presets]\ndemo = 1\n', r"must be a \[presets.demo\] table"),
+    ('vision = 1\n' + PRESET, r"\[vision\] in .* must be a table"),
+    (GOOD_SETTINGS.replace('crop_tokens = 100\n', ''), "missing \\['crop_tokens'\\]"),
+    (GOOD_SETTINGS.replace('crop_tokens = 100\n', 'crop_tokens = 100\ncrop_megapixels = 0.1\n'),
+     "unknown keys \\['crop_megapixels'\\]"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", 'canvas_tokens = "165"'), "must be of type int"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 1.5"), "must be of type int"),
+    (GOOD_SETTINGS.replace("crop_tokens = 100", "crop_tokens = true"), "must be of type int"),
+    (GOOD_SETTINGS.replace("crop_tokens = 100", "crop_tokens = -1"), "between 0 and 1953"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 2000"), "between 0 and 1953"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 0").replace("crop_tokens = 100", "crop_tokens = 0"),
+     "both to 0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", 'caption_megapixels = "big"'), "must be of type float"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = 8.0"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = -1.0"), "between 0.01 and 2.0"),
     # Below the floor the budget rounds to no pixels and the resample would build a 0 x 0 image.
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = 1e-9"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = 1e-9"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace('tile_caption_max_tokens = 768\n', ''), "missing \\['tile_caption_max_tokens'\\]"),
+    (GOOD_SETTINGS + 'globl_style_instruction = "typo"\n', "unknown keys \\['globl_style_instruction'\\]"),
+    # A user's own copy from before the [vision] table names the move, not "unknown key".
+    (GOOD_SETTINGS + 'tile_caption_megapixels = 0.5\n', "no longer reads"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", 'tile_caption_max_tokens = "768"'), "must be of type int"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = true"), "must be of type int"),
+    (GOOD_SETTINGS.replace('tile_caption_instruction = "ask about the tile"',
+                         'tile_caption_instruction = "  "'), "need a question"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 0"), "between 1 and 4096"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 9999"), "between 1 and 4096"),
 ])
 def test_a_broken_settings_file_is_a_named_hard_error(tmp_path, content, message):
     # Every defect fails before any clip.generate spends GPU time, naming the file and the
@@ -347,10 +375,10 @@ def test_a_broken_settings_file_is_a_named_hard_error(tmp_path, content, message
 def test_a_toml_int_is_accepted_where_a_float_is_asked_for(tmp_path):
     # 0 is the documented "the crop's own size" value and TOML parses it as an int, so the
     # float keys must take one.
-    path = write_settings(tmp_path, GOOD_PRESET.replace("tile_caption_megapixels = 0.147456",
-                                                        "tile_caption_megapixels = 0"))
+    path = write_settings(tmp_path, GOOD_SETTINGS.replace("caption_megapixels = 0.147456",
+                                                          "caption_megapixels = 0"))
 
-    assert captions.load_settings(path)["demo"]["tile_caption_megapixels"] == 0
+    assert captions.load_settings(path).vision.caption_megapixels == 0
 
 
 def test_a_non_utf8_settings_file_is_a_named_hard_error(tmp_path):
@@ -371,13 +399,13 @@ def test_the_users_own_copy_wins_over_the_shipped_file(tmp_path, monkeypatch):
     assert captions.SETTINGS_NAME == "settings.toml"
     monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml")
     monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
-    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_PRESET)
+    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_SETTINGS)
     assert captions.settings_path().name == captions.SETTINGS_NAME
 
     (tmp_path / captions.USER_SETTINGS_NAME).write_text(
-        GOOD_PRESET.replace("[presets.demo]", "[presets.mine]"))
+        GOOD_SETTINGS.replace("[presets.demo]", "[presets.mine]"))
     assert captions.settings_path().name == captions.USER_SETTINGS_NAME
-    assert list(captions.load_settings()) == ["mine"]
+    assert list(captions.load_settings().presets) == ["mine"]
 
 
 @pytest.mark.parametrize(("megapixels", "size", "expected"), [
@@ -707,19 +735,23 @@ def test_a_style_canvas_with_a_different_batch_is_rejected(comfy_stubs):
                                         style_source=torch.rand(1, 32, 32, 3))
 
 
-def test_each_caption_reads_its_own_megapixel_budget(comfy_stubs, monkeypatch):
-    # The tile question and the style question carry separate input budgets, so a preset can
-    # read a tile finely and the whole image coarsely. 0 is the crop's own size.
+@pytest.mark.parametrize(("caption_mp", "expected"), [
+    (1.0, [1_000_000, 1_000_000]),
+    # 0 is each picture's own size: the style source first, then the tile crop.
+    (0, [20 * 30, 40 * 60]),
+])
+def test_both_captions_read_the_vision_tables_caption_size(comfy_stubs, monkeypatch, caption_mp, expected):
+    # The style question and the tile question read ONE picture size, the [vision] table's.
     budgets = []
     monkeypatch.setattr(captions, "resample_for_vl",
                         lambda pixels, budget=None: budgets.append(budget) or pixels)
 
     captions.generate_tile_captions(FakeCaptionClip(), torch.rand(1, 40, 60, 3),
                                     [Tile(Rect(0, 0, 60, 40))],
-                                    a_preset(style="style q", style_mp=1.0, tile_mp=0),
+                                    a_preset(style="style q", caption_mp=caption_mp),
                                     style_source=torch.rand(1, 20, 30, 3))
 
-    assert budgets == [1_000_000, 40 * 60]
+    assert budgets == expected
 
 
 # --- build_caption_conds --------------------------------------------------------------
@@ -759,18 +791,18 @@ def _vision_rows(tile, offset_x=0, offset_y=0):
 
 
 def test_slice_caption_conds_cat_each_tiles_vision_rows_and_its_own_caption(stubbed_slices):
-    # The settled surface (2026-08-16): sliced rows of ONE shared pure-vision canvas encode,
-    # then that tile's caption encoded TEXT-ONLY, concatenated on the row axis. The fake's
-    # feature value is the row's position in its own encode, so the two halves are readable
-    # apart: vision rows carry their slice indices, caption rows count 0..n-1.
+    # The settled surface (2026-08-16): the tile's vision rows, then that tile's caption
+    # encoded TEXT-ONLY, concatenated on the row axis. With the crop rows off the vision half
+    # is the tile's slice of ONE canvas encode. The fake's feature value is the row's position
+    # in its own encode, so the two halves are readable apart: vision rows carry their slice
+    # indices, caption rows count 0..n-1.
     clip = FakeCaptionClip()
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"], ["a cart"]])
+    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"], ["a cart"]], a_vision(canvas=1, crop=0))
 
-    # ONE whole-canvas encode for the run (pure vision, no caption in it), then one cheap
-    # text encode per tile — the cost shape the old per-tile canvas encode gave up.
+    # One canvas encode for the run, then one cheap text encode per tile.
     assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a cart"]
     caption_rows = TAIL + 2                                  # tail + the caption's two words
     for cond, tile in zip(conds, tiles, strict=True):
@@ -781,38 +813,63 @@ def test_slice_caption_conds_cat_each_tiles_vision_rows_and_its_own_caption(stub
         assert tensor[0, len(indices):, 0].tolist() == list(range(caption_rows))
         # Extras are the VISION encode's; the full-canvas attention mask is still dropped.
         assert "attention_mask" not in extras
-        assert extras["pooled_output"].shape == (1, 4)
+        assert extras["pooled_output"] is None
 
 
-def test_slice_caption_conds_share_one_vision_encode_across_every_tile(stubbed_slices, monkeypatch):
-    # The counting check behind the cost claim: the canvas goes through the vision tower ONCE
-    # no matter how many tiles slice it, exactly as on the vision-only surface.
+def test_slice_caption_conds_pay_one_canvas_encode_and_one_crop_encode_per_tile(stubbed_slices, monkeypatch):
+    # The counting check behind the cost claim: this surface runs the same vision encodes the
+    # vision-only surface does, the canvas once and each tile's crop once.
     clip = FakeCaptionClip()
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H)),
-             Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    tiles = layout_tiles(2, 2)
     calls = []
-    real_encode = vl._encode_canvas
-    monkeypatch.setattr(vl, "_encode_canvas", lambda *a, **k: (calls.append(a[1]), real_encode(*a, **k))[1])
+    real_encode = vl._encode_one
+    monkeypatch.setattr(vl, "_encode_one", lambda *a, **k: (calls.append(a[1]), real_encode(*a, **k))[1])
 
     captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3), tiles,
-                                       [["a fox"]] * 4)
+                                       [["a fox"]] * 4, a_vision(canvas=1, crop=1))
 
-    assert len(calls) == 1
-    assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a fox", "a fox", "a fox"]
+    assert len(calls) == 5
+    assert clip.encoded == [vl.VISION_BLOCK] * 5 + ["a fox"] * 4
 
 
-def test_slice_caption_conds_offset_region_tiles_into_the_full_canvas_frame(stubbed_slices):
-    # Mask path: the tiles index the bbox crop while the encode reads the FULL image, so the
-    # rects need the bbox origin added — the same framing as vl.build_global_slices.
+def test_slice_caption_conds_put_each_tiles_crop_rows_before_its_canvas_slice(stubbed_slices):
+    # Both vision sources on: a tile's rows are every cell of its own crop encode (no tail),
+    # then its canvas slice (no tail), then its caption with the one tail. The caption half is
+    # untouched by the vision layout.
     clip = FakeCaptionClip()
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    shifted = captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, 96, 64))],
-                                                 [["a fox"]], offset_x=96, offset_y=64)
-    direct = captions.build_slice_caption_conds(clip, source, [Tile(Rect(96, 64, CANVAS_W, CANVAS_H))],
-                                                [["a fox"]])
+    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"]] * 2, a_vision(canvas=1, crop=1))
 
-    assert shifted[0][0][0][0, :, 0].tolist() == direct[0][0][0][0, :, 0].tolist()
+    assert clip.encoded == [vl.VISION_BLOCK] * 3 + ["a fox"] * 2
+    caption_rows = TAIL + 2
+    crop_block = list(range(N_ROWS + 2))
+    for cond, tile in zip(conds, tiles, strict=True):
+        indices = crop_block + _vision_rows(tile)
+        tensor, _extras = cond[0]
+        assert tensor.shape == (1, len(indices) + caption_rows, 8)
+        assert tensor[0, :len(indices), 0].tolist() == indices
+        assert tensor[0, len(indices):, 0].tolist() == list(range(caption_rows))
+
+
+def test_slice_caption_conds_cut_a_region_tiles_crop_from_the_full_image_at_the_bbox(stubbed_slices):
+    # Mask path: the tile indexes the bbox crop while the vision encodes read the FULL image
+    # at the bbox origin, so its crop picture is the offset rect of that image and its canvas
+    # rows are sliced in the full image's frame.
+    clip = FakeCaptionClip()
+    source = torch.arange(CANVAS_H * CANVAS_W * 3, dtype=torch.float32).reshape(1, CANVAS_H, CANVAS_W, 3)
+    tile = Tile(Rect(0, 0, 32, 32))
+
+    conds = captions.build_slice_caption_conds(clip, source, [tile], [["a fox"]], a_vision(canvas=1, crop=1),
+                                               offset_x=96, offset_y=48)
+
+    encoded_pixels = [call["image"] for call in clip.tokenize_calls
+                      if call["text"] == vl.VISION_BLOCK]
+    assert [tuple(pixels.shape) for pixels in encoded_pixels] == [(1, CANVAS_H, CANVAS_W, 3), (1, 32, 32, 3)]
+    assert torch.equal(encoded_pixels[1], source[:, 48:80, 96:128, :])
+    indices = list(range(N_ROWS + 2)) + _vision_rows(tile, 96, 48)
+    assert conds[0][0][0][0, :len(indices), 0].tolist() == indices
 
 
 def test_slice_caption_conds_encode_one_picture_at_a_time(stubbed_slices):
@@ -822,13 +879,13 @@ def test_slice_caption_conds_encode_one_picture_at_a_time(stubbed_slices):
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
     conds = captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))],
-                                               [["a fox"]])
+                                               [["a fox"]], a_vision(canvas=1, crop=1))
 
     handed = [call["image"] for call in clip.tokenize_calls if call["image"] is not None]
     assert handed and all(tuple(image.shape) == (1, CANVAS_H, CANVAS_W, 3) for image in handed)
     tensor, extras = conds[0][0]
     assert tensor.shape[0] == 1
-    assert extras["pooled_output"].shape == (1, 4)
+    assert extras["pooled_output"] is None
 
 
 def test_slice_caption_conds_reject_a_caption_count_that_is_not_the_batch(stubbed_slices):
@@ -838,16 +895,16 @@ def test_slice_caption_conds_reject_a_caption_count_that_is_not_the_batch(stubbe
 
     with pytest.raises(RuntimeError, match="captioned a different number of times"):
         captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))],
-                                           [["a fox"]])
+                                           [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_vision_encoder_whose_layout_disagrees(stubbed_slices):
-    # The vision half is vl._encode_canvas' own fail-fast, reached unchanged by this surface.
+    # The vision half is vl._encode_one's own fail-fast, reached unchanged by this surface.
     clip = FakeCaptionClip(seq_override=1 + N_ROWS + 1 + TAIL + 99)
 
     with pytest.raises(RuntimeError, match="encoded conditioning has"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_caption_encode_of_the_wrong_length(stubbed_slices):
@@ -858,7 +915,7 @@ def test_slice_caption_conds_reject_a_caption_encode_of_the_wrong_length(stubbed
 
     with pytest.raises(RuntimeError, match="text-only caption encode has"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_caption_extras_the_vision_encode_lacks(stubbed_slices):
@@ -866,9 +923,9 @@ def test_slice_caption_conds_reject_caption_extras_the_vision_encode_lacks(stubb
     # carries would vanish without a trace.
     clip = FakeCaptionClip(text_extras={"guidance": torch.ones(1)})
 
-    with pytest.raises(RuntimeError, match="extras the vision encode lacks"):
+    with pytest.raises(RuntimeError, match="caption encode carries conditioning extras"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_caption_encode_with_a_real_pooled_output(stubbed_slices):
@@ -876,9 +933,9 @@ def test_slice_caption_conds_reject_a_caption_encode_with_a_real_pooled_output(s
     # CLIP that returns a real vector is outside what this surface was settled on.
     clip = FakeCaptionClip(text_pooled=torch.zeros(1, 4))
 
-    with pytest.raises(RuntimeError, match="real pooled_output"):
+    with pytest.raises(RuntimeError, match="caption encode has a real pooled_output"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 # --- through the pipeline: the three-way branch, through the REAL dispatch -------------
@@ -893,7 +950,7 @@ PIPE_ROWS = (PIPE_ENC // vl.MERGED_CELL) ** 2
 
 @pytest.fixture
 def pipeline_clip(monkeypatch):
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, PIPE_ENC, PIPE_ENC))
     return FakeCaptionClip(n_rows=PIPE_ROWS)
 
 
@@ -938,15 +995,18 @@ def test_vision_tokens_is_the_default_and_still_routes_through_build_global_slic
     assert pipeline_clip.generate_calls == []
 
 
-def test_vision_tokens_never_reads_the_settings_file(comfy_stubs, pipeline_clip, monkeypatch):
-    # "vision tokens" must stay independent of a file it never reads, through the WHOLE
-    # dispatch: the engine's own resolve and the ledger's preset branch both have to leave it
-    # alone, so a broken settings file fails only the caption surfaces.
-    monkeypatch.setattr(captions, "load_settings", _never_read)
+def test_vision_tokens_reads_the_settings_file_once_and_never_the_vlm(comfy_stubs, pipeline_clip, monkeypatch):
+    # "vision tokens" reads the file ONCE per picture, for its [vision] table, and never
+    # reaches the VLM's generator. A broken file therefore fails this surface too, before
+    # any encode.
+    reads = []
+    real_load = captions.load_settings
+    monkeypatch.setattr(captions, "load_settings", lambda *a, **k: (reads.append(1), real_load(*a, **k))[1])
 
     out = _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision tokens")
 
     assert out.shape == (1, 80, 80, 3)
+    assert len(reads) == 1
     assert pipeline_clip.generate_calls == []
 
 
@@ -996,14 +1056,16 @@ def test_vision_and_captions_cats_the_shared_slice_and_a_text_only_caption(comfy
 
     _run(image, guider, pipeline_clip, "vision tokens and captions")
 
-    # ONE pure-vision canvas encode for the whole picture, then one text-only caption encode
-    # per tile — no VISION_BLOCK prefix on the caption encode at all.
-    assert pipeline_clip.encoded == [vl.VISION_BLOCK] + ["a plain caption"] * 4
+    # ONE pure-vision canvas encode for the whole picture and one crop encode per tile, then
+    # one text-only caption encode per tile — no VISION_BLOCK prefix on the caption encode.
+    assert pipeline_clip.encoded == [vl.VISION_BLOCK] * 5 + ["a plain caption"] * 4
     caption_rows = TAIL + 3                              # tail + the caption's three words
     from test_tiling import _layout
     layout = _layout(80, 80, 56, 56, overlap=16)
     for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
-        indices = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_ROWS + 2)
+        # The shipped [vision] table: every crop cell (no tail), the canvas slice (no tail),
+        # then the caption with the one tail.
+        indices = list(range(PIPE_ROWS + 2)) + vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_ROWS + 2)
         rows = seen["positive"][0]["cross_attn"][0, :, 0].tolist()
         assert rows == indices + list(range(caption_rows))
 
@@ -1049,14 +1111,27 @@ def test_the_mask_path_captions_the_region_crop_and_encodes_the_full_image(comfy
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
     assert (y0, y1, x0, x1) == (8, 72, 8, 72)
     # The text-only caption encode tokenizes with no image at all, so only the calls that were
-    # handed pixels are read here.
+    # handed pixels are read here. VISION_BLOCK alone is the vision encode's own text (the
+    # caption tail probe appends the caption to it).
     with_image = [call for call in pipeline_clip.tokenize_calls if call["image"] is not None]
     caption_inputs = [call["image"] for call in with_image if call["llama_template"] is None]
-    encode_inputs = [call["image"] for call in with_image if call["llama_template"] is not None]
+    encode_inputs = [call["image"] for call in with_image if call["text"] == vl.VISION_BLOCK]
     # comfy_stubs' common_upscale returns the resampled COPY, so only the shape is readable —
     # which is the point: what the VLM reads is never the sampled tile.
     assert caption_inputs and all(tuple(x.shape[1:3]) != (y1 - y0, x1 - x0) for x in caption_inputs)
-    assert encode_inputs and all(torch.equal(x, image) for x in encode_inputs)
+    # The canvas encode reads the FULL image, and every crop encode is the tile's rect cut
+    # from that image at the bbox origin, so the region is read in its place in the whole
+    # picture rather than on its own.
+    sx = grid.solve_axis(x1 - x0, 56, 8, 16, axis="width")
+    sy = grid.solve_axis(y1 - y0, 56, 8, 16, axis="height")
+    tiles = grid.build_layout(x1 - x0, y1 - y0, sx, sy, 8, 16).tiles
+    assert len(tiles) > 1
+    assert torch.equal(encode_inputs[0], image)
+    assert len(encode_inputs) == 1 + len(tiles)
+    for pixels, tile in zip(encode_inputs[1:], tiles, strict=True):
+        crop = tile.crop_rect
+        expected = image[:, max(0, crop.y0 + y0):min(80, crop.y1 + y0), max(0, crop.x0 + x0):min(80, crop.x1 + x0), :]
+        assert torch.equal(pixels, expected)
 
 
 @pytest.mark.parametrize("method", ["captions", "vision tokens and captions"])
