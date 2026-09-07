@@ -20,13 +20,25 @@ def test_loads_via_comfyui_directory_mechanism():
         node_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
         vl_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
         upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
+        test_layout_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestLayout"]
+        test_upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestUpscale"]
+        test_captions_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestCaptions"]
+        test_render_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestRender"]
         assert isinstance(node_class, type)
         assert isinstance(vl_class, type)
         assert isinstance(upscale_class, type)
+        assert isinstance(test_layout_class, type)
+        assert isinstance(test_upscale_class, type)
+        assert isinstance(test_captions_class, type)
+        assert isinstance(test_render_class, type)
         assert {
             "ContextAnchoredTileRefine": node_class,
             "ContextAnchoredTileRefineVL": vl_class,
             "ContextAnchoredTileUpscaleVL": upscale_class,
+            "ContextAnchoredTileTestLayout": test_layout_class,
+            "ContextAnchoredTileTestUpscale": test_upscale_class,
+            "ContextAnchoredTileTestCaptions": test_captions_class,
+            "ContextAnchoredTileTestRender": test_render_class,
         } == module.NODE_CLASS_MAPPINGS
         assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
         assert (
@@ -40,6 +52,22 @@ def test_loads_via_comfyui_directory_mechanism():
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
             == "Context-Anchored Tile Upscale (VL)"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestLayout"]
+            == "Tile Test: Layout"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestUpscale"]
+            == "Tile Test: Upscale"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestCaptions"]
+            == "Tile Test: Captions"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestRender"]
+            == "Tile Test: Render"
         )
         assert "NODE_CLASS_MAPPINGS" in module.__all__
         assert "NODE_DISPLAY_NAME_MAPPINGS" in module.__all__
@@ -204,6 +232,26 @@ def test_progress_module_never_imports_comfy():
         "assert 'latent_preview' not in sys.modules, 'progress.py imported latent_preview at module scope'\n"
         "assert 'torch' not in sys.modules, 'progress.py imported torch at module scope'\n"
         "assert 'server' not in sys.modules, 'progress.py imported server at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_testing_module_never_imports_comfy():
+    # testing.py imports node/grid/upscale at module scope and must inherit their contract:
+    # torch at module scope, comfy only inside node methods, PIL only inside the drawing
+    # function.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.testing\n"
+        "assert 'comfy' not in sys.modules, 'testing.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'testing.py imported latent_preview at module scope'\n"
+        "assert 'PIL' not in sys.modules, 'testing.py imported PIL at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

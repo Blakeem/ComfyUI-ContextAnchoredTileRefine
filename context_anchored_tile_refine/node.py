@@ -28,6 +28,27 @@ def _vlm_method():
     return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on vision tokens of its own crop and its slice of the entire image, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to set the token counts and write your own tile prompts."})
 
 
+def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
+    # The /8 and range rules for the four tile-geometry widgets, in ONE place: the production
+    # nodes and the tile testing nodes both solve the same grid, so a rule that lived in only
+    # one of them would let the two disagree about which workflows are legal.
+    # Returns True or the message VALIDATE_INPUTS hands the frontend.
+    checks = (
+        ("max_tile_width", max_tile_width, 256, MAX_RESOLUTION),
+        ("max_tile_height", max_tile_height, 256, MAX_RESOLUTION),
+        ("context_anchor", context_anchor, 0, 512),
+        ("context_overlap", context_overlap, 0, 512),
+    )
+    for name, value, minimum, maximum in checks:
+        if value is None:
+            continue
+        if value % 8 != 0:
+            return f"{name} must be a multiple of 8, got {value}"
+        if value < minimum or value > maximum:
+            return f"{name} must be between {minimum} and {maximum}, got {value}"
+    return True
+
+
 def _validate_image(image):
     if image.ndim != 4:
         raise ValueError(f"image must be a [B,H,W,C] IMAGE tensor, got {image.ndim} dimensions")
@@ -102,20 +123,7 @@ class ContextAnchoredTileRefine:
                 captions.method_surface(vlm_method)
             except ValueError as error:
                 return str(error)
-        checks = (
-            ("max_tile_width", max_tile_width, 256, MAX_RESOLUTION),
-            ("max_tile_height", max_tile_height, 256, MAX_RESOLUTION),
-            ("context_anchor", context_anchor, 0, 512),
-            ("context_overlap", context_overlap, 0, 512),
-        )
-        for name, value, minimum, maximum in checks:
-            if value is None:
-                continue
-            if value % 8 != 0:
-                return f"{name} must be a multiple of 8, got {value}"
-            if value < minimum or value > maximum:
-                return f"{name} must be between {minimum} and {maximum}, got {value}"
-        return True
+        return check_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
         _validate_image(image)
@@ -161,6 +169,15 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # FUNCTION as a keyword (execution.py:218), hence the refine parameter below.
         input_types["hidden"] = {"unique_id": "UNIQUE_ID"}
         return input_types
+
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        # ComfyUI folds this value into the node's cache key, and the settings file is read
+        # at run time, so without it an edited preset never reaches a workflow nobody retuned.
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        from . import captions
+
+        return captions.settings_fingerprint()
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None, unique_id=None):
         _validate_image(image)
@@ -233,6 +250,15 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             # passes it to FUNCTION as a keyword (execution.py:218).
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
+
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        # ComfyUI folds this value into the node's cache key, and the settings file is read
+        # at run time, so without it an edited preset never reaches a workflow nobody retuned.
+        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
+        from . import captions
+
+        return captions.settings_fingerprint()
 
     def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None, unique_id=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).

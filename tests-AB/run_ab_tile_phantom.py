@@ -25,9 +25,13 @@ which freezes the 32 px anchor band on every neighbor side), and the initial noi
 run's canvas-wide draw at the same seed, sliced to this tile). What a single lane lacks: the
 per-step consolidation with neighbor lanes in the overlap bands, and the SDE noise field,
 which is drawn at crop size. `--block` adds the consolidation back: the tile and its
-bordering tiles run as one sync run over the full canvas' mask path, with the solver forced
-to the full run's tile rects, so the center tile keeps its exact crop, noise slice and
+bordering tiles run as one sync run over the full canvas' mask path, over the full run's own
+tile rects (grid.sub_layout), so the center tile keeps its exact crop, noise slice and
 neighbors (about 11 minutes per arm at 6 lanes).
+
+Block mode leaves the SDE field at the block's own shape too, deliberately. Neither mode
+passes noise_fields=, so every arm TESTS.md test 10 judged still reproduces. The Render node
+is what hands its lanes the full canvas' field instead.
 
 Usage (one arm per process, GPU idle):
   python tests-AB/run_ab_tile_phantom.py --arm crop-global --block
@@ -133,30 +137,6 @@ def arm_vision(arm, vision):
     return vision
 
 
-class FullLayoutBudget:
-    """vl.canvas_budget_pixels sized off the FULL run's tiles whatever tiles the call names,
-    so a lone tile or a block samples the canvas at the size the node would over the whole
-    grid. Restored on exit."""
-
-    def __init__(self, tiles):
-        self.tiles = tiles
-        self.saved = None
-
-    def __enter__(self):
-        from context_anchored_tile_refine import vl
-
-        self.saved = vl.canvas_budget_pixels
-        real, tiles = self.saved, self.tiles
-        vl.canvas_budget_pixels = lambda _tiles, source_h, source_w, canvas_tokens: real(tiles, source_h, source_w, canvas_tokens)
-        return self
-
-    def __exit__(self, *exc):
-        from context_anchored_tile_refine import vl
-
-        vl.canvas_budget_pixels = self.saved
-        return False
-
-
 def encode_dims(width, height, budget):
     """vl.resample_picture's own snap, for the record without resampling a picture."""
     from context_anchored_tile_refine import vl
@@ -220,8 +200,8 @@ def build_positives(arm, clip, canvas, tiles, vision, layout_tiles, text="", off
     if arm not in VISION_ARMS:
         raise ValueError(arm)
     settings = arm_vision(arm, vision)
-    with FullLayoutBudget(layout_tiles):
-        positives = vl.build_global_slices(clip, canvas, tiles, settings, offset_x=offset_x, offset_y=offset_y)
+    positives = vl.build_global_slices(clip, canvas, tiles, settings, offset_x=offset_x,
+                                       offset_y=offset_y, budget_tiles=layout_tiles)
     infos = []
     for tile, positive in zip(tiles, positives, strict=True):
         info = describe_rows(canvas, tile, settings, layout_tiles, offset_x, offset_y)
@@ -232,89 +212,7 @@ def build_positives(arm, clip, canvas, tiles, vision, layout_tiles, text="", off
     return positives, infos
 
 
-# ------------------------------------------------------------------ block mode: the tile and its neighbors
-
-def block_tiles(layout, tile):
-    return [t for t in layout.tiles if abs(t.col - tile.col) <= 1 and abs(t.row - tile.row) <= 1]
-
-
-def block_rect(layout, tile):
-    """The sampled region for the tile's 3x3 tile block, in canvas px. build_layout places the
-    first core at the region origin, so on a left or top side with tiles beyond the block the
-    region starts at the edge tile's CORE (its outer ring is dropped) and the center tile's
-    rects land exactly on the full run's; the right and bottom sides keep the outer rings,
-    which the last tile absorbs as core."""
-    from context_anchored_tile_refine import grid
-
-    near = block_tiles(layout, tile)
-    x0 = min(t.crop_rect.x0 for t in near)
-    y0 = min(t.crop_rect.y0 for t in near)
-    if x0 > 0:
-        x0 = min(t.core.x0 for t in near)
-    if y0 > 0:
-        y0 = min(t.core.y0 for t in near)
-    return grid.Rect(x0, y0, max(t.crop_rect.x1 for t in near), max(t.crop_rect.y1 for t in near))
-
-
-def block_layout(layout, tile, block, settings):
-    """The layout the engine must build over the block so its tiles are the full run's tiles,
-    rect for rect: the same bases, and the last tile absorbing the remainder."""
-    from context_anchored_tile_refine import grid
-
-    cols = [t.col for t in layout.tiles if abs(t.col - tile.col) <= 1]
-    rows = [t.row for t in layout.tiles if abs(t.row - tile.row) <= 1]
-    n_x, n_y = len(set(cols)), len(set(rows))
-    r = settings.context_anchor + settings.context_overlap
-    width, height = block.x1 - block.x0, block.y1 - block.y0
-    sx = grid.AxisSolution(n=n_x, base=layout.sol_x.base, last=width - (n_x - 1) * layout.sol_x.base,
-                           overhead=0 if n_x == 1 else r if n_x == 2 else 2 * r, r=r)
-    sy = grid.AxisSolution(n=n_y, base=layout.sol_y.base, last=height - (n_y - 1) * layout.sol_y.base,
-                           overhead=0 if n_y == 1 else r if n_y == 2 else 2 * r, r=r)
-    return grid.build_layout(width, height, sx, sy, settings.context_anchor, settings.context_overlap), sx, sy
-
-
-class SolverPatch:
-    """grid.solve_axis returns the block's forced solutions for the block's own two axes and
-    defers to the real solver for anything else. Keyed by axis AND length, so a square block
-    cannot hand the row solution to the columns."""
-
-    def __init__(self, block, sx, sy):
-        self.forced = {("width", block.x1 - block.x0): sx, ("height", block.y1 - block.y0): sy}
-        self.saved = None
-
-    def __enter__(self):
-        from context_anchored_tile_refine import grid
-
-        self.saved = grid.solve_axis
-        forced, real = self.forced, self.saved
-
-        def solve_axis(L, cap, ctx, overlap=0, multiple=8, axis=None):
-            return forced.get((axis, L)) or real(L, cap, ctx, overlap=overlap, multiple=multiple, axis=axis)
-
-        grid.solve_axis = solve_axis
-        return self
-
-    def __exit__(self, *exc):
-        from context_anchored_tile_refine import grid
-
-        grid.solve_axis = self.saved
-        return False
-
-
-def block_mask(block, canvas_w, canvas_h, settings):
-    """1 over the block, 0 on a 32 px band at every block edge that has tiles beyond it. On the
-    right and bottom that band is the edge tile's own frozen anchor ring; on a left or top
-    edge that starts at a core (block_rect) it freezes 32 px of that edge tile's core, the
-    price of the mask path's bbox + context_anchor crop landing on the block exactly."""
-    mask = torch.zeros((1, canvas_h, canvas_w), dtype=torch.float32)
-    a = settings.context_anchor
-    x0 = block.x0 + (a if block.x0 > 0 else 0)
-    y0 = block.y0 + (a if block.y0 > 0 else 0)
-    x1 = block.x1 - (a if block.x1 < canvas_w else 0)
-    y1 = block.y1 - (a if block.y1 < canvas_h else 0)
-    mask[:, y0:y1, x0:x1] = 1.0
-    return mask
-
+# ------------------------------------------------------------------ the sampled pixels and the denoise mask
 
 def region_pixels(source_4k, rect, cache_key, settings, use_dat):
     """The canvas pixels of `rect` the full run would have sampled: the owner's pass 2 ran
@@ -346,42 +244,14 @@ def region_pixels(source_4k, rect, cache_key, settings, use_dat):
     return pixels
 
 
-# ------------------------------------------------------------------ the tile's pixels and noise
-
-def region_mask(tile, settings):
-    """1 on the core plus overlap, 0 on the anchor band of every neighbor side, so the mask
-    path freezes exactly what the full run's lane froze."""
-    crop = tile.crop_rect
-    h, w = crop.y1 - crop.y0, crop.x1 - crop.x0
-    mask = torch.ones((1, h, w), dtype=torch.float32)
-    a = settings.context_anchor
-    if tile.nb.left:
-        mask[:, :, :a] = 0.0
-    if tile.nb.right:
-        mask[:, :, w - a:] = 0.0
-    if tile.nb.top:
-        mask[:, :a, :] = 0.0
-    if tile.nb.bottom:
-        mask[:, h - a:, :] = 0.0
+def sub_region_mask(sub, height, width, origin_x=0, origin_y=0):
+    """1 over the sub layout's denoised region and 0 elsewhere, in the frame of the picture
+    refine_image is handed: the full canvas for a block, the tile's own crop for a lone tile,
+    whose origin is then the block itself."""
+    mask = torch.zeros((1, height, width), dtype=torch.float32)
+    region = sub.region
+    mask[:, region.y0 - origin_y:region.y1 - origin_y, region.x0 - origin_x:region.x1 - origin_x] = 1.0
     return mask
-
-
-class SlicedCanvasNoise:
-    """The full run's ONE canvas-wide draw (sync.build_canvas_noise's dummy at the same seed)
-    sliced to this tile's latent window, so the lane starts from the noise 00787 gave it."""
-
-    def __init__(self, vae, seed, canvas_h, canvas_w, rect):
-        from context_anchored_tile_refine import sync, upscale
-
-        self.seed = seed
-        full = sync.build_canvas_noise(vae, upscale.Noise_RandomNoise(seed), canvas_h, canvas_w)
-        self.slice = full[..., rect.y0 // 8:rect.y1 // 8, rect.x0 // 8:rect.x1 // 8].contiguous()
-
-    def generate_noise(self, input_latent):
-        expected = tuple(input_latent["samples"].shape)
-        if tuple(self.slice.shape) != expected:
-            raise RuntimeError(f"noise slice {tuple(self.slice.shape)} does not match the lane latent {expected}")
-        return self.slice.clone()
 
 
 # ------------------------------------------------------------------ the render
@@ -389,12 +259,15 @@ class SlicedCanvasNoise:
 def render(arm, tile, tile_name, settings, vision, source_4k, use_dat, text=""):
     import comfy.samplers
 
-    from context_anchored_tile_refine import sampling, sync, upscale
+    from context_anchored_tile_refine import grid, sampling, sync, upscale
 
     timings = {}
     canvas_w, canvas_h = upscale.scale_target(int(source_4k.shape[2]), int(source_4k.shape[1]), settings.upscale_by)
     layout = solve_layout(canvas_w, canvas_h, settings)
-    crop = tile.crop_rect
+    # The tile alone as a block of one: `block` is its crop rect and `region` the core plus
+    # overlap the full run diffuses there, both checked against the parent by sub_layout.
+    sub = grid.sub_layout(layout, tile.col, tile.col, tile.row, tile.row)
+    crop = sub.block
     print(f"[layout]  canvas {canvas_w}x{canvas_h} grid {layout.sol_x.n}x{layout.sol_y.n}  tile {tile_name} "
           f"crop {crop.x0},{crop.y0}-{crop.x1},{crop.y1}")
 
@@ -426,9 +299,9 @@ def render(arm, tile, tile_name, settings, vision, source_4k, use_dat, text=""):
     vae = ab_models.load_vae(VAE_NAME)
     sigmas = upscale.build_sigmas(model, settings.scheduler, settings.steps, settings.denoise)
     sampler = comfy.samplers.sampler_object(settings.sampler)
-    noise = SlicedCanvasNoise(vae, settings.seed, canvas_h, canvas_w, crop)
+    noise = upscale.SlicedCanvasNoise(vae, settings.seed, canvas_h, canvas_w, crop)
     guider = upscale.build_guider(model, empty, negative, settings.cfg)
-    mask = region_mask(tile, settings)
+    mask = sub_region_mask(sub, crop.y1 - crop.y0, crop.x1 - crop.x0, crop.x0, crop.y0)
 
     saved = sync.build_tile_positives
     sync.build_tile_positives = lambda *args, **kwargs: [positive]
@@ -464,24 +337,24 @@ def render(arm, tile, tile_name, settings, vision, source_4k, use_dat, text=""):
 
 
 def render_block(arm, tile, tile_name, settings, vision, source_4k, use_dat, text=""):
-    """The tile AND its bordering tiles as one sync run over the full canvas' mask path, with
-    the solver forced to the full run's tile rects: every lane keeps its full-run crop, noise
+    """The tile AND its bordering tiles as one sync run over the full canvas' mask path, over
+    the full run's own tile rects (grid.sub_layout): every lane keeps its full-run crop, noise
     slice and neighbors, so the per-step consolidation the single-lane mode lacks is real."""
     import comfy.samplers
 
-    from context_anchored_tile_refine import sampling, sync, upscale
+    from context_anchored_tile_refine import grid, sampling, sync, upscale
 
     timings = {}
     canvas_w, canvas_h = upscale.scale_target(int(source_4k.shape[2]), int(source_4k.shape[1]), settings.upscale_by)
     layout = solve_layout(canvas_w, canvas_h, settings)
-    block = block_rect(layout, tile)
-    blk_layout, sx, sy = block_layout(layout, tile, block, settings)
+    index = tile.row * layout.sol_x.n + tile.col
+    sub = grid.sub_layout(layout, *grid.neighborhood(layout, index))
+    block = sub.block
     # The center tile's crop must be the full run's exactly; an edge tile's differs only by
-    # the outer ring block_rect documents.
-    first_col, first_row = max(tile.col - 1, 0), max(tile.row - 1, 0)
-    for blk_tile in blk_layout.tiles:
-        full_tile = next(t for t in layout.tiles
-                         if t.col == blk_tile.col + first_col and t.row == blk_tile.row + first_row)
+    # the outer ring sub_layout drops on a side that has tiles beyond it.
+    first_col, first_row = sub.first_col, sub.first_row
+    for blk_tile in sub.layout.tiles:
+        full_tile = layout.tiles[(blk_tile.row + first_row) * layout.sol_x.n + blk_tile.col + first_col]
         shifted = (blk_tile.crop_rect.x0 + block.x0, blk_tile.crop_rect.y0 + block.y0,
                    blk_tile.crop_rect.x1 + block.x0, blk_tile.crop_rect.y1 + block.y0)
         full_rect = (full_tile.crop_rect.x0, full_tile.crop_rect.y0, full_tile.crop_rect.x1, full_tile.crop_rect.y1)
@@ -490,7 +363,7 @@ def render_block(arm, tile, tile_name, settings, vision, source_4k, use_dat, tex
         if shifted != full_rect:
             print(f"[layout]  edge tile r{full_tile.row}c{full_tile.col} samples {shifted} (full run {full_rect})")
     print(f"[layout]  canvas {canvas_w}x{canvas_h} grid {layout.sol_x.n}x{layout.sol_y.n}  block around {tile_name} "
-          f"{block.x0},{block.y0}-{block.x1},{block.y1} = {blk_layout.sol_x.n}x{blk_layout.sol_y.n} tiles")
+          f"{block.x0},{block.y0}-{block.x1},{block.y1} = {sub.layout.sol_x.n}x{sub.layout.sol_y.n} tiles")
 
     started = time.perf_counter()
     pixels = region_pixels(source_4k, block, f"block-{tile_name}", settings, use_dat)
@@ -507,7 +380,7 @@ def render_block(arm, tile, tile_name, settings, vision, source_4k, use_dat, tex
     clip = ab_models.load_clip(CLIP_NAME, CLIP_TYPE)
     started = time.perf_counter()
     with torch.inference_mode():
-        positives, infos = build_positives(arm, clip, canvas, blk_layout.tiles, vision, layout.tiles, text=text,
+        positives, infos = build_positives(arm, clip, canvas, sub.layout.tiles, vision, layout.tiles, text=text,
                                            offset_x=block.x0, offset_y=block.y0)
         if SHUFFLE:
             positives = [shuffle_rows(positive, settings.seed) for positive in positives]
@@ -516,10 +389,10 @@ def render_block(arm, tile, tile_name, settings, vision, source_4k, use_dat, tex
         negative = ab_models.encode_prompt(clip, NEGATIVE)
         empty = upscale.encode_empty(clip)
     timings["conditioning"] = time.perf_counter() - started
-    for blk_tile, info in zip(blk_layout.tiles, infos, strict=True):
+    for blk_tile, info in zip(sub.layout.tiles, infos, strict=True):
         print(f"[arm]     {arm} r{blk_tile.row + first_row}c{blk_tile.col + first_col}: {info}")
 
-    mask = block_mask(block, canvas_w, canvas_h, settings)
+    mask = sub_region_mask(sub, canvas_h, canvas_w)
     bbox = sampling._mask_bbox(mask >= 0.5)
     y0, y1, x0, x1 = sampling._expand_snap_clamp(bbox, settings.context_anchor, canvas_h, canvas_w)
     if (x0, y0, x1, y1) != (block.x0, block.y0, block.x1, block.y1):
@@ -530,20 +403,21 @@ def render_block(arm, tile, tile_name, settings, vision, source_4k, use_dat, tex
     vae = ab_models.load_vae(VAE_NAME)
     sigmas = upscale.build_sigmas(model, settings.scheduler, settings.steps, settings.denoise)
     sampler = comfy.samplers.sampler_object(settings.sampler)
-    noise = SlicedCanvasNoise(vae, settings.seed, canvas_h, canvas_w, block)
+    noise = upscale.SlicedCanvasNoise(vae, settings.seed, canvas_h, canvas_w, block)
     guider = upscale.build_guider(model, empty, negative, settings.cfg)
 
     saved = sync.build_tile_positives
     sync.build_tile_positives = lambda *args, **kwargs: list(positives)
     started = time.perf_counter()
     try:
-        with SolverPatch(block, sx, sy), ab_models.VramProbe() as probe, torch.inference_mode():
+        with ab_models.VramProbe() as probe, torch.inference_mode():
             result = sampling.refine_image(
                 canvas, guider, sampler, sigmas, vae, noise,
                 settings.max_tile_width, settings.max_tile_height,
                 settings.context_anchor, settings.context_overlap,
                 mask=mask, vl_clip=clip, vlm_method="vision tokens",
-                anchor_source=settings.anchor_source, sampler_name=settings.sampler)
+                anchor_source=settings.anchor_source, sampler_name=settings.sampler,
+                layout=sub)
     finally:
         sync.build_tile_positives = saved
     timings["refine"] = time.perf_counter() - started

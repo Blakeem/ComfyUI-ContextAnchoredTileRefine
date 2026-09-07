@@ -150,6 +150,51 @@ class Noise_RandomNoise:
         return comfy.sample.prepare_noise(latent_image, self.seed, batch_inds)
 
 
+class SlicedCanvasNoise:
+    """The NOISE a run over ONE BLOCK of a larger canvas needs: the full canvas' single draw
+    at `seed`, sliced to `rect`.
+
+    A block that draws at its own shape starts every lane from cells the full run never gave
+    it, which makes the block a different render rather than a reproduction of the run it
+    stands in for. `rect` is in canvas px on the /8 latent grid the tile solver already
+    lands on.
+    """
+
+    def __init__(self, vae, seed, canvas_h, canvas_w, rect):
+        # sync builds the dummy that mirrors this VAE's latent layout, so the draw is the one
+        # the engine itself would have made. Lazy, like every comfy import in this module.
+        from . import sync
+
+        self.seed = seed
+        full = sync.build_canvas_noise(vae, Noise_RandomNoise(seed), canvas_h, canvas_w)
+        self.canvas_shape = tuple(full.shape)
+        self.cell_origin = (rect.y0 // 8, rect.x0 // 8)
+        # .contiguous() because downstream sampler code may .view() the slice.
+        self.slice = full[..., rect.y0 // 8:rect.y1 // 8, rect.x0 // 8:rect.x1 // 8].contiguous()
+
+    def generate_noise(self, input_latent):
+        expected = tuple(input_latent["samples"].shape)
+        if tuple(self.slice.shape) != expected:
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine: the canvas noise slice {tuple(self.slice.shape)} "
+                f"does not match the latent it is drawn for {expected}.")
+        # A clone, never the slice itself: comfy binds the noise it is handed as model_k.noise
+        # and the sync engine's live-canvas ring zeroes cells of it in place.
+        return self.slice.clone()
+
+    def noise_fields(self, sampler, sigmas):
+        # The stochastic sampler's per-step field, sized by the FULL canvas and read at this
+        # block's origin, so every injection is the one the entire canvas run would have made.
+        # A one tile block therefore draws a canvas-sized CPU field per step (about 132 MB at
+        # the owner's 8K config, tens of milliseconds). Accepted: it buys draws identical to
+        # the full run's, and it stays far below one tile's sampling step on the GPU.
+        from . import stepper
+
+        return stepper.offset_noise_fields(
+            stepper.build_noise_fields(sampler, self.canvas_shape, self.seed, sigmas),
+            *self.cell_origin)
+
+
 def build_sigmas(model, scheduler, steps, denoise):
     # comfy_extras/nodes_custom_sampler.py BasicScheduler.execute: schedule `total_steps`
     # then keep only the last steps+1 sigmas, which is what makes `denoise` a partial-noise

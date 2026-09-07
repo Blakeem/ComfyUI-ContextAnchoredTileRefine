@@ -1,3 +1,4 @@
+from context_anchored_tile_refine import captions
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
     ContextAnchoredTileRefineVL,
@@ -278,6 +279,23 @@ def test_vl_node_class_attributes():
     assert ContextAnchoredTileRefineVL.FUNCTION == "refine"
     assert callable(ContextAnchoredTileRefineVL.refine)
     assert ContextAnchoredTileRefineVL.CATEGORY == "image/upscaling"
+
+
+def test_the_vl_nodes_report_the_settings_file_in_their_cache_key():
+    # ComfyUI folds IS_CHANGED into the cache key, so an edit to the settings file is what
+    # re-runs a VL node whose widgets nobody touched. The base node reads no settings file,
+    # and its ABSENCE of IS_CHANGED is pinned in test_node_class_attributes.
+    expected = captions.settings_fingerprint()
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        assert node.IS_CHANGED() == expected, node.__name__
+
+
+def test_the_cache_key_accepts_the_nodes_own_inputs():
+    # Core calls IS_CHANGED as f(**inputs), so every widget on the node arrives as a keyword.
+    expected = captions.settings_fingerprint()
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        fingerprint = node.IS_CHANGED(image=None, vlm_method="captions", context_anchor=32)
+        assert fingerprint == expected, node.__name__
 
 
 def test_vl_input_types_does_not_leak_into_base():

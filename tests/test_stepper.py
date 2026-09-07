@@ -20,6 +20,12 @@ FULL_WINDOW = (0, 8, 0, 8)
 LEFT_WINDOW = (0, 8, 0, 5)
 RIGHT_WINDOW = (0, 8, 3, 8)
 
+# A block run's canvas: non-square in both the field shape and the lane window, so a swapped
+# axis cannot pass. BLOCK_ORIGIN_CELLS is where the block sits in that canvas, (dy, dx).
+BLOCK_CANVAS_SHAPE = (1, 4, 12, 8)
+BLOCK_LANE_WINDOW = (0, 5, 1, 4)
+BLOCK_ORIGIN_CELLS = (6, 3)
+
 
 # ---- fakes -----------------------------------------------------------------
 
@@ -435,6 +441,37 @@ def test_build_noise_fields_returns_none_for_a_deterministic_sampler():
     sampler = make_sampler(comfy.k_diffusion.sampling.sample_dpmpp_2m)
 
     assert stepper.build_noise_fields(sampler, LATENT_SHAPE, 42, SIGMAS) is None
+
+
+@pytest.mark.parametrize("name", ["dpmpp_2m_sde", "exp_heun_2_x0_sde"])
+def test_an_offset_provider_reads_the_full_field_at_the_blocks_canvas_position(name):
+    # What a block run needs, for BOTH provider kinds: a window given in BLOCK cells draws the
+    # cells the FULL canvas field holds at that window plus the block's origin, so a block lane
+    # gets the injection the entire canvas run would have made there.
+    import comfy.k_diffusion.sampling
+
+    sampler = make_sampler(getattr(comfy.k_diffusion.sampling, f"sample_{name}"))
+    fields = stepper.build_noise_fields(sampler, BLOCK_CANVAS_SHAPE, 42, SIGMAS)
+    dy, dx = BLOCK_ORIGIN_CELLS
+    y0, y1, x0, x1 = BLOCK_LANE_WINDOW
+    block = stepper.offset_noise_fields(fields, dy, dx).for_window(BLOCK_LANE_WINDOW)
+    shifted = fields.for_window((y0 + dy, y1 + dy, x0 + dx, x1 + dx))
+    # Every lane sampler is built BEFORE the first draw and asks once per step: the seeds_2
+    # provider holds one field at a time and rejects a request for a draw the fleet has passed.
+    at_origin = fields.for_window(BLOCK_LANE_WINDOW)
+
+    for step in range(2):   # two consecutive sigma steps; the final one draws nothing
+        drawn = block(SIGMAS[step], SIGMAS[step + 1])
+        assert drawn.shape == (1, 4, 5, 3)
+        assert torch.equal(drawn, shifted(SIGMAS[step], SIGMAS[step + 1]))
+        # The offset is real, not a no-op: the same window read at the canvas origin differs.
+        assert not torch.equal(drawn, at_origin(SIGMAS[step], SIGMAS[step + 1]))
+
+
+def test_offset_noise_fields_passes_none_through():
+    # A deterministic sampler's own answer from build_noise_fields survives the shift, so a
+    # caller offsets whatever it was handed without branching on the sampler itself.
+    assert stepper.offset_noise_fields(None, 6, 3) is None
 
 
 def test_a_stochastic_sampler_without_a_shared_noise_field_is_rejected():

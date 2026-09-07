@@ -30,6 +30,7 @@ Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscal
 | [Tile Refine](#tile-refine) | Most diffusion models. You upscale first and wire the sampling nodes yourself. |
 | [Tile Refine (VL)](#tile-refine-vl) | Krea 2. The same wiring plus `clip`, and no positive prompt is needed. |
 | [Tile Upscale (VL)](#tile-upscale-vl) | Krea 2. Upscale and refine in one node. |
+| [Tile Test chain](#tile-test-chain) | Krea 2. Testing only. Tune tile settings, caption prompts and token counts on chosen tiles without upscaling again. |
 
 The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models, including Krea 2 Turbo, are untested.
 
@@ -76,6 +77,21 @@ The VL node adds vision conditioning to the base node and is built for Krea 2. I
 ![Context-Anchored Tile Upscale (VL)](vl-upscale-node.png)
 
 Tile Upscale (VL) runs the whole flow in one node. The image is upscaled first, through the optional `upscale_model` when connected, and a single lanczos pass brings it to `input size x upscale_by`. It then runs the same VL tile refine as Tile Refine (VL).
+
+### Tile Test chain
+
+Four testing nodes for tuning the VL nodes. They are not production nodes. They run the engine the VL nodes run, so what they render is what the VL nodes will render. Chain them in the order of the table.
+
+| Node | Takes | Returns |
+|---|---|---|
+| Tile Test: Layout | The image before upscaling, `upscale_by` and the four tile settings. | The layout, an overlay of the image with every tile drawn and numbered, and the tile count. |
+| Tile Test: Upscale | The image and the layout, plus the optional `upscale_model`. Skip it for an already upscaled image and set `upscale_by` to 1.0. | The upscaled canvas. |
+| Tile Test: Captions | The canvas, the layout, `clip` and a settings file preset. `tile_instruction`, `style_instruction` and `max_tokens` override that part of the preset when set, `style_caption` turns the style caption off, and `caption_megapixels` always applies, with 0 reading the crop's own size. | The captions for the Render node and a text that lists every tile's caption. |
+| Tile Test: Render | The canvas, the layout, the captions, the models and the sampling settings, plus `surface`, `anchor_source`, `canvas_tokens`, `crop_tokens`, `tiles` and `with_neighbors`. | The refined canvas when `tiles` is empty. Otherwise each named tile and the block it was rendered in, as image lists. |
+
+ComfyUI re-runs a node only when one of its inputs changed. The seed lives on the Render node, so a new seed or a new token count re-renders without upscaling or captioning again. A new caption prompt re-runs the Captions and Render nodes only.
+
+A tile rendered on its own runs as one region of the full canvas, with its bordering tiles as lanes of the same run, the noise the full run draws there, and its own caption. This keeps the tile close to what the full run produces there. The tiles beyond its bordering tiles are absent, so it is not identical. A tile rendered with its neighbours needs a tile core at least `context_anchor` plus `context_overlap` wide, or the node refuses the render and names the two settings. With `with_neighbors` off the tile renders alone, and its anchor ring then stays unrefined source.
 
 ## Features
 
@@ -159,7 +175,7 @@ Each tile is assigned vision tokens from two encodes of the image. The first enc
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The same VL model writes a short description of each tile from that tile's crop alone, and the description is used as that tile's prompt. Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no vision encode is built.
+The same VL model writes a short description of each tile from that tile's crop alone, and the description is used as that tile's prompt. Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no vision encode is built. Captions are stored for the session, keyed by the crop, the question and the budget, so a run at a new seed skips the caption pass while the same CLIP stays loaded.
 
 #### Vision tokens and captions
 
@@ -171,7 +187,7 @@ The default method combines the tile's vision tokens and its own caption in a si
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The `[vision]` table at the top of `settings.toml` sets how each tile's conditioning samples the image. It applies to every `vlm_method` option and is read on every run. `canvas_tokens` is the number of vision tokens each tile takes from the encode of the entire image. The image is sampled at the size where a tile's share of it holds that many tokens, up to 2 megapixels, so a tile gets the same count on a large image as on a small one. `crop_tokens` is the number of tokens from the encode of the tile's own crop. Too few lets an object from elsewhere in the image appear in an empty tile, and too many redraw the tile's own subject. Set either count to 0 to turn that encode off. `caption_megapixels` is how much of the tile the VL model reads when it writes a caption, and 0 reads the picture's own size up to 2 megapixels. One vision token covers 32 x 32 pixels of the picture the encoder reads, so 0.1 megapixels is about 98 tokens and 1 megapixel is about 977. The defaults of 165 canvas tokens and 100 crop tokens were settled by A/B on an 8K image with 24 tiles.
+The `[vision]` table at the top of `settings.toml` sets how each tile's conditioning samples the image. It applies to every `vlm_method` option and is read on every run. `canvas_tokens` is the number of vision tokens each tile takes from the encode of the entire image. The image is sampled at the size where a tile's share of it holds that many tokens, up to 2 megapixels, so a tile gets the same count on a large image as on a small one. `crop_tokens` is the number of tokens from the encode of the tile's own crop. Too few lets an object from elsewhere in the image appear in an empty tile, and too many redraw the tile's own subject. Set either count to 0 to turn that encode off. `caption_megapixels` is how much of the tile the VL model reads when it writes a caption, and 0 reads the picture's own size up to 2 megapixels. One vision token covers 32 x 32 pixels of the picture the encoder reads, so 0.1 megapixels is about 98 tokens and 1 megapixel is about 977. The defaults of 165 canvas tokens and 110 crop tokens were settled on an 8K image with 24 tiles.
 
 #### Caption presets
 
@@ -181,7 +197,7 @@ The prompts behind both caption methods live in `settings.toml` in the node's fo
 
 A preset holds four keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the entire image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer.
 
-Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `settings.user.toml` whenever it exists, and a node update never replaces it. Editing a preset's wording applies on the next run. Adding or renaming a preset changes the selector, so it needs a ComfyUI restart.
+Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `settings.user.toml` whenever it exists, and a node update never replaces it. Editing a preset's wording applies on the next run, and the nodes re-run when the file changes even when no widget changed. Adding or renaming a preset changes the selector, so it needs a ComfyUI restart.
 
 ### Regions, batches, and control
 

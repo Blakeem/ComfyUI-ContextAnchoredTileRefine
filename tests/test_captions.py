@@ -185,7 +185,7 @@ def test_settings_toml_ships_the_owner_tested_wording():
     # The [vision] table: the block A/B's settled point (TESTS.md test 10), and the caption
     # picture at the vision encode's old size, the three-scene A/B's winner.
     assert settings.vision == captions.VisionSettings(
-        canvas_tokens=165, crop_tokens=100, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
+        canvas_tokens=165, crop_tokens=110, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
     assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
     # `standard` is FIRST, which is what makes it the default preset the selector offers
     # unlabeled. Its block is the pre-settings-file constants character for character, so the
@@ -408,6 +408,54 @@ def test_the_users_own_copy_wins_over_the_shipped_file(tmp_path, monkeypatch):
     assert list(captions.load_settings().presets) == ["mine"]
 
 
+def a_settings_dir(tmp_path, monkeypatch):
+    # The shipped file at a throwaway directory, so a fingerprint test can edit the file in
+    # force without touching the real one.
+    monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
+    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_SETTINGS)
+
+
+def test_the_settings_fingerprint_is_stable_across_calls(tmp_path, monkeypatch):
+    a_settings_dir(tmp_path, monkeypatch)
+
+    first = captions.settings_fingerprint()
+
+    assert first == captions.settings_fingerprint()
+    assert first.startswith(f"{captions.SETTINGS_NAME}:")
+
+
+def test_the_settings_fingerprint_changes_when_the_file_changes(tmp_path, monkeypatch):
+    # This is the value ComfyUI compares with the previous run's, so an edited preset has to
+    # move it or the node is served from the cache and never runs.
+    a_settings_dir(tmp_path, monkeypatch)
+    before = captions.settings_fingerprint()
+
+    (tmp_path / captions.SETTINGS_NAME).write_text(
+        GOOD_SETTINGS.replace("ask about the tile", "ask something else"))
+
+    assert captions.settings_fingerprint() != before
+
+
+def test_the_settings_fingerprint_changes_when_a_user_copy_appears(tmp_path, monkeypatch):
+    # A user copy carrying the shipped file's exact bytes still takes the run over, which is
+    # why the file name rides beside the digest.
+    a_settings_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml")
+    before = captions.settings_fingerprint()
+
+    (tmp_path / captions.USER_SETTINGS_NAME).write_text(GOOD_SETTINGS)
+
+    assert captions.settings_fingerprint() != before
+
+
+def test_a_missing_settings_file_fingerprints_without_raising(tmp_path, monkeypatch):
+    # IS_CHANGED runs while the prompt is queued, so a missing file must not stop the queue.
+    # The run-time read is what raises the message that names the file.
+    monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
+
+    assert captions.settings_fingerprint() == f"missing:{captions.SETTINGS_NAME}"
+
+
 @pytest.mark.parametrize(("megapixels", "size", "expected"), [
     (captions.VL_INPUT_BUDGET_MEGAPIXELS, (200, 300), captions.VL_INPUT_BUDGET),
     (1.0, (200, 300), 1_000_000),
@@ -573,6 +621,117 @@ def test_generate_caption_rejects_a_clip_without_image_tokens():
 
     with pytest.raises(RuntimeError, match="no image tokens"):
         captions.generate_caption(NoImageTokenClip(), torch.zeros(1, 8, 8, 3), "describe", 256)
+
+
+# --- the caption cache ----------------------------------------------------------------
+
+def test_a_repeated_caption_request_is_served_from_the_cache():
+    # A seed re-roll re-executes the node, and a greedy caption of the same picture, question
+    # and budget cannot differ, so the second pass must not reach the VLM at all.
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.rand(1, 8, 8, 3)
+
+    first = captions.generate_caption(clip, picture, "describe", 256)
+    second = captions.generate_caption(clip, picture.clone(), "describe", 256)
+
+    assert first == second == "a fox, centre"
+    assert len(clip.generate_calls) == 1
+
+
+@pytest.mark.parametrize("changed", ["pixels", "instruction", "max_length", "scope"])
+def test_every_part_of_the_key_misses_when_it_changes(changed):
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3)
+    request = {"vl_input": picture, "instruction": "describe", "max_length": 256,
+               "scope": ("tile", 0, 0, 8, 8, 0, 0)}
+
+    captions.generate_caption(clip, **request)
+    if changed == "pixels":
+        request["vl_input"] = picture.clone()
+        request["vl_input"][0, 0, 0, 0] = 1.0
+    elif changed == "instruction":
+        request["instruction"] = "describe it differently"
+    elif changed == "max_length":
+        request["max_length"] = 512
+    else:
+        request["scope"] = ("tile", 8, 0, 16, 8, 0, 0)
+    captions.generate_caption(clip, **request)
+
+    assert len(clip.generate_calls) == 2
+
+
+def test_a_different_clip_object_never_reads_another_clips_entry():
+    # A second CLIP is a second model, and its answer to the same question is its own.
+    picture = torch.zeros(1, 8, 8, 3)
+    first = FakeCaptionClip(answer=lambda image, instruction: "first model")
+    second = FakeCaptionClip(answer=lambda image, instruction: "second model")
+
+    captions.generate_caption(first, picture, "describe", 256)
+    text = captions.generate_caption(second, picture, "describe", 256)
+
+    assert text == "second model"
+    assert len(second.generate_calls) == 1
+
+
+def test_a_bfloat16_picture_is_cached_rather_than_raising():
+    # resample_for_vl keeps whatever dtype the IMAGE arrived with, and bfloat16 has no numpy
+    # dtype, so the key hashes a float32 view of the picture.
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3, dtype=torch.bfloat16)
+
+    captions.generate_caption(clip, picture, "describe", 256)
+    captions.generate_caption(clip, picture.clone(), "describe", 256)
+
+    assert len(clip.generate_calls) == 1
+
+
+def test_the_oldest_entry_is_evicted_past_the_bound(monkeypatch):
+    # The cache is bounded so a long session cannot grow it without limit.
+    monkeypatch.setattr(captions, "CAPTION_CACHE_ENTRIES", 2)
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3)
+
+    for index in range(3):
+        captions.generate_caption(clip, picture, "describe", 256, scope=("tile", index))
+    captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 0))
+    captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 2))
+
+    assert captions.CAPTION_CACHE_ENTRIES == 2
+    assert len(clip.generate_calls) == 4          # the third request evicted scope ("tile", 0)
+
+
+def test_two_byte_equal_tiles_in_one_run_are_captioned_separately(comfy_stubs):
+    # comfy_stubs' resample hands every tile the same zero picture, so only the tile's place
+    # in the run keeps the two requests apart.
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(16, 0, 32, 16))]
+    clip = FakeCaptionClip()
+
+    captions.generate_tile_captions(clip, torch.rand(1, 16, 32, 3), tiles, a_preset())
+
+    assert len(clip.generate_calls) == 2
+
+
+def test_a_second_pre_pass_over_the_same_tiles_reaches_no_vlm(comfy_stubs):
+    # The whole point: a re-run captions nothing again, and the progress the UI reads is
+    # still reported for every tile.
+    reported = []
+
+    class Recorder:
+        def caption_done(self, index, count):
+            reported.append((index, count))
+
+    source = torch.rand(1, 16, 32, 3)
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(16, 0, 32, 16))]
+    clip = FakeCaptionClip()
+
+    first = captions.generate_tile_captions(clip, source, tiles, a_preset())
+    asked = len(clip.generate_calls)
+    second = captions.generate_tile_captions(clip, source, tiles, a_preset(),
+                                             progress=Recorder())
+
+    assert second == first
+    assert len(clip.generate_calls) == asked == 2
+    assert reported == [(1, 2), (2, 2)]
 
 
 # --- generate_tile_captions -----------------------------------------------------------
@@ -991,7 +1150,8 @@ def test_vision_tokens_is_the_default_and_still_routes_through_build_global_slic
     explicit = _run(image, VLGuider(), pipeline_clip, "vision tokens")
 
     assert torch.equal(default, explicit)
-    assert len(seen) == 2 and all(call == {"offset_x": 0, "offset_y": 0} for call in seen)
+    assert len(seen) == 2
+    assert all(call == {"offset_x": 0, "offset_y": 0, "budget_tiles": None} for call in seen)
     assert pipeline_clip.generate_calls == []
 
 
@@ -1165,3 +1325,22 @@ def test_a_method_naming_an_absent_preset_is_rejected_through_the_dispatch(comfy
     # mid-session leaves a stale option that must fail by name rather than obscurely.
     with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
         _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions (gone)")
+
+
+def test_slice_caption_conds_forward_budget_tiles_to_the_vision_rows(stubbed_slices, monkeypatch):
+    # The vision half of this surface is vl.build_vision_rows itself, so a block run's canvas
+    # sample must be sized off the full grid's tiles here exactly as on the vision-only
+    # surface.
+    seen = []
+    real_budget = vl.canvas_budget_pixels
+    monkeypatch.setattr(vl, "canvas_budget_pixels",
+                        lambda tiles, h, w, tokens: (seen.append(tiles),
+                                                     real_budget(tiles, h, w, tokens))[1])
+    full = layout_tiles(3, 1)
+    block = full[:1]
+
+    captions.build_slice_caption_conds(FakeCaptionClip(), torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                       block, [["a fox"]], a_vision(canvas=1, crop=0),
+                                       budget_tiles=full)
+
+    assert seen == [full]

@@ -355,3 +355,212 @@ def test_paste_rect_unchanged_when_base_exceeds_overlap():
         want_x0 = max(0, tile.core.x0 - (64 if tile.nb.left else 0))
         want_y0 = max(0, tile.core.y0 - (64 if tile.nb.top else 0))
         assert (tile.paste_rect.x0, tile.paste_rect.y0) == (want_x0, want_y0)
+
+
+# --- SubLayout: the layout of a rectangular block of a parent layout's tiles ---
+
+
+def _parent_4x5():
+    # 4 columns of base 1024 by 5 rows of base 824, ctx 32 + overlap 32 = r 64.
+    sx = grid.solve_axis(4096, 1152, 32, 32)
+    sy = grid.solve_axis(4096, 1024, 32, 32)
+    assert (sx.n, sy.n) == (4, 5)
+    return grid.build_layout(4096, 4096, sx, sy, 32, 32)
+
+
+def _rect_of(rect):
+    # A plain Rect out of any rect-shaped value, so an ExpandedRect compares to a block or region.
+    return grid.Rect(rect.x0, rect.y0, rect.x1, rect.y1)
+
+
+def _shifted_crops(sub):
+    return [
+        grid.Rect(t.crop_rect.x0 + sub.block.x0, t.crop_rect.y0 + sub.block.y0,
+                  t.crop_rect.x1 + sub.block.x0, t.crop_rect.y1 + sub.block.y0)
+        for t in sub.layout.tiles
+    ]
+
+
+def test_neighborhood_clamps_to_the_grid():
+    lay = _parent_4x5()
+
+    assert grid.neighborhood(lay, 2 * 4 + 1) == (0, 2, 1, 3)  # interior centre (col 1, row 2)
+    assert grid.neighborhood(lay, 2 * 4 + 3) == (2, 3, 1, 3)  # edge centre (last column)
+    assert grid.neighborhood(lay, 0) == (0, 1, 0, 1)  # corner centre (col 0, row 0)
+    assert grid.neighborhood(lay, 4 * 4 + 3) == (2, 3, 3, 4)  # the opposite corner
+
+
+def test_neighborhood_rejects_an_index_outside_the_grid():
+    lay = _parent_4x5()
+
+    with pytest.raises(ValueError, match="20 tiles"):
+        grid.neighborhood(lay, 20)
+    with pytest.raises(ValueError, match="-1"):
+        grid.neighborhood(lay, -1)
+
+
+def test_sub_layout_of_a_single_tile_parent_is_the_parent():
+    sx = grid.solve_axis(1024, 2048, 32, 32)
+    sy = grid.solve_axis(1024, 2048, 32, 32)
+    lay = grid.build_layout(1024, 1024, sx, sy, 32, 32)
+
+    assert grid.neighborhood(lay, 0) == (0, 0, 0, 0)
+    sub = grid.sub_layout(lay, 0, 0, 0, 0)
+    assert sub.block == grid.Rect(0, 0, 1024, 1024)
+    assert sub.region == grid.Rect(0, 0, 1024, 1024)
+    assert sub.layout == lay
+    assert (sub.first_col, sub.first_row) == (0, 0)
+
+
+def test_sub_layout_of_the_full_range_is_the_parent_layout():
+    lay = _parent_4x5()
+
+    sub = grid.sub_layout(lay, 0, 3, 0, 4)
+    assert sub.block == grid.Rect(0, 0, 4096, 4096)
+    assert sub.region == grid.Rect(0, 0, 4096, 4096)
+    assert (sub.layout.sol_x, sub.layout.sol_y) == (lay.sol_x, lay.sol_y)
+    assert sub.layout == lay
+    assert _shifted_crops(sub) == [_rect_of(t.crop_rect) for t in lay.tiles]
+    assert sub.parent_tiles is lay.tiles
+
+
+def test_sub_layout_of_a_two_column_two_row_range():
+    lay = _parent_4x5()
+
+    # Columns 1..2 and rows 1..2: a tile lies beyond every side, so the block starts at the first
+    # in-range core and ends at the last in-range crop.
+    sub = grid.sub_layout(lay, 1, 2, 1, 2)
+    assert sub.block == grid.Rect(1024, 824, 3136, 2536)
+    assert sub.region == grid.Rect(1024 + 32, 824 + 32, 3136 - 32, 2536 - 32)
+    assert (sub.first_col, sub.first_row) == (1, 1)
+    assert sub.layout.sol_x == grid.AxisSolution(n=2, base=1024, last=1088, overhead=64, r=64)
+    assert sub.layout.sol_y == grid.AxisSolution(n=2, base=824, last=888, overhead=64, r=64)
+
+    # Every block crop is the parent's, except the dropped ring on the two beyond sides.
+    parents = [lay.tiles[row * 4 + col] for row in (1, 2) for col in (1, 2)]
+    want = [
+        grid.Rect(p.crop_rect.x0 + (64 if p.col == 1 else 0), p.crop_rect.y0 + (64 if p.row == 1 else 0),
+                  p.crop_rect.x1, p.crop_rect.y1)
+        for p in parents
+    ]
+    assert _shifted_crops(sub) == want
+
+
+def test_sub_layout_of_one_interior_tile_spans_its_crop():
+    lay = _parent_4x5()
+    tile = lay.tiles[2 * 4 + 1]
+
+    sub = grid.sub_layout(lay, 1, 1, 2, 2)
+    assert sub.block == _rect_of(tile.crop_rect)
+    assert sub.region == _rect_of(tile.overlap_inner_rect)
+    assert len(sub.layout.tiles) == 1
+    lone = sub.layout.tiles[0]
+    span = grid.Rect(0, 0, sub.block.x1 - sub.block.x0, sub.block.y1 - sub.block.y0)
+    assert _rect_of(lone.core) == span
+    assert _rect_of(lone.crop_rect) == span
+
+
+def test_sub_layout_rejects_a_ring_that_reaches_past_the_bordering_tile():
+    # Widget-legal and off-nominal: max_tile 1024, context_anchor 256, context_overlap 128 gives
+    # r 384 over base 256, so a tile's ring ends beyond its bordering tile's core.
+    sx = grid.solve_axis(5000, 1024, 256, 128)
+    sy = grid.solve_axis(5000, 1024, 256, 128)
+    assert (sx.n, sx.base, sx.r) == (20, 256, 384)
+    lay = grid.build_layout(5000, 5000, sx, sy, 256, 128)
+
+    with pytest.raises(ValueError, match="context_anchor 256 plus context_overlap 128"):
+        grid.sub_layout(lay, *grid.neighborhood(lay, 2 * 20 + 2))
+
+    # A single tile range is its own crop extent, so it never depends on the ring's reach.
+    tile = lay.tiles[2 * 20 + 2]
+    sub = grid.sub_layout(lay, 2, 2, 2, 2)
+    assert sub.block == _rect_of(tile.crop_rect)
+    assert sub.region == _rect_of(tile.overlap_inner_rect)
+
+
+def test_sub_layout_with_base_equal_to_r_passes_the_self_check():
+    sx = grid.solve_axis(1024, 192, 32, 32)
+    sy = grid.solve_axis(1024, 192, 32, 32)
+    assert (sx.n, sx.base, sx.r) == (16, 64, 64)
+    lay = grid.build_layout(1024, 1024, sx, sy, 32, 32)
+
+    # sub_layout's self-check raises RuntimeError when a block crop is not the parent's.
+    for index in range(len(lay.tiles)):
+        grid.sub_layout(lay, *grid.neighborhood(lay, index))
+
+    sub = grid.sub_layout(lay, 1, 3, 1, 3)
+    assert sub.block == grid.Rect(64, 64, 320, 320)
+    assert sub.region == grid.Rect(96, 96, 288, 288)
+
+
+def test_sub_layout_rejects_an_invalid_range():
+    lay = _parent_4x5()
+
+    for bounds in [(2, 1, 0, 0), (0, 0, 3, 2), (-1, 1, 0, 0), (0, 4, 0, 0), (0, 0, -1, 0), (0, 0, 0, 5)]:
+        with pytest.raises(ValueError, match="4 by 5 tile grid"):
+            grid.sub_layout(lay, *bounds)
+
+
+# --- Equivalence with the harness rule that produced the judged renders ---
+# block_rect, block_layout and block_mask, inlined from tests-AB/run_ab_tile_phantom.py. That rule
+# produced TESTS.md test 10's judged renders, so it is kept here as the reference after its removal
+# from the harness.
+
+
+def _reference_block_rect(layout, tile):
+    near = [t for t in layout.tiles if abs(t.col - tile.col) <= 1 and abs(t.row - tile.row) <= 1]
+    x0 = min(t.crop_rect.x0 for t in near)
+    y0 = min(t.crop_rect.y0 for t in near)
+    if x0 > 0:
+        x0 = min(t.core.x0 for t in near)
+    if y0 > 0:
+        y0 = min(t.core.y0 for t in near)
+    return grid.Rect(x0, y0, max(t.crop_rect.x1 for t in near), max(t.crop_rect.y1 for t in near))
+
+
+def _reference_block_layout(layout, tile, block):
+    cols = [t.col for t in layout.tiles if abs(t.col - tile.col) <= 1]
+    rows = [t.row for t in layout.tiles if abs(t.row - tile.row) <= 1]
+    n_x, n_y = len(set(cols)), len(set(rows))
+    r = layout.ctx + layout.overlap
+    width, height = block.x1 - block.x0, block.y1 - block.y0
+    sx = grid.AxisSolution(n=n_x, base=layout.sol_x.base, last=width - (n_x - 1) * layout.sol_x.base,
+                           overhead=0 if n_x == 1 else r if n_x == 2 else 2 * r, r=r)
+    sy = grid.AxisSolution(n=n_y, base=layout.sol_y.base, last=height - (n_y - 1) * layout.sol_y.base,
+                           overhead=0 if n_y == 1 else r if n_y == 2 else 2 * r, r=r)
+    return grid.build_layout(width, height, sx, sy, layout.ctx, layout.overlap), sx, sy
+
+
+def _reference_block_region(layout, block):
+    # The ones rect of block_mask, which is what the engine's mask path denoises.
+    a = layout.ctx
+    x0 = block.x0 + (a if block.x0 > 0 else 0)
+    y0 = block.y0 + (a if block.y0 > 0 else 0)
+    x1 = block.x1 - (a if block.x1 < layout.w else 0)
+    y1 = block.y1 - (a if block.y1 < layout.h else 0)
+    return grid.Rect(x0, y0, x1, y1)
+
+
+@pytest.mark.parametrize(
+    "wl,wcap,hl,hcap",
+    [
+        (15360, 1536, 8640, 2048),  # the owner's 8K pass 2
+        (4096, 1536, 2304, 2048),   # the phantom harness canvas
+        (904, 256, 904, 256),       # a last column no wider than r
+    ],
+)
+def test_sub_layout_matches_the_harness_block_rule(wl, wcap, hl, hcap):
+    sx = grid.solve_axis(wl, wcap, 32, 32)
+    sy = grid.solve_axis(hl, hcap, 32, 32)
+    assert sx.base >= sx.r and sy.base >= sy.r
+    lay = grid.build_layout(wl, hl, sx, sy, 32, 32)
+
+    for index, tile in enumerate(lay.tiles):
+        block = _reference_block_rect(lay, tile)
+        reference, ref_sx, ref_sy = _reference_block_layout(lay, tile, block)
+        sub = grid.sub_layout(lay, *grid.neighborhood(lay, index))
+
+        assert sub.block == block
+        assert (sub.layout.sol_x, sub.layout.sol_y) == (ref_sx, ref_sy)
+        assert sub.layout == reference
+        assert sub.region == _reference_block_region(lay, block)

@@ -34,9 +34,9 @@
 #   0.1 megapixels   about 98 tokens
 #   1 megapixel      about 977 tokens
 #   2 megapixels     about 1953 tokens, the cap
-# The defaults below were settled on an 8K image with 24 tiles. crop_tokens 100 samples each
-# crop at 0.1 megapixels, and canvas_tokens 165 samples the image at the 2 megapixel cap. The
-# tiles received 90 to 100 crop tokens and 132 to 195 canvas tokens each.
+# The defaults below were settled on an 8K image with 24 tiles. crop_tokens 110 samples each
+# crop at 0.11 megapixels, and canvas_tokens 165 samples the image at the 2 megapixel cap. The
+# tiles received about 110 crop tokens and 132 to 195 canvas tokens each.
 #
 # PRESETS
 # Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes.

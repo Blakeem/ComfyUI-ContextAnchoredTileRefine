@@ -1,6 +1,7 @@
 # Context-Anchored Tile Refine, project guide
 
-ComfyUI custom node package, three nodes over ONE tile geometry and TWO engines: the base
+ComfyUI custom node package, three production nodes plus a four node testing chain
+(`testing.py`) over ONE tile geometry and TWO engines: the base
 node's raster path (`sampling._refine_tiles`) and the VL nodes' synchronized path (`sync.py`
 over `stepper.py`), which since 1.6.0 is the only VL path. They refine an
 already-upscaled IMAGE by dynamic tiling (or only a masked region, leaving the rest
@@ -66,7 +67,10 @@ without that doc's temporal design.
   and `vlm_method` from `captions.vlm_methods()`, so what the widget offers and what the engine
   branches on cannot diverge. Comfy-free at module scope (the combo lists come from a lazy
   `import comfy.samplers` inside `INPUT_TYPES`, and the option strings from lazy package
-  imports).
+  imports). `check_geometry` (2026-09-03) is the /8 and range rule for the four tile widgets in
+  ONE place, called by the base node's `VALIDATE_INPUTS` and the Layout test node's. Both VL
+  nodes carry `IS_CHANGED(s, **kwargs)` returning `captions.settings_fingerprint()` (see the
+  captions.py bullet).
 - `context_anchored_tile_refine/grid.py`: pure grid math (tile layout: `core`,
   `overlap_inner_rect`, `crop_rect`, `paste_rect`; `solve_axis`, `build_layout`).
   `solve_axis(multiple=)` sets the pixel granularity crops land on: 8 is the default and
@@ -74,6 +78,24 @@ without that doc's temporal design.
   granularity is a property of the model family (32 = VAE 16x x DiT patch 2), so any
   coarser-grid model reuses this solver rather than forking it.
   **Stdlib only**, no torch, no comfy.
+  `SubLayout` / `neighborhood` / `sub_layout` (2026-09-03) are the block math the Render test
+  node and the tile phantom harness run ONE block of a grid with: `sub_layout(layout, col0,
+  col1, row0, row1)` returns `block` (what a run samples), `region` (what it denoises), a
+  block-local `Layout` built from FORCED axis solutions (the parent base, `last` = the span
+  minus the other bases), `first_col` / `first_row` and `parent_tiles`. Per axis: n == 1 keeps
+  the tile's own crop as the block and its overlap_inner span as the region. n >= 2 starts the
+  block at the first in-range CORE when a tile lies beyond that side (`col0 > 0`, read from
+  the RANGE and never from a clamped rect, which is the harness bug this replaced: a crop
+  clamped to 0 at column 1 is not evidence that no tile lies before it) and ends at the last
+  crop, the last tile absorbing that ring as core. The region is the block inset by ctx on a
+  side that does not touch the canvas edge (the RECT predicate, the harness reference's own,
+  which differs from the range when the final column is no wider than r). RING REACH: with
+  n >= 2 and a side beyond, `base < r` raises a named ValueError, because the block's tiles
+  clamp their rings at the block edge while the parent's reach past the bordering tile, so no
+  origin reproduces the crops. `_check_block_crops` then asserts every block crop equals the
+  parent's, or sits exactly r inside it on a dropped-ring side. The harness's retired
+  `block_rect` / `block_layout` / `block_mask` are inlined as the reference in
+  `tests/test_grid.py`, so the judged geometry is pinned without a GPU.
 - `context_anchored_tile_refine/sampling.py`: the pipeline. `refine_image` is the entry point
   and the ONE place all three nodes meet, which is why every cross-cutting behaviour belongs
   here rather than in a node. **A batched IMAGE is refined ONE PICTURE AT A TIME**: `B > 1`
@@ -104,6 +126,12 @@ without that doc's temporal design.
   (core hands nested-latent callbacks a NestedTensor; the guard previews stream 0, a no-op
   for image latents). `anchor_ring_schedule` is the ring's context manager, entered by the SYNC
   engine and disabled on the raster path — see the ANCHOR RING invariant below.
+  `preset` / `tile_captions` / `layout` / `noise_fields` (2026-09-03) are the sync engine's
+  OVERRIDES, forwarded to `refine_sync`: a caller running one block of a larger grid hands the
+  block the settings block, the captions, the tile rects and the SDE field that grid's own run
+  used. Any of them with `vl_clip=None` raises (the raster path reads none of them), and all
+  but `preset` raise on a batch above 1, since they describe one picture and the picture loop
+  forwards `preset` only.
 - **The frozen region is presented on a SCHEDULE, not re-noised** (`anchor_ring_factor` /
   `anchor_ring_schedule` in `sampling.py`). Since 1.6.0 the schedule is the SYNC path's, gated by
   the **`anchor_source` widget** on the two VL nodes: `"source image"` (the default) leaves every
@@ -164,7 +192,9 @@ without that doc's temporal design.
   IS the seam this engine exists to remove. A lane failure, a hook failure or a user cancel sets
   one abort flag and the FIRST exception reaches the caller unchanged; both catch sites take
   BaseException because comfy's `InterruptProcessingException` is one. **torch + stdlib at module
-  scope**, comfy lazy (a subprocess test pins it).
+  scope**, comfy lazy (a subprocess test pins it). `offset_noise_fields(fields, dy, dx)`
+  (2026-09-03) wraps a provider so a window given in BLOCK cells reads the FULL canvas field at
+  the window plus the block's origin, and None passes through.
 - `context_anchored_tile_refine/sync.py`: the VL path's engine — the run's components, the run
   loop (`_refine_canvas`) and the region path (`refine_sync`, which owns the bbox crop and the
   1px anti-aliased composite back). Stages: solve the grid ONCE and run the VL conditioning
@@ -215,6 +245,18 @@ without that doc's temporal design.
   sigma)` algebra is defined). The lead ring is entered ONCE around the whole lane set (see the
   ANCHOR RING invariant). **torch + stdlib at module scope**; comfy is lazy and so is stepper.py
   (a subprocess test pins the comfy half).
+  OVERRIDES (2026-09-03, the Render test node's and the harness's route into the engine):
+  `_prepare_run` takes `preset` (must be a `captions.Preset` whose `surface` equals
+  `method_surface(vlm_method)`, since the ledger is sized from the string and the pre-pass
+  branches on the preset), `tile_captions` (`_check_given_captions`: never on the vision
+  surface, never with a ledger, one entry per tile with one caption per row, and then the VLM
+  pass is skipped) and `layout` (`_override_layout`: a `grid.Layout` or a `grid.SubLayout`,
+  which must equal the padded canvas size AND the run's ctx and overlap, because `refine_sync`
+  still cuts the region crop with `context_anchor` and every ring gate is built from the
+  rects. A SubLayout's `parent_tiles` become `budget_tiles`, handed to the vision builders so a
+  block samples the canvas at the full grid's density). `_refine_canvas` takes `noise_fields`
+  (callable) in place of its own `build_noise_fields(sampler, canvas.shape, ...)`, since a field
+  drawn at a block's shape and origin gives every lane injections the full run never made.
 - `context_anchored_tile_refine/conds.py`: per-tile ControlNet support. `refine_image` validates
   every control hint against the full input size (hard error on mismatch) and bbox-slices it on
   the mask path; `_refine_tiles` pads the hints like the canvas and, per tile, swaps
@@ -264,7 +306,12 @@ without that doc's temporal design.
   source is the FULL image at the bbox origin (`slice_indices` offsets, `crop_picture`
   clamps), so a region's canvas rows are the entire image's and a masked refine sees the
   image around the mask. **torch-only at module scope**, comfy lazy (subprocess test pins
-  it).
+  it). `budget_tiles` (2026-09-03) sizes the canvas sample off ANOTHER layout's tiles through
+  `block_budget_pixels`: the full grid's budget at the full grid's own area (read back off its
+  tiles), rescaled by the two source areas, so the 2 MP cap binds a block as it binds the full
+  run. Asking `canvas_budget_pixels` for the block's own area instead would sit under the cap
+  and give an interior tile 224 canvas rows against the full run's 195 at the 8192x4608,
+  24 tile config.
 - `context_anchored_tile_refine/captions.py`: the `vlm_method` surfaces that are not pure
   vision rows. Per-tile VLM captions generated from the tile's own crop by the SAME CLIP that
   encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
@@ -325,6 +372,22 @@ without that doc's temporal design.
   because attention is causal (`docs/vl-conditioning-encode-cost.md` sections 6-7 and its
   2026-08-16 addendum). **torch-only at module scope**, comfy lazy (subprocess test
   pins it). Search history: `tests-AB/vlm_prompt_lab.py`, 7 rounds.
+  THREE ADDITIONS 2026-09-03. `settings_fingerprint()` (the file name plus the sha256 of the
+  file in force, `missing:<name>` rather than a raise) is what both VL nodes' `IS_CHANGED`
+  return: ComfyUI re-executes a node only when an input, a widget or IS_CHANGED changed, so
+  before it a settings edit under a fixed seed was served from cache and never ran.
+  `preset_labels()` is the `lru_cache` sibling of `vlm_methods` the Captions test node builds
+  its combo from, same once-per-session cadence for the same reason. THE CAPTION CACHE:
+  `generate_caption` stores its final text in a bounded `OrderedDict` (`CAPTION_CACHE_ENTRIES`
+  512) keyed by the sha256 of a float32 view of the resampled picture (bfloat16 has no numpy
+  dtype), its dtype and shape, the instruction, the budget, the reasoning flag and a `scope`
+  tuple naming the request's place in the run (tile crop rect, row and picture index, or
+  "style"), with a weakref to the CLIP that must still be the same object on a hit. Captions
+  are greedy (`do_sample=False`, so core builds no generator), so the stored text is what a
+  second pass writes. The scope keeps it a CROSS-execution cache, which is what a seed re-roll
+  on the production upscale node needs (minutes on a 24 tile grid) and what keeps the pure
+  suite's zero-picture call counts true. `clear_caption_cache()` is the reset, and an autouse
+  conftest fixture calls it before every test.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
@@ -335,6 +398,13 @@ without that doc's temporal design.
   `build_guider` == core CFGGuider — required, its `original_conds` convention is what the VL
   positive swap keys on — and `encode_empty` for the placeholder positive / default
   negative). **torch-only at module scope**, comfy lazy (subprocess test pins it).
+  `SlicedCanvasNoise(vae, seed, canvas_h, canvas_w, rect)` (2026-09-03) is the NOISE a block
+  run needs: the full canvas draw from `sync.build_canvas_noise` sliced to `rect` (a clone per
+  call, since the live-canvas ring zeroes the handed noise in place), plus `noise_fields(sampler,
+  sigmas)`, the full canvas SDE field read at the block's cell origin through
+  `stepper.offset_noise_fields`. A one tile block therefore draws a canvas-sized CPU field per
+  SDE step (about 132 MB at the owner's 8K config), accepted for draws identical to the full
+  run's.
 - `context_anchored_tile_refine/progress.py`: the VL path's progress ledger — ONE ProgressBar
   per node execution, divided into budget segments whose UNIT is one DiT eval of one tile.
   Only the sampling segment is exact (`stepper.plan_evals` x n_tiles, sized at stepper intake
@@ -364,6 +434,39 @@ without that doc's temporal design.
   ATTRIBUTE only; the known escape is sd.py:360's module-level binding under CLIP hook
   scheduling. **Stdlib only at module scope — no torch either**; comfy is lazy (subprocess
   test pins all three).
+- `context_anchored_tile_refine/testing.py`: the TILE TESTING CHAIN (2026-09-03), four nodes
+  that are not production nodes and say so in each docstring, `Tile Test: Layout` /
+  `Upscale` / `Captions` / `Render` in `image/upscaling/tile testing`. Built so the owner can
+  tune tiles, prompts and token counts without upscaling again: ComfyUI re-executes a node only
+  when an input, a widget or IS_CHANGED changed, so the chain puts the seed on the Render node
+  ONLY and the upscale and the captions come from cache across a re-roll. LAYOUT (`TestLayout`,
+  socket `CATR_LAYOUT`) is solved by the Layout node from the image, `upscale_by` and the four
+  geometry widgets, on the target size padded to /8 with `sync._prepare_run`'s own two solves,
+  and carries those widgets so no node below has a copy of its own. Its overlay is a PIL
+  drawing over an area-resampled preview capped at `OVERLAY_MEGAPIXELS` (a preview, never
+  sampled) with the crop, overlap and core rects and a `"{index} r{row}c{col}"` label per tile.
+  The Upscale node is `upscale.prepare_upscaled` at the layout's multiplier and is OPTIONAL (an
+  already upscaled image at `upscale_by` 1.0 skips it). The Captions node runs
+  `captions.generate_tile_captions` over the PADDED canvas with the chosen preset overridden by
+  its widgets (an empty string or 0 keeps the preset's, except `caption_megapixels`, which
+  always applies and reads 0 as the crop's own size), returns `TestCaptions` (socket
+  `CATR_CAPTIONS`: the captions plus the target size, the grid shape and every crop rect, so
+  the Render node rejects captions written for another grid) and a readable listing. Its
+  `IS_CHANGED` is the settings fingerprint and its `VALIDATE_INPUTS` re-checks the entire
+  caption_megapixels rule, since naming a widget there disables core's own range check. The
+  Render node builds its sampling objects as the all-in-one node does, passes `progress=None`,
+  and either runs the full canvas (empty `tiles`, with `layout=` handed in so the solve cannot
+  drift) or, per csv tile number, ONE REGION RUN over `grid.sub_layout`'s block: the mask is
+  ones on `sub.region` through `node._normalize_mask` (image device), `_check_region_crop`
+  asserts the engine's bbox plus anchor crop IS the block, the captions are the parent's at
+  the block's parent indices, the noise is `upscale.SlicedCanvasNoise` at the padded canvas
+  plus its `noise_fields`, and the outputs are the tile's parent crop and the block cut from
+  the result, as IMAGE lists. Every sub layout is solved BEFORE the first model call so the
+  ring reach error is cheap. `with_neighbors` off renders the tile alone (block = its crop,
+  region = its overlap_inner) and the anchor ring stays unrefined source. Every node takes ONE
+  picture. torch + stdlib at module scope, PIL inside the drawing function, comfy inside
+  methods (subprocess pin). The tile phantom harness runs the same `sub_layout` and
+  `SlicedCanvasNoise` but NOT `noise_fields`, so its judged arms stay reproducible.
 - The denoise mask handed to the sampler is always **binary**. ComfyUI re-applies it every step,
   so a fractional cell is only ever partially denoised and leaves an under-refined halo at low
   step counts. Both paths hand it over pre-normalized through the ONE shared helper

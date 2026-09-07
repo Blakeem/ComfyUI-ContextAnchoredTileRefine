@@ -84,6 +84,22 @@ def canvas_budget_pixels(tiles, source_h, source_w, canvas_tokens):
     return min(round(budget), PICTURE_CAP_PIXELS)
 
 
+def block_budget_pixels(budget_tiles, source_h, source_w, canvas_tokens):
+    # The canvas sample size for a run over ONE BLOCK of the grid `budget_tiles` holds: that
+    # grid's own budget, rescaled to this run's source area, so both sample the picture at the
+    # same pixels-per-source-pixel density and a tile gets the rows the full grid gives it.
+    # The rescale is what carries PICTURE_CAP_PIXELS down: past the cap a budget stops growing
+    # with the source area, so a block asking canvas_budget_pixels for its own smaller area
+    # would sit under the cap and out-sample the run it reproduces. The grid's canvas size is
+    # read back off its tiles, which build_layout clamps to that canvas on every side.
+    if not budget_tiles:
+        raise ValueError("block_budget_pixels needs at least one tile of the full grid")
+    parent_h = max(tile.crop_rect.y1 for tile in budget_tiles)
+    parent_w = max(tile.crop_rect.x1 for tile in budget_tiles)
+    parent_budget = canvas_budget_pixels(budget_tiles, parent_h, parent_w, canvas_tokens)
+    return round(parent_budget * (source_h * source_w) / (parent_h * parent_w))
+
+
 def resample_picture(source, budget):
     # Aspect-preserved area resample of one picture to `budget` pixels, snapped to
     # /MERGED_CELL so process_qwen2vl_images' own rounding (factor = patch 16 x merge 2) is
@@ -248,7 +264,8 @@ def cat_rows(first, second, second_name):
     return merged
 
 
-def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_tail=True):
+def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_tail=True,
+                      budget_tiles=None):
     """The vision pre-pass: every tile's rows as unconverted cond entries, plus one resampled
     copy for the caption surface's tokenizer probe.
 
@@ -262,6 +279,9 @@ def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_
     crop and the offsets are the bbox origin, so a region's canvas rows are the entire image's.
     The probe is the smallest copy the run made: any resampled copy gives the same tail
     length, and the caption surface tokenizes it once per tile.
+    `budget_tiles` sizes the canvas sample off ANOTHER layout's tiles instead of `tiles`
+    (block_budget_pixels), so a run over one block of a larger grid hands its tiles the rows
+    the full grid would have.
     """
     if vision.canvas_tokens <= 0 and vision.crop_tokens <= 0:
         raise ValueError("VL refine: canvas_tokens and crop_tokens are both 0, so a tile would have no vision rows")
@@ -272,7 +292,10 @@ def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_
     tile_rows = []
 
     if vision.canvas_tokens > 0:
-        budget = canvas_budget_pixels(tiles, source_h, source_w, vision.canvas_tokens)
+        if budget_tiles is None:
+            budget = canvas_budget_pixels(tiles, source_h, source_w, vision.canvas_tokens)
+        else:
+            budget = block_budget_pixels(budget_tiles, source_h, source_w, vision.canvas_tokens)
         canvas = encode_picture(clip, source, budget)
 
     for tile in tiles:
@@ -299,9 +322,10 @@ def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_
     return tile_rows, probe
 
 
-def build_global_slices(clip, source, tiles, vision, offset_x=0, offset_y=0):
+def build_global_slices(clip, source, tiles, vision, offset_x=0, offset_y=0, budget_tiles=None):
     # The "vision tokens" surface: build_vision_rows converted per tile, nothing else.
-    tile_rows, _probe = build_vision_rows(clip, source, tiles, vision, offset_x, offset_y)
+    tile_rows, _probe = build_vision_rows(clip, source, tiles, vision, offset_x, offset_y,
+                                          budget_tiles=budget_tiles)
     return [_convert(rows) for rows in tile_rows]
 
 

@@ -97,6 +97,20 @@ class Layout:
     clamped_tiles: int
 
 
+@dataclass(frozen=True)
+class SubLayout:
+    # One rectangular block of a parent layout's tiles, re-solved as a layout of its own, so an
+    # engine run over `block` samples those tiles at the parent run's rects.
+    # `block` is the region such a run samples, `region` the region it denoises. Both are in
+    # parent canvas px. `layout` is block-local, its origin at (block.x0, block.y0).
+    block: Rect
+    region: Rect
+    layout: Layout
+    first_col: int
+    first_row: int
+    parent_tiles: tuple
+
+
 def round_up_multiple(x, multiple):
     # Smallest multiple of `multiple` that is >= x.
     return math.ceil(x / multiple) * multiple
@@ -231,3 +245,114 @@ def build_layout(W, H, sx, sy, ctx, overlap=0):
         w=W, h=H, sol_x=sx, sol_y=sy, ctx=ctx, overlap=overlap, r=r,
         tiles=tuple(tiles), total_sampled_px=total_sampled_px, clamped_tiles=clamped_tiles,
     )
+
+
+def neighborhood(layout, index):
+    # The 3x3 range of columns and rows around one tile, clamped to the grid, as the inclusive
+    # bounds sub_layout takes.
+    if index < 0 or index >= len(layout.tiles):
+        raise ValueError(f"tile index {index} is outside the layout's {len(layout.tiles)} tiles")
+
+    tile = layout.tiles[index]
+    col0 = max(0, tile.col - 1)
+    col1 = min(layout.sol_x.n - 1, tile.col + 1)
+    row0 = max(0, tile.row - 1)
+    row1 = min(layout.sol_y.n - 1, tile.row + 1)
+    return col0, col1, row0, row1
+
+
+def _axis_spans(first, last, axis):
+    # The parent rects the block rule reads, reduced to one axis: the first in-range tile's core
+    # start, crop start and diffused span, then the last in-range tile's crop end.
+    if axis == "width":
+        return (first.core.x0, first.crop_rect.x0,
+                first.overlap_inner_rect.x0, first.overlap_inner_rect.x1, last.crop_rect.x1)
+    return (first.core.y0, first.crop_rect.y0,
+            first.overlap_inner_rect.y0, first.overlap_inner_rect.y1, last.crop_rect.y1)
+
+
+def _sub_axis(sol, i0, i1, spans, length, ctx, overlap, axis):
+    # One axis of a sub layout: the block span, the region span and the forced solution.
+    # Which sides have tiles beyond them is read from the RANGE and never from a clamped rect,
+    # because a crop that clamps to 0 is not evidence that no tile lies before it.
+    core_start, crop_start, inner_start, inner_end, crop_end = spans
+    r = ctx + overlap
+    n = i1 - i0 + 1
+    beyond_start = i0 > 0
+    beyond_end = i1 < sol.n - 1
+
+    # Under this the block's own tiles clamp their rings at the block edge while the parent's
+    # reach past the bordering tile, so no block origin reproduces the parent crops.
+    if n >= 2 and (beyond_start or beyond_end) and sol.base < r:
+        raise ValueError(
+            f"{axis} tile base {sol.base} is under context_anchor {ctx} plus context_overlap {overlap} "
+            f"({r}), so a tile's frozen ring reaches past its bordering tile. context_anchor plus "
+            f"context_overlap must not exceed the tile base for a block render."
+        )
+
+    if n == 1:
+        # The lone tile samples the parent's crop extent as one tile whose core is the entire
+        # block, and it denoises the parent's own diffused span whatever clamping that did.
+        block = (crop_start, crop_end)
+        region = (inner_start, inner_end)
+    else:
+        # build_layout places the first core at the block origin, so a block that started at the
+        # crop would shift every base. The end ring stays and the last tile absorbs it as core.
+        start = core_start if beyond_start else crop_start
+        block = (start, crop_end)
+        # The region predicates read the RECT, not the range: a block whose end reaches the canvas
+        # edge must refine that edge strip even when a tile lies beyond it in the grid.
+        region = (start + ctx if start > 0 else start,
+                  crop_end - ctx if crop_end < length else crop_end)
+
+    span = block[1] - block[0]
+    overhead = 0 if n == 1 else r if n == 2 else 2 * r
+    forced = AxisSolution(n=n, base=sol.base, last=span - (n - 1) * sol.base, overhead=overhead, r=r)
+    return block, region, forced
+
+
+def _check_block_crops(tiles, block, layout, first_col, first_row, drop_left, drop_top):
+    # A caller must never sample the wrong pixels silently, so every block crop is checked against
+    # the parent's before the sub layout is handed back. On a dropped-ring side the block crop sits
+    # exactly r px inside the parent's.
+    for tile in tiles:
+        parent = layout.tiles[(first_row + tile.row) * layout.sol_x.n + first_col + tile.col]
+        shifted = (tile.crop_rect.x0 + block.x0, tile.crop_rect.y0 + block.y0,
+                   tile.crop_rect.x1 + block.x0, tile.crop_rect.y1 + block.y0)
+        parent_crop = (parent.crop_rect.x0, parent.crop_rect.y0, parent.crop_rect.x1, parent.crop_rect.y1)
+        want = (parent_crop[0] + (layout.r if drop_left and tile.col == 0 else 0),
+                parent_crop[1] + (layout.r if drop_top and tile.row == 0 else 0),
+                parent_crop[2], parent_crop[3])
+        if shifted != want:
+            raise RuntimeError(
+                f"block tile col {tile.col} row {tile.row} samples {shifted} instead of {want}, "
+                f"against parent tile col {parent.col} row {parent.row} crop {parent_crop}"
+            )
+
+
+def sub_layout(layout, col0, col1, row0, row1):
+    # The layout of one rectangular block of a parent layout's tiles, given the inclusive column
+    # and row bounds neighborhood returns.
+    sol_x, sol_y = layout.sol_x, layout.sol_y
+    if not (0 <= col0 <= col1 < sol_x.n) or not (0 <= row0 <= row1 < sol_y.n):
+        raise ValueError(
+            f"block range cols {col0}..{col1} rows {row0}..{row1} is not inside the "
+            f"{sol_x.n} by {sol_y.n} tile grid"
+        )
+
+    first = layout.tiles[row0 * sol_x.n + col0]
+    last_col = layout.tiles[row0 * sol_x.n + col1]
+    last_row = layout.tiles[row1 * sol_x.n + col0]
+    (bx0, bx1), (rx0, rx1), sx = _sub_axis(
+        sol_x, col0, col1, _axis_spans(first, last_col, "width"), layout.w, layout.ctx, layout.overlap, "width")
+    (by0, by1), (ry0, ry1), sy = _sub_axis(
+        sol_y, row0, row1, _axis_spans(first, last_row, "height"), layout.h, layout.ctx, layout.overlap, "height")
+
+    block = Rect(x0=bx0, y0=by0, x1=bx1, y1=by1)
+    region = Rect(x0=rx0, y0=ry0, x1=rx1, y1=ry1)
+    block_layout = build_layout(bx1 - bx0, by1 - by0, sx, sy, layout.ctx, layout.overlap)
+
+    _check_block_crops(block_layout.tiles, block, layout, col0, row0,
+                       drop_left=col0 > 0 and sx.n >= 2, drop_top=row0 > 0 and sy.n >= 2)
+    return SubLayout(block=block, region=region, layout=block_layout,
+                     first_col=col0, first_row=row0, parent_tiles=layout.tiles)

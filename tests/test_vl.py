@@ -626,3 +626,55 @@ def test_the_vl_dispatch_rejects_a_schedule_the_lanes_cannot_share(comfy_stubs, 
             max_tile_height=56, context_anchor=0, context_overlap=16, vl_clip=pipeline_clip)
 
     assert vae.encode_calls == [] and noise.calls == []
+
+
+def test_budget_tiles_size_the_canvas_sample_off_another_layouts_tiles(comfy_stubs, monkeypatch):
+    # A run over one BLOCK of a larger grid must sample the canvas as the full grid would:
+    # the budget is sized off the MEAN crop area, so the block's own two tiles would ask for a
+    # smaller picture than the four the grid holds. With budget_tiles None nothing moves.
+    budgets = []
+    monkeypatch.setattr(vl, "resample_picture",
+                        lambda source, budget: (budgets.append(budget), (source, ENC_H, ENC_W))[1])
+    monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    full = layout_tiles(3, 1)
+    block = full[:1]
+
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=165, crop=0),
+                           budget_tiles=full)
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=165, crop=0))
+
+    assert budgets == [vl.canvas_budget_pixels(full, CANVAS_H, CANVAS_W, 165),
+                       vl.canvas_budget_pixels(block, CANVAS_H, CANVAS_W, 165)]
+    assert budgets[0] != budgets[1]
+
+
+def test_budget_tiles_hold_the_full_grids_density_once_the_picture_cap_binds(comfy_stubs, monkeypatch):
+    # Past PICTURE_CAP_PIXELS the full grid's budget stops growing with its source area, so a
+    # block sized off its own smaller area alone stays under the cap and out-samples the run
+    # it reproduces. The block run therefore rescales the full grid's budget by the source
+    # areas, which holds the density in both regimes.
+    tokens = 600
+    budgets = []
+    monkeypatch.setattr(vl, "resample_picture",
+                        lambda source, budget: (budgets.append(budget), (source, ENC_H, ENC_W))[1])
+    monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
+    full = layout_tiles(4, 2)
+    block_h, block_w = CANVAS_H, CANVAS_W // 2
+    block = layout_tiles(2, 2, w=block_w, h=block_h)
+    source = torch.zeros(1, 1, 1, 3).expand(1, block_h, block_w, 3)
+
+    full_budget = vl.canvas_budget_pixels(full, CANVAS_H, CANVAS_W, tokens)
+    naive = vl.canvas_budget_pixels(full, block_h, block_w, tokens)
+    assert full_budget == vl.PICTURE_CAP_PIXELS and naive > round(full_budget / 2)
+
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=tokens, crop=0),
+                           budget_tiles=full)
+
+    assert budgets == [round(full_budget / 2)]
+    assert budgets[0] / (block_h * block_w) == full_budget / (CANVAS_H * CANVAS_W)
+
+
+def test_block_budget_pixels_needs_the_full_grids_tiles():
+    with pytest.raises(ValueError, match="at least one tile"):
+        vl.block_budget_pixels([], 128, 192, 165)

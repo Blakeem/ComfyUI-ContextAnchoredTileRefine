@@ -352,6 +352,26 @@ class _GeneratorNoiseFields(_NoiseFields):
         return noise_sampler
 
 
+class _OffsetNoiseFields(_NoiseFields):
+    """Another provider read at a canvas OFFSET: a window given in BLOCK cells is served the
+    cells the full canvas field holds at that window plus the block's origin.
+
+    A run over one block of a larger grid draws its field at the FULL canvas shape, so its
+    lanes get the injections the entire canvas run would have made at their position. Without
+    the shift every block would read that field from cell 0.
+    """
+
+    def __init__(self, fields, dy, dx):
+        self._fields = fields
+        self._dy = dy
+        self._dx = dx
+
+    def for_window(self, window):
+        y0, y1, x0, x1 = window
+        return self._fields.for_window(
+            (y0 + self._dy, y1 + self._dy, x0 + self._dx, x1 + self._dx))
+
+
 def build_noise_fields(sampler, shape, seed, sigmas):
     """The shared canvas-wide SDE noise for `sampler`, or None when it is deterministic.
 
@@ -366,6 +386,18 @@ def build_noise_fields(sampler, shape, seed, sigmas):
     if kind == "generator":
         return _GeneratorNoiseFields(shape, seed, sigmas, SEEDS_2_DRAWS_PER_STEP)
     return _BrownianNoiseFields(shape, seed, sigmas)
+
+
+def offset_noise_fields(fields, dy, dx):
+    """`fields` read at the offset (`dy`, `dx`) in LATENT CELLS, or None for no field.
+
+    Hand this the FULL canvas's provider and the block's origin, and every block lane draws
+    the canvas cells it occupies. None passes through, which is a deterministic sampler's
+    own answer from `build_noise_fields`.
+    """
+    if fields is None:
+        return None
+    return _OffsetNoiseFields(fields, dy, dx)
 
 
 def _validate_noise_fields(sampler_name, noise_fields):

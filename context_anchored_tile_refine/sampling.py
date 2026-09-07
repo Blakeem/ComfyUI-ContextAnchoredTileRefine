@@ -969,7 +969,7 @@ def _check_sync_intake(sampler, sigmas, sampler_name=None):
             f"{float(sigmas.reshape(-1)[-1])}.")
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None):
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None, preset=None, tile_captions=None, layout=None, noise_fields=None):
     # Entry point, and the ONE place all three nodes meet. With a vl_clip the whole refine is
     # handed to the sync engine (sync.py) — mask or no mask — and everything below it is the
     # BASE node's raster path.
@@ -992,6 +992,26 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # progress is the VL run's progress ledger (progress.py), created by node.py and only ever
     # PASSED THROUGH here — including across the picture loop, so a batch shares ONE bar. It is
     # inert without vl_clip: the base raster path keeps its own per-tile bar untouched.
+    # preset/tile_captions/layout/noise_fields are the sync engine's overrides, for a caller
+    # that runs one block of a larger grid and must hand the block the settings block, the
+    # captions, the tile rects and the SDE field that grid's own run would have used. They are
+    # rejected here rather than ignored, because a dropped override samples the wrong thing
+    # silently.
+    overrides = {"preset": preset, "tile_captions": tile_captions, "layout": layout,
+                 "noise_fields": noise_fields}
+    given = sorted(name for name, value in overrides.items() if value is not None)
+    if given and vl_clip is None:
+        raise ValueError(
+            f"Context-Anchored Tile Refine: {given} reach the sync engine only, which needs a "
+            "vl_clip. The base node's raster path reads none of them.")
+    # Only the preset survives the picture loop below: the other three describe ONE picture's
+    # captions, grid and noise field, so a batch cannot carry them.
+    per_picture = [name for name in given if name != "preset"]
+    if per_picture and image.shape[0] > 1:
+        raise ValueError(
+            f"Context-Anchored Tile Refine: {per_picture} describe ONE picture, and this call "
+            f"carries a batch of {int(image.shape[0])}. Refine one picture per call to use them.")
+
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         # Narrowed to RGB like every sampled path, so the output channel count never depends
@@ -1009,7 +1029,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # single-picture IMAGE never enters the loop, so its path is untouched.
     if image.shape[0] > 1:
         pictures = [
-            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b, progress=progress)
+            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b, progress=progress, preset=preset)
             for b in range(image.shape[0])
         ]
         return torch.cat(pictures, dim=0)
@@ -1054,7 +1074,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
             image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
             context_anchor, context_overlap, vl_clip, mask=mask, vlm_method=vlm_method,
             anchor_source=sync.ANCHOR_SOURCE_IMAGE if anchor_source is None else anchor_source,
-            batch_size=batch_size, batch_index=batch_index, progress=progress)
+            batch_size=batch_size, batch_index=batch_index, progress=progress,
+            preset=preset, tile_captions=tile_captions, layout=layout, noise_fields=noise_fields)
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped

@@ -57,6 +57,18 @@ def _resolve_comfyui_root():
 
 
 @pytest.fixture(autouse=True)
+def empty_caption_cache():
+    """Every test starts with an empty caption cache, so no test can serve another's text.
+
+    The pure suite's stubbed resample hands every tile the same zero picture, so a cached
+    entry would otherwise reach a later test that expects its own clip.generate to run.
+    """
+    from context_anchored_tile_refine import captions
+
+    captions.clear_caption_cache()
+
+
+@pytest.fixture(autouse=True)
 def shipped_settings_file(monkeypatch):
     """Every test reads the SHIPPED settings.toml, never a developer's own copy.
 
@@ -65,14 +77,17 @@ def shipped_settings_file(monkeypatch):
     turn the whole gate red on prompts they changed deliberately. Renaming the constant is
     what neutralizes it: `captions.settings_path` still runs, and a test that needs the
     override mechanism itself restores the real name at its own tmp_path.
-    The method list is cached for a session by design, so it is cleared around every test.
+    The method list and the preset list are cached for a session by design, so both are
+    cleared around every test.
     """
     from context_anchored_tile_refine import captions
 
     monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml.absent-in-tests")
     captions.vlm_methods.cache_clear()
+    captions.preset_labels.cache_clear()
     yield
     captions.vlm_methods.cache_clear()
+    captions.preset_labels.cache_clear()
 
 
 @pytest.fixture(scope="session")

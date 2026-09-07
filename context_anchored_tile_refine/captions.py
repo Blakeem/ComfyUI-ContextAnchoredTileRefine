@@ -34,9 +34,12 @@ is imported lazily inside functions (the same contract as vl.py / sampling.py, p
 a subprocess test).
 """
 import functools
+import hashlib
 import math
 import re
 import tomllib
+import weakref
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -208,6 +211,20 @@ def settings_path():
     surface that survives a node update."""
     user_path = SETTINGS_DIR / USER_SETTINGS_NAME
     return user_path if user_path.is_file() else SETTINGS_DIR / SETTINGS_NAME
+
+
+def settings_fingerprint():
+    """The file in force, as a value that changes whenever an edit to it would change a run.
+    The name is carried beside the digest so that a user copy appearing or disappearing
+    changes the fingerprint even when its bytes match the shipped file. A missing file is
+    reported rather than raised, so the queue proceeds to the run-time read whose error
+    message names the problem."""
+    path = settings_path()
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return f"missing:{path.name}"
+    return f"{path.name}:{digest}"
 
 
 def _read_toml(path):
@@ -384,6 +401,17 @@ def vlm_methods():
     A new or renamed preset therefore needs a restart, while a preset's own wording does not.
     """
     return tuple(build_vlm_methods(load_settings().presets))
+
+
+@functools.lru_cache(maxsize=1)
+def preset_labels():
+    """The preset labels in file order, read ONCE per ComfyUI session.
+
+    Same cadence and same reason as `vlm_methods`: this becomes a combo the frontend caches
+    at startup. An uncached re-read would let the preset a selector offers differ from the
+    preset the vlm_method list was built from.
+    """
+    return tuple(load_settings().presets)
 
 
 def default_vlm_method():
@@ -563,16 +591,67 @@ def _tokenize_images(clip, text, image, **kwargs):
     return tokens, len(ids) - (pad_pos + 2)
 
 
-def generate_caption(clip, vl_input, instruction, max_length, thinking=True):
+# A seed re-roll on the production upscale node re-executes the entire node, captions
+# included, which costs minutes on a 24 tile grid. Every caption here is greedy
+# (do_sample=False, so every token is the argmax) and depends on nothing but the picture, the
+# question, the budget and the CLIP, so the stored text is what a second pass would write.
+# Hashing a 0.79 megapixel float32 picture takes a few milliseconds, far below one VLM token.
+CAPTION_CACHE_ENTRIES = 512
+_CAPTION_CACHE = OrderedDict()
+
+
+def clear_caption_cache():
+    """Empty the caption cache. This is the one public way to reset it."""
+    _CAPTION_CACHE.clear()
+
+
+def _caption_cache_key(vl_input, instruction, max_length, thinking, scope):
+    # float32 because bfloat16 has no numpy dtype and .numpy() raises on it, while
+    # resample_for_vl keeps whatever dtype the IMAGE arrived with. The dtype and shape ride
+    # alongside so two pictures that share a byte pattern in different layouts stay apart.
+    pixels = vl_input.contiguous().cpu().float().numpy().tobytes()
+    return (hashlib.sha256(pixels).hexdigest(), str(vl_input.dtype), tuple(vl_input.shape),
+            instruction, max_length, thinking, scope)
+
+
+def _caption_cache_read(key, clip):
+    # The entry holds a weak reference, so a CLIP the user has unloaded is never kept alive
+    # by the cache and its stale text is never served to a different model.
+    entry = _CAPTION_CACHE.get(key)
+    if entry is None or entry[0]() is not clip:
+        return None
+    _CAPTION_CACHE.move_to_end(key)
+    return entry[1]
+
+
+def _caption_cache_write(key, clip, text):
+    _CAPTION_CACHE[key] = (weakref.ref(clip), text)
+    _CAPTION_CACHE.move_to_end(key)
+    while len(_CAPTION_CACHE) > CAPTION_CACHE_ENTRIES:
+        _CAPTION_CACHE.popitem(last=False)
+
+
+def generate_caption(clip, vl_input, instruction, max_length, thinking=True, scope=()):
     """One greedy caption of `vl_input`, then the settled fallback chain for a crop whose
     stop token fires immediately. `max_length` is per-instruction (the preset's max_tokens on
     the live surfaces) and has to cover the reasoning turn as well as the answer, which is
-    why the budgets sit far above the visible answer length."""
+    why the budgets sit far above the visible answer length.
+
+    The answer is cached in process against the picture, the question, the budget, the
+    reasoning flag, `scope` and the CLIP, so a re-run of the node writes it once.
+    `scope` is a hashable tuple naming this request's place in a run. Two byte-equal crops
+    within one run are captioned separately because their scopes differ. A direct caller with
+    nothing to name may leave it empty."""
     if not hasattr(clip, "generate") or not hasattr(clip, "decode"):
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): this CLIP cannot generate text. The caption "
             "vlm_methods need a vision-language text encoder with a text-generation head "
             "(Krea 2 family). Use vlm_method 'vision tokens' with any other CLIP.")
+
+    key = _caption_cache_key(vl_input, instruction, max_length, thinking, scope)
+    stored = _caption_cache_read(key, clip)
+    if stored is not None:
+        return stored
 
     tokens, _tail = _tokenize_images(clip, instruction, vl_input, thinking=thinking)
     ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
@@ -590,6 +669,7 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True):
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): caption generation returned an empty answer "
             "after every fallback.")
+    _caption_cache_write(key, clip, text)
     return text
 
 
@@ -649,7 +729,8 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
             row = style_canvas[b:b + 1]
             vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
             text = generate_caption(clip, vl_input, preset.style_instruction,
-                                    preset.style_max_tokens, thinking=True)
+                                    preset.style_max_tokens, thinking=True,
+                                    scope=("style", b, batch_index))
             style_texts.append(clean_caption(text))
             done += 1
             if pbar is None:
@@ -665,7 +746,9 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
             row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
             vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
             text = generate_caption(clip, vl_input, preset.tile_instruction,
-                                    preset.tile_max_tokens, thinking=True)
+                                    preset.tile_max_tokens, thinking=True,
+                                    scope=("tile", crop.x0, crop.y0, crop.x1, crop.y1, b,
+                                           batch_index))
             caption = clean_caption(text)
             if style_on:
                 caption = f"{style_texts[b]}\n{caption}"
@@ -717,7 +800,8 @@ def _encode_caption_text_only(clip, caption, expected_rows):
     return encoded
 
 
-def build_slice_caption_conds(clip, encode_source, tiles, captions, vision, offset_x=0, offset_y=0):
+def build_slice_caption_conds(clip, encode_source, tiles, captions, vision, offset_x=0, offset_y=0,
+                              budget_tiles=None):
     """VL rows AND captions: each tile's positive is its vision rows exactly as the `vision
     tokens` surface builds them (vl.build_vision_rows: its own crop's cells, then its slice
     of the entire image), followed by that tile's own caption encoded TEXT-ONLY, concatenated
@@ -736,7 +820,10 @@ def build_slice_caption_conds(clip, encode_source, tiles, captions, vision, offs
     the captions describe — mirroring vl.build_vision_rows: on the whole-image path both are
     the padded canvas at offset 0, while on the mask path the captions describe each region
     tile's own crop and the canvas rows come from the FULL image with the bbox origin as the
-    offset, so a masked refine stays globally informed."""
+    offset, so a masked refine stays globally informed.
+
+    `budget_tiles` is vl.build_vision_rows' own override, passed straight through, so this
+    surface and `vision tokens` can never sample the canvas at different sizes."""
     batch = int(encode_source.shape[0])
     tile_positives = []
 
@@ -752,7 +839,8 @@ def build_slice_caption_conds(clip, encode_source, tiles, captions, vision, offs
     # batch. The tail is left off: the one template tail the stream may carry arrives with
     # the caption rows concatenated after the vision rows.
     tile_rows, probe_image = vl.build_vision_rows(clip, encode_source[:1], tiles, vision,
-                                                  offset_x, offset_y, with_tail=False)
+                                                  offset_x, offset_y, with_tail=False,
+                                                  budget_tiles=budget_tiles)
 
     for tile_captions, rows in zip(captions, tile_rows, strict=True):
         # Exactly ONE row, so nothing is concatenated across rows: the count guard above ties

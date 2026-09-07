@@ -581,3 +581,76 @@ def test_unsupported_latent_layout_fails_fast(comfy_stubs):
 
     with pytest.raises(RuntimeError, match="latent layout is not supported"):
         sampling.refine_image(image, guider, sampler, SIGMAS, vae, noise, max_tile_width=1024, max_tile_height=1024, context_anchor=0, context_overlap=0)
+
+
+# --- the sync engine's overrides, at the dispatch --------------------------------------
+# refine_image carries four keywords straight to the engine (preset, tile_captions, layout,
+# noise_fields). It reads none of them itself, so all it owns is the two ways handing them
+# over is a wiring mistake: without a vl_clip there is no engine to receive them, and three
+# of the four describe ONE picture, which the picture loop below would silently drop.
+
+
+def _overrides():
+    from context_anchored_tile_refine import captions as captions_module
+
+    preset = captions_module.Preset(
+        surface=captions_module.VLM_METHOD_VISION, label="unit test",
+        vision=captions_module.VisionSettings(canvas_tokens=1, crop_tokens=0,
+                                              caption_megapixels=0.1))
+    return {"preset": preset, "tile_captions": [["a fox"]], "layout": object(),
+            "noise_fields": lambda spec: None}
+
+
+def test_the_engine_overrides_reach_the_sync_engine_untouched(comfy_stubs, monkeypatch):
+    sync_calls = _record_sync(monkeypatch)
+    overrides = _overrides()
+
+    sampling.refine_image(torch.rand(1, 96, 104, 3), _vl_guider(), _sync_sampler(), SIGMAS,
+                          FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                          context_anchor=0, context_overlap=0, vl_clip=object(), **overrides)
+
+    for name, value in overrides.items():
+        assert sync_calls[0][name] is value
+
+
+@pytest.mark.parametrize("name", ["preset", "tile_captions", "layout", "noise_fields"])
+def test_an_engine_override_without_a_vl_clip_is_rejected(comfy_stubs, monkeypatch, name):
+    # The raster path reads none of them, so accepting one there would sample the base node's
+    # own way while the caller believes it configured the run.
+    sync_calls = _record_sync(monkeypatch)
+    raster_calls = _record_refine_tiles(monkeypatch)
+
+    with pytest.raises(ValueError, match="needs a vl_clip"):
+        sampling.refine_image(torch.rand(1, 96, 104, 3), FakeGuider(), _sync_sampler(), SIGMAS,
+                              FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                              context_anchor=0, context_overlap=0,
+                              **{name: _overrides()[name]})
+
+    assert sync_calls == [] and raster_calls == []
+
+
+@pytest.mark.parametrize("name", ["tile_captions", "layout", "noise_fields"])
+def test_a_per_picture_override_is_rejected_on_a_batch(comfy_stubs, monkeypatch, name):
+    # The picture loop forwards the preset alone, so the other three would be dropped for
+    # every picture rather than applied to one.
+    sync_calls = _record_sync(monkeypatch)
+
+    with pytest.raises(ValueError, match="describe ONE picture"):
+        sampling.refine_image(torch.rand(3, 96, 104, 3), _vl_guider(), _sync_sampler(), SIGMAS,
+                              FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                              context_anchor=0, context_overlap=0, vl_clip=object(),
+                              **{name: _overrides()[name]})
+
+    assert sync_calls == []
+
+
+def test_the_preset_override_rides_the_picture_loop(comfy_stubs, monkeypatch):
+    # One settings read for the whole batch: every picture is conditioned on the same block.
+    sync_calls = _record_sync(monkeypatch)
+    preset = _overrides()["preset"]
+
+    sampling.refine_image(torch.rand(3, 96, 104, 3), _vl_guider(), _sync_sampler(), SIGMAS,
+                          FakeVAE(), FakeNoise(), max_tile_width=1024, max_tile_height=1024,
+                          context_anchor=0, context_overlap=0, vl_clip=object(), preset=preset)
+
+    assert [call["preset"] for call in sync_calls] == [preset] * 3
