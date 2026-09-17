@@ -1,0 +1,336 @@
+{
+  "283": {
+    "inputs": {
+      "unet_name": "krea2SATDirtyrealism_krea2SAT.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "291": {
+    "inputs": {
+      "value": 52
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Steps"
+    }
+  },
+  "294": {
+    "inputs": {
+      "clip_name": "qwen3-vl-4b-heretic_int8.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "295": {
+    "inputs": {
+      "vae_name": "krea2RealVae_v10.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "306": {
+    "inputs": {
+      "value": 4
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Upscale Multiplier"
+    }
+  },
+  "309": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Width"
+    }
+  },
+  "310": {
+    "inputs": {
+      "value": 576
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Height"
+    }
+  },
+  "315": {
+    "inputs": {
+      "value": 3.5
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "CFG"
+    }
+  },
+  "318": {
+    "inputs": {
+      "text": [
+        "346",
+        0
+      ],
+      "clip": [
+        "294",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "325": {
+    "inputs": {
+      "model_name": "4xFaceUpDAT.safetensors"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load Upscale Model"
+    }
+  },
+  "345": {
+    "inputs": {
+      "value": 4
+    },
+    "class_type": "int",
+    "_meta": {
+      "title": "Batch Size"
+    }
+  },
+  "346": {
+    "inputs": {
+      "value": "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "373": {
+    "inputs": {
+      "images": [
+        "385",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "375": {
+    "inputs": {
+      "filename_prefix": "ComfyUI-2x",
+      "images": [
+        "373",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "376": {
+    "inputs": {
+      "mode": "on empty queue",
+      "volume": 0.5,
+      "file": "notify.mp3",
+      "any": [
+        "373",
+        0
+      ]
+    },
+    "class_type": "PlaySound|pysssss",
+    "_meta": {
+      "title": "PlaySound 🐍"
+    }
+  },
+  "381": {
+    "inputs": {
+      "image": "ComfyUI-2x_00788_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "382": {
+    "inputs": {
+      "upscale_by": 2,
+      "max_tile_width": 2048,
+      "max_tile_height": 1728,
+      "context_anchor": 32,
+      "context_overlap": 256,
+      "image": [
+        "381",
+        0
+      ]
+    },
+    "class_type": "ContextAnchoredTileTestLayout",
+    "_meta": {
+      "title": "Tile Test: Layout"
+    }
+  },
+  "383": {
+    "inputs": {
+      "image": [
+        "381",
+        0
+      ],
+      "layout": [
+        "382",
+        0
+      ],
+      "upscale_model": [
+        "325",
+        0
+      ]
+    },
+    "class_type": "ContextAnchoredTileTestUpscale",
+    "_meta": {
+      "title": "Tile Test: Upscale"
+    }
+  },
+  "385": {
+    "inputs": {
+      "seed": 42,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "sgm_uniform",
+      "steps": 20,
+      "cfg": [
+        "315",
+        0
+      ],
+      "denoise": 0.35,
+      "anchor_source": "source image",
+      "surface": "vision tokens and captions",
+      "canvas_tokens": 20,
+      "crop_tokens": 30,
+      "tiles": [
+        "389",
+        2
+      ],
+      "with_neighbors": false,
+      "image": [
+        "383",
+        0
+      ],
+      "layout": [
+        "382",
+        0
+      ],
+      "model": [
+        "283",
+        0
+      ],
+      "clip": [
+        "294",
+        0
+      ],
+      "vae": [
+        "295",
+        0
+      ],
+      "captions": [
+        "389",
+        0
+      ],
+      "negative": [
+        "318",
+        0
+      ]
+    },
+    "class_type": "ContextAnchoredTileTestRender",
+    "_meta": {
+      "title": "Tile Test: Render"
+    }
+  },
+  "386": {
+    "inputs": {
+      "value": [
+        "389",
+        1
+      ]
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Text (Multiline)"
+    }
+  },
+  "387": {
+    "inputs": {
+      "images": [
+        "382",
+        1
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "388": {
+    "inputs": {
+      "images": [
+        "385",
+        1
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "389": {
+    "inputs": {
+      "preset": "artwork",
+      "tile_instruction": "",
+      "style_caption": true,
+      "style_instruction": "",
+      "max_tokens": 0,
+      "caption_megapixels": 0.786432,
+      "tiles": "1",
+      "with_neighbors": false,
+      "image": [
+        "383",
+        0
+      ],
+      "layout": [
+        "382",
+        0
+      ],
+      "clip": [
+        "294",
+        0
+      ]
+    },
+    "class_type": "ContextAnchoredTileTestCaptions",
+    "_meta": {
+      "title": "Tile Test: Captions"
+    }
+  },
+  "390": {
+    "inputs": {
+      "source": [
+        "389",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview as Text"
+    }
+  }
+}

@@ -11,10 +11,13 @@ one `grid.build_layout` call, so what the overlay shows is what the engine will 
 is what buys the chain its caching: ComfyUI holds the upscaled canvas, and a downstream re-run
 at a new seed never pays for it again.
 
-`ContextAnchoredTileTestCaptions` writes one VLM caption per tile through the same
-`captions.generate_tile_captions` the engine runs, with the settings file's preset overridable
-by widgets. Its inputs carry no seed, so the captions survive a seed re-roll further down the
-chain, and its IS_CHANGED re-runs it when the settings file changes.
+`ContextAnchoredTileTestCaptions` writes one VLM caption per chosen tile through the same
+`captions.generate_caption_set` the engine runs, from a settings file preset or from its own
+instruction widgets, under one progress bar. The style caption is kept apart from the tile
+captions and listed once, labelled, at the top. Its inputs carry no seed, so the captions survive
+a seed re-roll further down the chain, and its IS_CHANGED re-runs it when the settings file
+changes. Its tiles output feeds the Render node's tiles input, so one tile is captioned and
+rendered together.
 
 `ContextAnchoredTileTestRender` runs the production VL engine over that canvas. Named tiles
 are rendered one at a time as region runs over the block the tile and its bordering tiles
@@ -34,7 +37,11 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from . import captions, grid, node, sampling, upscale, vl
+from . import captions, grid, node, progress, sampling, upscale, vl
+
+# The Captions node's preset option that reads the instruction widgets instead of a settings
+# file preset. A named preset ignores those widgets, so a trial wording can stay in them.
+CUSTOM_PRESET = "custom instructions"
 
 # The overlay preview's pixel budget. Large enough to read a label on an 8K canvas, small
 # enough that the picture stays a cheap preview.
@@ -77,20 +84,52 @@ class TestLayout:
 
 @dataclass(frozen=True)
 class TestCaptions:
-    """One caption per tile plus the geometry they were written for, the CATR_CAPTIONS object.
+    """The captions written for a layout plus the geometry they belong to, the CATR_CAPTIONS
+    object.
 
-    `captions` holds one entry per tile in layout order, each a tuple of one caption per batch
-    row, the shape `captions.generate_tile_captions` returns. A caption belongs to a tile
-    rect, so `target_size`, `grid` (columns, rows) and `rects` (every tile's `crop_rect` as
-    (x0, y0, x1, y1), in order) let a consumer reject captions written for another grid at the
-    same size. `preset` is the label they were written from.
+    `captions` holds one entry per tile in layout order: a tuple of one caption per batch row,
+    the tile's OWN caption as `captions.generate_caption_set` returns it, or None for a tile
+    the node was not asked to caption. `style` is the whole-image style caption as a tuple of
+    one per batch row, or None when the run asked for none. The two are joined by
+    `captions.join_style_captions` only where the engine reads them (the Render node), so the
+    listing shows the style once instead of on top of every tile. `tiles` is the tile numbers
+    the node was asked for, in the order they were written, and empty when every tile was
+    captioned. A caption belongs to a tile rect,
+    so `target_size`, `grid` (columns, rows) and `rects` (every tile's `crop_rect` as (x0, y0,
+    x1, y1), in order) let a consumer reject captions written for another grid at the same
+    size. `preset` is the label they were written from.
+
+    `str()` is the readable listing, which is what core's Preview as Text node shows for a
+    value it cannot serialize as JSON, so the socket reads the same as the text output.
     """
 
     captions: tuple
+    style: tuple | None
+    tiles: tuple
     target_size: tuple
     grid: tuple
     rects: tuple
     preset: str
+
+    def __str__(self):
+        columns = self.grid[0]
+        captioned = tuple(index for index, rows in enumerate(self.captions) if rows is not None)
+        named = self.tiles or captioned
+        bordering = tuple(index for index in captioned if index not in named)
+        count = f"{len(captioned)} tiles" if len(captioned) == len(self.captions) else (
+            f"{len(captioned)} of {len(self.captions)} tiles")
+        blocks = [f"preset {self.preset}, {count} captioned"]
+        if self.style is not None:
+            blocks.append(f"style caption\n{self.style[0]}")
+        blocks.extend(self._block(index, columns) for index in named)
+        if bordering:
+            blocks.append("bordering tiles")
+            blocks.extend(self._block(index, columns) for index in bordering)
+        return "\n\n".join(blocks)
+
+    def _block(self, index, columns):
+        # The overlay's own label, so a caption is found by the number drawn on the tile.
+        return f"tile {index} r{index // columns}c{index % columns}\n{self.captions[index][0]}"
 
 
 def _preview_size(target_width, target_height):
@@ -263,34 +302,132 @@ class ContextAnchoredTileTestUpscale:
         return (upscaled,)
 
 
-class ContextAnchoredTileTestCaptions:
-    """Write one VLM caption per tile of the layout, through the engine's own caption pass.
+def _parse_tile_numbers(text, tile_count, node_name):
+    # The csv widget, as the overlay labels the tiles. A duplicate is dropped rather than
+    # rejected, so naming a tile twice costs one render, and the order the user wrote is kept
+    # because it is the order the two output lists come back in.
+    numbers = []
+    for token in text.split(","):
+        entry = token.strip()
+        if not entry:
+            continue
+        try:
+            number = int(entry)
+        except ValueError:
+            raise ValueError(
+                f"{node_name} was given the tile {entry!r}, which is not a tile number. tiles "
+                f"takes comma separated numbers from 0 to {tile_count - 1}, or nothing at all "
+                "for the entire canvas.") from None
+        if not 0 <= number < tile_count:
+            raise ValueError(
+                f"{node_name} was given tile {number}, and this layout has {tile_count} tiles "
+                f"numbered 0 to {tile_count - 1}.")
+        if number not in numbers:
+            numbers.append(number)
+    return tuple(numbers)
 
-    This is a testing node and not one of the production nodes. The preset comes from the settings file and every part of it can be overridden by a
-    widget, so a prompt can be tried without editing the file. There is no seed here, so
-    ComfyUI serves the captions from its cache while a seed is re-rolled further down the
-    chain. Feed the captions to Tile Test: Render.
+
+def _preset_options():
+    labels = list(captions.preset_labels())
+    if CUSTOM_PRESET in labels:
+        raise ValueError(
+            f"{captions.settings_path()} defines a preset named {CUSTOM_PRESET!r}, which is the "
+            "Tile Test: Captions option for its own instruction widgets. Rename the preset.")
+    return [*labels, CUSTOM_PRESET]
+
+
+def _caption_preset(preset, tile_instruction, style_caption, style_instruction, max_tokens,
+                    caption_megapixels, prompt):
+    # The block the captions are written from. A named preset is read from the settings file
+    # and the three instruction widgets are left alone, so a trial wording can stay in them
+    # while the file's own wording runs. The custom option reads those widgets instead. The
+    # prompt fills {PROMPT} in either, the same as on the production nodes.
+    if preset == CUSTOM_PRESET:
+        if not tile_instruction.strip():
+            raise ValueError(
+                f"Tile Test: Captions was set to {CUSTOM_PRESET!r} with an empty "
+                "tile_instruction. Write the question to ask about each tile, or pick a preset.")
+        if max_tokens <= 0:
+            raise ValueError(
+                f"Tile Test: Captions was set to {CUSTOM_PRESET!r} with max_tokens 0. The custom "
+                "option has no preset budget to fall back on, so max_tokens must be above 0.")
+        base = captions.Preset(
+            surface=captions.VLM_METHOD_CAPTIONS,
+            label=CUSTOM_PRESET,
+            vision=captions.load_settings().vision,
+            tile_instruction=tile_instruction,
+            tile_max_tokens=max_tokens,
+            style_instruction=style_instruction if style_instruction.strip() else "",
+            style_max_tokens=max_tokens,
+        )
+    else:
+        # The labeled option, which resolves for every preset including the first one, whose
+        # options the selector offers unlabeled.
+        base = captions.resolve_method(f"{captions.VLM_METHOD_CAPTIONS} ({preset})")
+    chosen = replace(
+        base,
+        style_instruction=base.style_instruction if style_caption else "",
+        vision=replace(base.vision, caption_megapixels=caption_megapixels),
+    )
+    return captions.with_prompt(chosen, prompt)
+
+
+def _bordering_tiles(layout, index):
+    tiles = layout.tiles
+    col0, col1, row0, row1 = grid.neighborhood(layout, index)
+    return tuple(other for other, tile in enumerate(tiles)
+                 if col0 <= tile.col <= col1 and row0 <= tile.row <= row1 and other != index)
+
+
+def _tiles_to_caption(layout, tiles, with_neighbors):
+    # (named, captioned): the tile numbers the widget asked for, then every tile that gets a
+    # caption, the named ones first in the order written and then their bordering tiles in
+    # layout order, since a block run at Tile Test: Render needs a caption for every lane.
+    named = _parse_tile_numbers(tiles, len(layout.tiles), "Tile Test: Captions")
+    if not named:
+        return (), tuple(range(len(layout.tiles)))
+    captioned = list(named)
+    if with_neighbors:
+        bordering = sorted({other for index in named for other in _bordering_tiles(layout, index)})
+        captioned.extend(other for other in bordering if other not in captioned)
+    return named, tuple(captioned)
+
+
+class ContextAnchoredTileTestCaptions:
+    """Write VLM captions for tiles of the layout, through the engine's own caption pass.
+
+    This is a testing node and not one of the production nodes. The preset comes from the
+    settings file, or from the instruction widgets when preset is set to custom instructions,
+    so a prompt can be tried without editing the file. An empty tiles list captions every tile.
+    A tile list captions those tiles, plus their bordering tiles when with_neighbors is on,
+    which is what Tile Test: Render needs to render one of them with its neighbours. There is
+    no seed here, so ComfyUI serves the captions from its cache while a seed is re-rolled
+    further down the chain. Feed the captions and the tiles to Tile Test: Render.
     """
 
     @classmethod
     def INPUT_TYPES(s):
-        labels = list(captions.preset_labels())
+        options = _preset_options()
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "The canvas from Tile Test: Upscale, at the layout's target size."}),
-                "layout": ("CATR_LAYOUT", {"tooltip": "The layout from Tile Test: Layout. Every tile in it is captioned."}),
+                "layout": ("CATR_LAYOUT", {"tooltip": "The layout from Tile Test: Layout. The tiles are captioned from it."}),
                 "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder with a text generator (Krea 2 family)."}),
-                "preset": (labels, {"default": labels[0], "tooltip": "Which settings file preset the captions are written from. The list is built when ComfyUI starts, so a new or renamed preset needs a restart."}),
-                "tile_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": "What the VL model is asked about each tile. Leave empty to ask the preset's own question."}),
-                "style_caption": ("BOOLEAN", {"default": True, "tooltip": "Write one style caption of the entire image and place it on top of every tile caption."}),
-                "style_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": "What the VL model is asked about the entire image. Leave empty to ask the preset's own question."}),
-                "max_tokens": ("INT", {"default": 0, "min": 0, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for every caption. The budget also covers the model's hidden reasoning turn. Use 0 for the preset's own two budgets."}),
+                "preset": (options, {"default": options[0], "tooltip": f"Which settings file preset the captions are written from. '{CUSTOM_PRESET}' writes them from the tile_instruction, style_instruction and max_tokens widgets instead, which a named preset ignores. The list is built when ComfyUI starts, so a new or renamed preset needs a restart."}),
+                "tile_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": f"What the VL model is asked about each tile. Read only when preset is '{CUSTOM_PRESET}'."}),
+                "style_caption": ("BOOLEAN", {"default": True, "tooltip": "Write one style caption of the entire image and place it on top of every tile caption. Off leaves every preset's style caption out."}),
+                "style_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": f"What the VL model is asked about the entire image. Read only when preset is '{CUSTOM_PRESET}'. Empty writes no style caption."}),
+                "max_tokens": ("INT", {"default": 0, "min": 0, "max": captions.MAX_CAPTION_TOKENS, "tooltip": f"Generation budget for every caption. The budget also covers the model's hidden reasoning turn. Read only when preset is '{CUSTOM_PRESET}', where it must be above 0."}),
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the tile the VL model reads. Use 0 for the crop's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels."}),
+                "tiles": ("STRING", {"default": "", "tooltip": "Comma separated tile numbers, as Tile Test: Layout labels them. Empty captions every tile. The same list comes out of the tiles output for Tile Test: Render."}),
+                "with_neighbors": ("BOOLEAN", {"default": True, "tooltip": "Caption the bordering tiles of every named tile as well, which Tile Test: Render needs when its with_neighbors is on. Off captions the named tiles only."}),
+                "prompt": node._prompt(),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("CATR_CAPTIONS", "STRING")
-    RETURN_NAMES = ("captions", "text")
+    RETURN_TYPES = ("CATR_CAPTIONS", "STRING", "STRING")
+    RETURN_NAMES = ("captions", "text", "tiles")
     FUNCTION = "caption_tiles"
     CATEGORY = "image/upscaling/tile testing"
 
@@ -315,7 +452,8 @@ class ContextAnchoredTileTestCaptions:
         return captions.settings_fingerprint()
 
     def caption_tiles(self, image, layout, clip, preset, tile_instruction, style_caption,
-                      style_instruction, max_tokens, caption_megapixels):
+                      style_instruction, max_tokens, caption_megapixels, tiles, with_neighbors,
+                      prompt, unique_id=None):
         # ---- inputs
         if image.shape[0] != 1:
             raise ValueError(
@@ -327,63 +465,39 @@ class ContextAnchoredTileTestCaptions:
                 f"Tile Test: Captions was given a {size[0]}x{size[1]} image, but the layout was "
                 f"solved for {layout.target_size[0]}x{layout.target_size[1]}. Feed it the canvas "
                 "Tile Test: Upscale returns.")
-        # The labeled option, which resolves for every preset including the first one, whose
-        # options the selector offers unlabeled.
-        base = captions.resolve_method(f"{captions.VLM_METHOD_CAPTIONS} ({preset})")
-        run_preset = replace(
-            base,
-            tile_instruction=tile_instruction or base.tile_instruction,
-            style_instruction=(style_instruction or base.style_instruction) if style_caption else "",
-            tile_max_tokens=max_tokens or base.tile_max_tokens,
-            style_max_tokens=max_tokens or base.style_max_tokens,
-            vision=replace(base.vision, caption_megapixels=caption_megapixels),
-        )
+        run_preset = _caption_preset(preset, tile_instruction, style_caption, style_instruction,
+                                     max_tokens, caption_megapixels, prompt)
+        all_tiles = layout.layout.tiles
+        named, captioned = _tiles_to_caption(layout.layout, tiles, with_neighbors)
+        chosen = [all_tiles[index] for index in captioned]
 
         # ---- process. The engine captions the PADDED canvas, so this pass must too, or a
-        # tile's caption would describe a crop the run never reads.
+        # tile's caption would describe a crop the run never reads. The ledger is what makes
+        # the run ONE bar: core builds a per-token bar inside every clip.generate, and the
+        # ledger's shim routes it into the caption's own chunk instead of resetting the display.
         padded, _ = sampling.pad_image_to_multiple(image)
-        tiles = layout.layout.tiles
-        written = captions.generate_tile_captions(clip, padded, tiles, run_preset, progress=None)
+        n_captions = len(chosen) + (1 if run_preset.style_instruction else 0)
+        ledger = progress.build_caption_ledger(n_captions, unique_id=unique_id)
+        with ledger:
+            style, written = captions.generate_caption_set(clip, padded, chosen, run_preset,
+                                                           progress=ledger)
+            ledger.finish()
 
         # ---- output
+        per_tile = [None] * len(all_tiles)
+        for index, rows in zip(captioned, written, strict=True):
+            per_tile[index] = tuple(rows)
         result = TestCaptions(
-            captions=tuple(tuple(rows) for rows in written),
+            captions=tuple(per_tile),
+            style=tuple(style) if style else None,
+            tiles=named,
             target_size=layout.target_size,
             grid=(layout.layout.sol_x.n, layout.layout.sol_y.n),
             rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
-                        for tile in tiles),
-            preset=base.label,
+                        for tile in all_tiles),
+            preset=run_preset.label,
         )
-        blocks = [f"{len(tiles)} tiles, preset {base.label}"]
-        blocks.extend(
-            f"{index} r{tile.row}c{tile.col}: {rows[0]}"
-            for index, (tile, rows) in enumerate(zip(tiles, written, strict=True)))
-        return (result, "\n\n".join(blocks))
-
-
-def _parse_tile_numbers(text, tile_count):
-    # The csv widget, as the overlay labels the tiles. A duplicate is dropped rather than
-    # rejected, so naming a tile twice costs one render, and the order the user wrote is kept
-    # because it is the order the two output lists come back in.
-    numbers = []
-    for token in text.split(","):
-        entry = token.strip()
-        if not entry:
-            continue
-        try:
-            number = int(entry)
-        except ValueError:
-            raise ValueError(
-                f"Tile Test: Render was given the tile {entry!r}, which is not a tile number. "
-                f"tiles takes comma separated numbers from 0 to {tile_count - 1}, or nothing at "
-                "all for the entire canvas.") from None
-        if not 0 <= number < tile_count:
-            raise ValueError(
-                f"Tile Test: Render was given tile {number}, and this layout has {tile_count} "
-                f"tiles numbered 0 to {tile_count - 1}.")
-        if number not in numbers:
-            numbers.append(number)
-    return tuple(numbers)
+        return (result, str(result), ", ".join(str(index) for index in named))
 
 
 def _run_preset(surface, canvas_tokens, crop_tokens):
@@ -401,7 +515,8 @@ def _run_preset(surface, canvas_tokens, crop_tokens):
 
 def _run_captions(surface, given, test_layout):
     # A caption belongs to a tile rect, so a set written for another grid would describe rects
-    # this run never samples. The vision surface reads no captions at all.
+    # this run never samples. The vision surface reads no captions at all. Returns the
+    # captions object whole, since its style is joined onto the lanes only at _lane_captions.
     if surface == captions.VLM_METHOD_VISION:
         return None
     if given is None:
@@ -426,7 +541,29 @@ def _run_captions(surface, given, test_layout):
             f"Tile Test: Render was given captions for a {given.grid[0]}x{given.grid[1]} tile grid "
             f"whose tile rects are not this {columns}x{rows} layout's. Feed both nodes the same "
             "layout.")
-    return given.captions
+    return given
+
+
+def _lane_captions(given, lanes):
+    # The form the engine reads, joined HERE and nowhere earlier, so the captions object and
+    # its listing keep the style apart from the tiles.
+    if lanes is None:
+        return None
+    return tuple(tuple(rows) for rows in captions.join_style_captions(given.style, lanes))
+
+
+def _captioned_tiles(tile_captions):
+    return ", ".join(str(index) for index, rows in enumerate(tile_captions) if rows is not None)
+
+
+def _full_captions(tile_captions):
+    # The full run gives every tile a lane, so every tile needs its caption.
+    if tile_captions is None or all(rows is not None for rows in tile_captions):
+        return tile_captions
+    raise ValueError(
+        "Tile Test: Render was asked to render the entire canvas, and the captions cover tiles "
+        f"{_captioned_tiles(tile_captions)} only. Clear tiles on Tile Test: Captions, or connect "
+        "its tiles output to tiles here.")
 
 
 def _tile_range(layout, index, with_neighbors):
@@ -473,13 +610,21 @@ def _check_region_crop(mask, sub, context_anchor, image):
             "did.")
 
 
-def _block_captions(tile_captions, sub, columns):
+def _block_captions(tile_captions, sub, columns, index):
     # Every lane of the block carries the caption its tile was given in the PARENT grid, or a
     # lane would be conditioned on another tile's description.
     if tile_captions is None:
         return None
-    return tuple(tile_captions[(sub.first_row + tile.row) * columns + sub.first_col + tile.col]
-                 for tile in sub.layout.tiles)
+    parent_indices = tuple((sub.first_row + tile.row) * columns + sub.first_col + tile.col
+                           for tile in sub.layout.tiles)
+    missing = [parent for parent in parent_indices if tile_captions[parent] is None]
+    if missing:
+        raise ValueError(
+            f"Tile Test: Render needs a caption for every lane of tile {index}'s block, and tiles "
+            f"{', '.join(str(parent) for parent in missing)} have none. The captions cover tiles "
+            f"{_captioned_tiles(tile_captions)}. Turn with_neighbors on at Tile Test: Captions, "
+            "or off here.")
+    return tuple(tile_captions[parent] for parent in parent_indices)
 
 
 def _unsampled_lists(image, test_layout, requested):
@@ -562,12 +707,20 @@ class ContextAnchoredTileTestRender:
                 f"solved for {layout.target_size[0]}x{layout.target_size[1]}. Feed it the canvas "
                 "Tile Test: Upscale returns.")
         preset = _run_preset(surface, canvas_tokens, crop_tokens)
-        tile_captions = _run_captions(surface, captions, layout)
+        given = _run_captions(surface, captions, layout)
+        tile_captions = None if given is None else given.captions
         # The sub layouts are solved HERE so grid.sub_layout's ring reach error reaches the user
         # before the text encoder loads.
         requested = tuple(
             (index, grid.sub_layout(layout.layout, *_tile_range(layout.layout, index, with_neighbors)))
-            for index in _parse_tile_numbers(tiles, layout.tile_count))
+            for index in _parse_tile_numbers(tiles, layout.tile_count, "Tile Test: Render"))
+        # Which tiles need a caption is known once the blocks are, and the two checks run here
+        # so a caption set that covers too few tiles is named before any model loads.
+        if not requested:
+            tile_captions = _lane_captions(given, _full_captions(tile_captions))
+        columns = layout.layout.sol_x.n
+        block_captions = {index: _lane_captions(given, _block_captions(tile_captions, sub, columns, index))
+                          for index, sub in requested}
 
         # ---- process
         sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
@@ -585,7 +738,6 @@ class ContextAnchoredTileTestRender:
                 tile_captions=tile_captions, layout=layout.layout)
             return ([refined], [refined])
 
-        columns = layout.layout.sol_x.n
         rendered_tiles = []
         rendered_blocks = []
         for index, sub in requested:
@@ -599,7 +751,7 @@ class ContextAnchoredTileTestRender:
                 layout.max_tile_width, layout.max_tile_height, layout.context_anchor,
                 layout.context_overlap, mask=mask, vl_clip=clip, vlm_method=surface,
                 anchor_source=anchor_source, sampler_name=sampler_name, preset=preset,
-                tile_captions=_block_captions(tile_captions, sub, columns), layout=sub,
+                tile_captions=block_captions[index], layout=sub,
                 noise_fields=noise.noise_fields(sampler, sigmas))
             rendered_tiles.append(_cut(refined, _clip_rect(layout.layout.tiles[index].crop_rect, image)))
             rendered_blocks.append(_cut(refined, _clip_rect(sub.block, image)))

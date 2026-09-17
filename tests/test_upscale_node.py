@@ -23,6 +23,7 @@ WIDGETS = {
     "context_overlap": 32,
     "anchor_source": "source image",
     "vlm_method": "vision tokens and captions",
+    "prompt": "a fox in the centre",
 }
 
 
@@ -34,9 +35,13 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, **overrides):
-    """Run refine() with every collaborator faked; return (recorded, result)."""
-    recorded = {
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, **overrides):
+    """Run refine() with every collaborator faked; return (recorded, result).
+
+    `recorded` may be passed in, so a test that expects a raise can still read how far the node
+    got before it."""
+    recorded = {} if recorded is None else recorded
+    recorded.update({
         "prepare_upscaled": None,
         "encode_empty": None,
         "build_guider": None,
@@ -46,7 +51,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         "empty_cond": [("empty", {})],
         "sigmas": torch.linspace(1.0, 0.0, 5) if sigmas is None else sigmas,
         "refined": torch.rand(1, 64, 64, 3),
-    }
+    })
 
     def fake_prepare_upscaled(image, upscale_model, upscale_by, progress=None):
         recorded["prepare_upscaled"] = (image, upscale_model, upscale_by)
@@ -65,7 +70,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         recorded["build_sigmas"] = (model, scheduler, steps, denoise)
         return recorded["sigmas"]
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None, preset=None):
         recorded["refine_image"] = {
             "image": image,
             "guider": guider,
@@ -83,6 +88,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
             "vlm_method": vlm_method,
             "sampler_name": sampler_name,
             "progress": progress,
+            "preset": preset,
         }
         return recorded["refined"]
 
@@ -175,6 +181,30 @@ def test_vlm_method_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice
     recorded, _ = _drive(monkeypatch, vlm_method=choice)
 
     assert recorded["refine_image"]["vlm_method"] == choice
+
+
+def test_the_prompt_is_written_into_the_preset_handed_to_refine_image(comfy_stubs, monkeypatch):
+    # The node resolves the preset itself and fills {PROMPT} from its own widget, so the
+    # engine's pre-pass asks the filled question and never resolves the file again.
+    from context_anchored_tile_refine import captions
+
+    recorded, _ = _drive(monkeypatch)
+
+    expected = captions.with_prompt(captions.resolve_method(WIDGETS["vlm_method"]), WIDGETS["prompt"])
+    assert recorded["refine_image"]["preset"] == expected
+    assert WIDGETS["prompt"] in expected.tile_instruction
+
+
+def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
+    # The default preset asks for {PROMPT}. The rejection lands before prepare_upscaled, since
+    # the upscale-model pass and the text-encoder load each cost minutes to reach.
+    recorded = {}
+
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
+        _drive(monkeypatch, recorded=recorded, prompt="")
+
+    assert recorded["prepare_upscaled"] is None
+    assert recorded["encode_empty"] is None
 
 
 def test_builders_receive_the_model_and_their_widgets(comfy_stubs, monkeypatch):

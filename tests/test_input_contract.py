@@ -32,6 +32,9 @@ VL_REQUIRED_ORDER = [
     "anchor_source",
     "vlm_method",
     "clip",
+    # The image's prompt for the caption question, appended last for the same positional
+    # restore reason as the two selects.
+    "prompt",
 ]
 
 TYPE_BY_NAME = {
@@ -60,6 +63,7 @@ ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
 VLM_METHOD_OPTIONS = [
     "vision tokens",
     "vision tokens and captions", "captions",
+    "vision tokens and captions (standard)", "captions (standard)",
     "vision tokens and captions (artwork)", "captions (artwork)",
 ]
 
@@ -331,6 +335,7 @@ UPSCALE_REQUIRED_ORDER = [
     # compatible past the end of a legacy saved array. Same rule as VL_REQUIRED_ORDER.
     "anchor_source",
     "vlm_method",
+    "prompt",
 ]
 
 UPSCALE_TYPE_BY_NAME = {
@@ -350,6 +355,7 @@ UPSCALE_TYPE_BY_NAME = {
     "vlm_method": VLM_METHOD_OPTIONS,
     "context_anchor": "INT",
     "context_overlap": "INT",
+    "prompt": "STRING",
     "upscale_model": "UPSCALE_MODEL",
     "negative": "CONDITIONING",
 }
@@ -382,14 +388,28 @@ def test_upscale_optional_is_model_and_negative(comfy_stubs):
     assert list(input_types["optional"]) == ["upscale_model", "negative"]
 
 
-def test_upscale_has_no_mask_or_prompt_input(comfy_stubs):
+def test_upscale_has_no_mask_or_positive_text_input(comfy_stubs):
     # Both absences are design decisions, not omissions: a mask needs the refine node
     # (region/vision-grid coordinates are unresolved), and any positive text re-admits the
-    # phantom objects the vision-only positive exists to remove.
+    # phantom objects the vision-only positive exists to remove. `prompt` is not that text:
+    # it is a STRING for the caption question only (captions.with_prompt), never a
+    # CONDITIONING, and it is pinned on both VL nodes below.
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
-    for absent in ("mask", "positive", "text", "prompt"):
+    for absent in ("mask", "positive", "text"):
         assert absent not in all_inputs, absent
+
+
+def test_prompt_widget_is_pinned_on_both_vl_nodes(comfy_stubs):
+    # ONE definition (node._prompt) serves both nodes and the Captions test node, so the
+    # tooltip and the default cannot drift. Default "" is what a saved workflow restores past
+    # the end of its widgets_values, and the shipped `standard` and `artwork` presets ignore it.
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        definition = node.INPUT_TYPES()["required"]["prompt"]
+        assert definition[0] == "STRING", node.__name__
+        assert definition[1]["default"] == "", node.__name__
+        assert definition[1]["multiline"] is True, node.__name__
+        assert "{PROMPT}" in definition[1]["tooltip"], node.__name__
 
 
 def test_upscale_input_type_strings(comfy_stubs):

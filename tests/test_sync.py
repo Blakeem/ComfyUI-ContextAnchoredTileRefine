@@ -1819,7 +1819,7 @@ def test_the_upscale_node_at_denoise_zero_still_ends_on_the_bars_total(comfy_stu
         seed=0, sampler_name="euler", scheduler="sgm_uniform", steps=20, cfg=3.5, denoise=0.0,
         upscale_by=1.0, max_tile_width=1024, max_tile_height=1024, context_anchor=32,
         context_overlap=32, anchor_source=sync.ANCHOR_SOURCE_IMAGE,
-        vlm_method=captions.VLM_METHOD_VISION)
+        vlm_method=captions.VLM_METHOD_VISION, prompt="")
 
     assert out[0].shape == (1, 32, 32, 3)
     assert len(comfy_stubs["progress_bars"]) == 1

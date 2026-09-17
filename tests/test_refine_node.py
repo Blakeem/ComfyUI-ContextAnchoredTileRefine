@@ -4,7 +4,7 @@ import pytest
 import torch
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
 
-from context_anchored_tile_refine import sampling
+from context_anchored_tile_refine import captions, sampling
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
     ContextAnchoredTileRefineVL,
@@ -35,7 +35,7 @@ def test_no_vl_selects_on_the_base_node():
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     parameters = inspect.signature(ContextAnchoredTileRefine.refine).parameters
-    for widget in ("anchor_source", "vlm_method"):
+    for widget in ("anchor_source", "vlm_method", "prompt"):
         assert widget not in all_inputs, widget
         assert widget not in parameters, widget
 
@@ -47,10 +47,10 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
     # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
     recorded = {}
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None, preset=None):
         recorded.update(context_anchor=context_anchor, vl_clip=vl_clip,
                         anchor_source=anchor_source, vlm_method=vlm_method,
-                        progress=type(progress).__name__)
+                        progress=type(progress).__name__, preset=preset)
         return image
 
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
@@ -70,16 +70,37 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
         anchor_source=choice,
         vlm_method=method,
         clip=clip,
+        prompt="a fox in the centre",
         mask=None,
     )
 
     assert isinstance(result, tuple) and len(result) == 1
     # The ledger is created HERE and handed down: without the last entry the whole progress
-    # feature would be written but unreachable from this node.
+    # feature would be written but unreachable from this node. The preset is resolved HERE
+    # too, with the prompt written into it, so the engine's pre-pass asks the filled question.
+    expected_preset = captions.with_prompt(captions.resolve_method(method), "a fox in the centre")
     assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
-                        "vlm_method": method, "progress": "Ledger"}
+                        "vlm_method": method, "progress": "Ledger", "preset": expected_preset}
+    if method != "vision tokens":
+        assert "a fox in the centre" in expected_preset.tile_instruction
     # ... and it is the run's ONE bar: nothing else in this call constructs another.
     assert len(comfy_stubs["progress_bars"]) == 1
+
+
+def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monkeypatch):
+    # The default preset asks for {PROMPT}. A blank prompt against it is named here, before
+    # refine_image and so before any VAE or VL encode spends GPU time.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run with a blank prompt")
+
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
+        ContextAnchoredTileRefineVL().refine(
+            image=torch.rand(1, 96, 104, 3), guider=FakeGuider(), sampler=object(),
+            sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
+            max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
+            anchor_source="source image", vlm_method="captions", clip=object(), prompt="   ")
 
 
 def test_connected_mask_refines(comfy_stubs):

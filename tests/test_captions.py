@@ -187,10 +187,17 @@ def test_settings_toml_ships_the_owner_tested_wording():
     assert settings.vision == captions.VisionSettings(
         canvas_tokens=165, crop_tokens=110, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
     assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
-    # `standard` is FIRST, which is what makes it the default preset the selector offers
-    # unlabeled. Its block is the pre-settings-file constants character for character, so the
-    # unlabeled options a pre-preset workflow carries still ask what they asked then.
-    assert list(presets) == ["standard", "artwork"]
+    # `prompted` is FIRST, which is what makes it the default preset the selector offers
+    # unlabeled: the owner's wording under test since 2026-09-16, which asks for the image's
+    # prompt and holds the caption to the crop. `standard` is the pre-settings-file constants
+    # character for character, so a workflow that spells its label out still asks what it
+    # asked then.
+    assert list(presets) == ["prompted", "standard", "artwork"]
+    assert presets["prompted"]["tile_caption_instruction"] == (
+        "Concise prose containing object's relative and absolute positions within the "
+        'foreground and background of the cropped image. Full prompt: "{PROMPT}". Keep it '
+        "concise. Do not include anything not in the crop.")
+    assert presets["prompted"]["global_style_instruction"] == ""
     assert presets["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
     assert presets["standard"]["global_style_instruction"] == ""
     artwork = presets["artwork"]
@@ -213,6 +220,7 @@ def test_every_preset_adds_one_option_per_caption_surface():
     assert list(captions.vlm_methods()) == [
         "vision tokens",
         "vision tokens and captions", "captions",
+        "vision tokens and captions (standard)", "captions (standard)",
         "vision tokens and captions (artwork)", "captions (artwork)",
     ]
     assert captions.default_vlm_method() == captions.VLM_METHOD_VISION_CAPTIONS
@@ -223,10 +231,71 @@ def test_the_default_preset_answers_to_both_forms_of_its_name():
     # out (what a workflow saved between 1.6.0 and the default preset carries) must reach the
     # SAME block rather than a "no such preset" error.
     unlabeled = captions.resolve_method("vision tokens and captions")
-    labeled = captions.resolve_method("vision tokens and captions (standard)")
+    labeled = captions.resolve_method("vision tokens and captions (prompted)")
     assert unlabeled == labeled
-    assert unlabeled.label == "standard"
-    assert labeled.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
+    assert unlabeled.label == "prompted"
+    # A later preset resolves by its label alone, and `standard` still asks the settled wording.
+    standard = captions.resolve_method("vision tokens and captions (standard)")
+    assert standard.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
+
+
+# --- the prompt input -----------------------------------------------------------------
+
+def _prompted_preset(tile='Full prompt: "{PROMPT}". Name it.', style=""):
+    return captions.Preset(
+        surface=captions.VLM_METHOD_CAPTIONS, label="demo",
+        vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
+        tile_instruction=tile, tile_max_tokens=768, style_instruction=style, style_max_tokens=768)
+
+
+def test_with_prompt_fills_both_instructions_and_strips_the_prompt():
+    # A multiline widget hands its text over with a trailing newline, which must not land
+    # inside the instruction's quotes. Every other field rides through untouched.
+    preset = _prompted_preset(style="Style of {PROMPT}, and again {PROMPT}.")
+
+    filled = captions.with_prompt(preset, "  a fox in the centre\n")
+
+    assert filled.tile_instruction == 'Full prompt: "a fox in the centre". Name it.'
+    assert filled.style_instruction == "Style of a fox in the centre, and again a fox in the centre."
+    assert filled == dataclasses.replace(preset, tile_instruction=filled.tile_instruction,
+                                         style_instruction=filled.style_instruction)
+
+
+def test_with_prompt_keeps_braces_in_the_prompt_literal():
+    # A literal replace, never str.format: a prompt can carry its own braces.
+    filled = captions.with_prompt(_prompted_preset(), "a {red} fox")
+
+    assert filled.tile_instruction == 'Full prompt: "a {red} fox". Name it.'
+
+
+def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder():
+    # The shipped `standard` and `artwork` presets and the vision-only surface read no prompt,
+    # so a typed prompt changes nothing there, blank or not.
+    for method in ("captions (standard)", "captions (artwork)", "vision tokens"):
+        preset = captions.resolve_method(method)
+        assert captions.with_prompt(preset, "a fox") == preset, method
+        assert captions.with_prompt(preset, "") == preset, method
+
+
+@pytest.mark.parametrize(("tile", "style", "key"), [
+    ('Full prompt: "{PROMPT}".', "", "tile_caption_instruction"),
+    ("Name it.", "Style of {PROMPT}.", "global_style_instruction"),
+])
+@pytest.mark.parametrize("prompt", ["", "   \n"])
+def test_with_prompt_refuses_a_blank_prompt_where_an_instruction_asks_for_one(tile, style, key, prompt):
+    with pytest.raises(RuntimeError, match=rf"preset 'demo' asks for \{{PROMPT\}} in its {key}.*prompt input is empty"):
+        captions.with_prompt(_prompted_preset(tile=tile, style=style), prompt)
+
+
+def test_the_caption_pass_refuses_an_unfilled_placeholder_before_any_generate(comfy_stubs):
+    # A direct caller that skipped with_prompt would otherwise ask every tile a question
+    # holding the literal placeholder.
+    clip = FakeCaptionClip()
+
+    with pytest.raises(RuntimeError, match=r"still carries \{PROMPT\} in its tile_caption_instruction"):
+        captions.generate_caption_set(clip, torch.rand(1, 64, 64, 3), [], _prompted_preset())
+
+    assert clip.generate_calls == []
 
 
 def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
@@ -858,6 +927,34 @@ def test_a_style_instruction_captions_the_style_source_first_and_prepends_it(com
     assert clip.generate_calls[1]["max_length"] == 256
 
 
+def test_the_caption_set_keeps_the_style_apart_and_the_join_puts_it_on_top(comfy_stubs, monkeypatch):
+    # generate_caption_set is what the Tile Test: Captions node lists from, and the join is the
+    # engine's form, so the two together must equal generate_tile_captions byte for byte.
+    monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(0, 0, 16, 16))]
+    clip = FakeCaptionClip(answer=lambda image, instruction:
+                           "oil on canvas" if instruction == "style q" else "a fox")
+
+    style, own = captions.generate_caption_set(clip, torch.rand(1, 16, 16, 3), tiles,
+                                               a_preset(style="style q"))
+
+    assert style == ["oil on canvas"]
+    assert own == [["a fox"], ["a fox"]]
+    assert captions.join_style_captions(style, own) == [["oil on canvas\na fox"]] * 2
+
+
+def test_the_caption_set_without_a_style_has_nothing_to_join(comfy_stubs, monkeypatch):
+    monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox")
+
+    style, own = captions.generate_caption_set(clip, torch.rand(1, 16, 16, 3),
+                                               [Tile(Rect(0, 0, 16, 16))], a_preset())
+
+    assert style == []
+    assert own == [["a fox"]]
+    assert captions.join_style_captions(style, own) is own
+
+
 def test_the_style_caption_is_cleaned_like_any_other(comfy_stubs, monkeypatch):
     monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
     clip = FakeCaptionClip(answer=lambda image, instruction:
@@ -1123,11 +1220,20 @@ def style_off(monkeypatch):
                         lambda method: dataclasses.replace(resolve(method), style_instruction=""))
 
 
-def _run(image, guider, clip, vlm_method, mask=None, ctx=0):
+PIPE_PROMPT = "a fox in the centre"
+
+
+def _run(image, guider, clip, vlm_method, mask=None, ctx=0, prompt=PIPE_PROMPT):
+    # What the VL nodes hand the engine: the resolved preset with the prompt written into it
+    # (node.py's own with_prompt call), since the shipped default asks for {PROMPT}. `prompt`
+    # None leaves the resolve to the engine's dispatch, for the tests that pin its rejections.
+    preset = None
+    if prompt is not None:
+        preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
     return sampling.refine_image(
         image, guider, sync_sampler(), SIGMAS, *_engine(), max_tile_width=56,
         max_tile_height=56, context_anchor=ctx, context_overlap=16, mask=mask, vl_clip=clip,
-        vlm_method=vlm_method,
+        vlm_method=vlm_method, preset=preset,
     )
 
 
@@ -1173,13 +1279,18 @@ def test_vision_tokens_reads_the_settings_file_once_and_never_the_vlm(comfy_stub
 @pytest.mark.parametrize("method", ["vision tokens and captions", "captions",
                                     "vision tokens and captions (standard)"])
 def test_each_caption_method_reaches_the_vlm_with_its_presets_wording(comfy_stubs, pipeline_clip, method):
-    # End to end: the selected preset's own wording and budget reach every clip.generate, and
-    # a preset with a style instruction writes ONE whole-image caption before any tile. The
-    # unlabeled options are what a workflow saved before the presets carries.
-    preset = captions.resolve_method(method)
+    # End to end: the selected preset's own wording and budget reach every clip.generate, with
+    # the node's prompt written into the default preset's {PROMPT}, and a preset with a style
+    # instruction writes ONE whole-image caption before any tile. The unlabeled options are
+    # what a workflow saved before the presets carries.
+    preset = captions.with_prompt(captions.resolve_method(method), PIPE_PROMPT)
     image = torch.rand(1, 80, 80, 3)
 
     _run(image, VLGuider(), pipeline_clip, method)
+
+    if preset.label == "prompted":
+        assert PIPE_PROMPT in preset.tile_instruction
+        assert "{PROMPT}" not in preset.tile_instruction
 
     style_on = bool(preset.style_instruction)
     assert len(pipeline_clip.generate_calls) == 4 + (1 if style_on else 0)
@@ -1317,14 +1428,14 @@ def test_a_two_picture_batch_with_different_length_captions_completes(comfy_stub
 
 def test_an_unknown_vlm_method_is_rejected_by_name(comfy_stubs, pipeline_clip):
     with pytest.raises(ValueError, match="names no conditioning surface"):
-        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision")
+        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision", prompt=None)
 
 
 def test_a_method_naming_an_absent_preset_is_rejected_through_the_dispatch(comfy_stubs, pipeline_clip):
     # The selector is built at startup and the wording read per run, so a preset deleted
     # mid-session leaves a stale option that must fail by name rather than obscurely.
     with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
-        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions (gone)")
+        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions (gone)", prompt=None)
 
 
 def test_slice_caption_conds_forward_budget_tiles_to_the_vision_rows(stubbed_slices, monkeypatch):

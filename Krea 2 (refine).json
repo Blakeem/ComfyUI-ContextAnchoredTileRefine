@@ -1679,7 +1679,7 @@
         32,
         256,
         "source image",
-        "vision tokens and captions"
+        "vision tokens and captions (standard)"
       ],
       "widgets_values_named": {
         "max_tile_width": 1728,
@@ -1687,7 +1687,7 @@
         "context_anchor": 32,
         "context_overlap": 256,
         "anchor_source": "source image",
-        "vlm_method": "vision tokens and captions"
+        "vlm_method": "vision tokens and captions (standard)"
       },
       "color": "#322",
       "bgcolor": "#533"

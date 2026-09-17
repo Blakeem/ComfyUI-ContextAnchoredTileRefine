@@ -40,7 +40,7 @@ import re
 import tomllib
 import weakref
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import vl
@@ -121,7 +121,8 @@ RICH_GROUPED_INSTRUCTION = f"{SETTLED_RICH_INSTRUCTION} {GROUP_CLAUSE}"
 # (`vlm_methods`), because it becomes a combo the frontend caches at startup. A preset's own
 # wording and numbers are re-read on every run (`resolve_method`), so tuning a prompt needs
 # no restart. Both caption surfaces ask the SAME tile question of a given preset, as they
-# have since 2026-08-16.
+# have since 2026-08-16. An instruction may carry PROMPT_PLACEHOLDER, which the nodes fill
+# from their prompt input (`with_prompt`) before the preset reaches the caption pass.
 SETTINGS_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_NAME = "settings.toml"
 USER_SETTINGS_NAME = "settings.user.toml"
@@ -131,6 +132,12 @@ USER_SETTINGS_NAME = "settings.user.toml"
 # visible-answer length. The ceiling is a typo guard: one caption is the run's slowest
 # per-tile step, so a stray extra digit would multiply the whole run's wall time.
 MAX_CAPTION_TOKENS = 4096
+
+# Where an instruction takes the node's prompt input (`with_prompt`). The prompt reaches the
+# VL model's QUESTION only, never the DiT: what the DiT reads is still the caption written
+# about the crop, so the A/B finding that text conditioning re-admits phantom objects is
+# untouched. A literal replace rather than str.format, since a user's prompt can carry braces.
+PROMPT_PLACEHOLDER = "{PROMPT}"
 
 # Caption input budget (total pixels, aspect preserved) — AB27's prep, what resample_for_vl
 # falls back to, and the size every judged tests-AB arm was captioned at (ab_env.caption_preset
@@ -484,6 +491,45 @@ def resolve_method(vlm_method):
     )
 
 
+def _fill_prompt(instruction, prompt, label, key):
+    if PROMPT_PLACEHOLDER not in instruction:
+        return instruction
+    if not prompt.strip():
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} asks for {PROMPT_PLACEHOLDER} "
+            f"in its {key} and the node's prompt input is empty. Connect or type the image's "
+            f"prompt, or remove {PROMPT_PLACEHOLDER} from the instruction.")
+    return instruction.replace(PROMPT_PLACEHOLDER, prompt.strip())
+
+
+def with_prompt(preset, prompt):
+    """`preset` with the node's prompt input written into every {PROMPT} its two instructions
+    carry. The prompt is stripped, so a multiline widget's trailing newline never lands inside
+    the instruction's quotes. A preset without the placeholder is handed back unchanged, so
+    the prompt is a no-op on it and on the vision-only surface. A placeholder met by a blank
+    prompt is a hard error here, before any GPU time, rather than a question that quotes an
+    empty prompt at every tile."""
+    return replace(
+        preset,
+        tile_instruction=_fill_prompt(preset.tile_instruction, prompt, preset.label,
+                                      "tile_caption_instruction"),
+        style_instruction=_fill_prompt(preset.style_instruction, prompt, preset.label,
+                                       "global_style_instruction"),
+    )
+
+
+def _check_prompt_filled(preset):
+    # A direct caller that skipped with_prompt would otherwise ask the VL model a question
+    # holding the literal placeholder, at every tile, with nothing to say so.
+    for key, instruction in (("tile_caption_instruction", preset.tile_instruction),
+                             ("global_style_instruction", preset.style_instruction)):
+        if PROMPT_PLACEHOLDER in instruction:
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): preset {preset.label!r} still carries "
+                f"{PROMPT_PLACEHOLDER} in its {key}. Hand the preset through captions.with_prompt "
+                "before captioning.")
+
+
 def caption_budget_pixels(megapixels, source):
     # The caption_megapixels semantics, in one place: 0 (or less) is the source's own area, so
     # the VL model reads every pixel the crop has, capped at vl.PICTURE_CAP_PIXELS. Above 0
@@ -673,11 +719,17 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
     return text
 
 
-def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_index=0,
-                           progress=None, style_source=None):
-    """One caption per tile per batch row, read off the FROZEN raw canvas.
+def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=0,
+                         progress=None, style_source=None):
+    """The style caption and one caption per tile per batch row, read off the FROZEN raw
+    canvas and returned APART, as (style_texts, captions).
 
-    Returns captions[tile_index][batch_row]. Batch rows are captioned INDEPENDENTLY: core's
+    `style_texts` is one whole-image style caption per batch row, or empty when the preset asks
+    for none. `captions[tile_index][batch_row]` is each tile's OWN caption, without the style.
+    `join_style_captions` is the form the DiT reads, and `generate_tile_captions` is the two
+    together. The Tile Test: Captions node reads this function so its listing can show the
+    style once, labelled, instead of as the unlabelled first line of every tile.
+    Batch rows are captioned INDEPENDENTLY: core's
     tokenizer attaches images[0] alone (comfy/text_encoders/qwen_vl.py process_qwen2vl_images),
     so a whole [B,H,W,3] crop would describe every row with row 0's picture. Through the node
     `source` always holds exactly ONE picture — sampling.refine_image's picture loop is outside
@@ -689,9 +741,8 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
     the tile caption and the style caption alike. A non-empty
     `preset.style_instruction` adds ONE whole-image style caption per batch row, generated
     FIRST from `style_source` (default `source`, and the region path passes the full image so
-    that a masked refine's style stays global) and prepended to every tile caption of that
-    row. This way all tiles follow one style description. It is counted as the segment's
-    first caption(s). An empty one leaves this function byte-identical to the style-free path.
+    that a masked refine's style stays global). It is counted as the segment's first
+    caption(s). An empty one leaves this function byte-identical to the style-free path.
 
     The pre-pass this drives is no longer "one encode" — it is one clip.generate per tile per
     row at up to the preset's max_tokens, which on a 16-tile grid runs for minutes
@@ -708,6 +759,7 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
     import comfy.model_management
     import comfy.utils
 
+    _check_prompt_filled(preset)
     batch = int(source.shape[0])
     style_on = bool(preset.style_instruction)
     per_picture = (len(tiles) + (1 if style_on else 0)) * batch
@@ -749,17 +801,34 @@ def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_inde
                                     preset.tile_max_tokens, thinking=True,
                                     scope=("tile", crop.x0, crop.y0, crop.x1, crop.y1, b,
                                            batch_index))
-            caption = clean_caption(text)
-            if style_on:
-                caption = f"{style_texts[b]}\n{caption}"
-            row_captions.append(caption)
+            row_captions.append(clean_caption(text))
             done += 1
             if pbar is None:
                 progress.caption_done(done, total)
             else:
                 pbar.update_absolute(done, total)
         captions.append(row_captions)
-    return captions
+    return style_texts, captions
+
+
+def join_style_captions(style_texts, captions):
+    """The form the DiT reads: every tile caption of a batch row with that row's style caption
+    on top, so all tiles follow one style description. Empty `style_texts` hands `captions`
+    back untouched. Keeps the [tile][batch row] shape."""
+    if not style_texts:
+        return captions
+    return [[f"{style_texts[b]}\n{caption}" for b, caption in enumerate(rows)]
+            for rows in captions]
+
+
+def generate_tile_captions(clip, source, tiles, preset, batch_size=1, batch_index=0,
+                           progress=None, style_source=None):
+    """`generate_caption_set` joined by `join_style_captions`: captions[tile_index][batch_row]
+    in the form the engine's pre-pass encodes."""
+    style_texts, captions = generate_caption_set(
+        clip, source, tiles, preset, batch_size=batch_size, batch_index=batch_index,
+        progress=progress, style_source=style_source)
+    return join_style_captions(style_texts, captions)
 
 
 def build_caption_conds(clip, captions):

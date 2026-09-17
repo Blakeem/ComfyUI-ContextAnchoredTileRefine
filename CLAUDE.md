@@ -63,7 +63,12 @@ without that doc's temporal design.
   `sampler_object` wraps several names in a private function). Both VL nodes carry two selects,
   defined ONCE each as `_anchor_source()` / `_vlm_method()` so their option lists and tooltips
   cannot drift apart, and both APPENDED after `context_overlap` (see the ANCHOR RING invariant
-  for why never mid-list). `anchor_source` takes its option strings from `sync.ANCHOR_SOURCES`
+  for why never mid-list), then a `prompt` STRING (`_prompt()`, shared with the Captions test
+  node) appended LAST (2026-09-16). Each VL node resolves the preset ITSELF,
+  `captions.with_prompt(captions.resolve_method(vlm_method), prompt)`, and hands it down as
+  `refine_image(preset=...)`, so a blank prompt against a preset that asks for `{PROMPT}` fails
+  before any VAE or VL encode; the engine's own resolve in `sync._prepare_run` is now the
+  direct-caller path only. `anchor_source` takes its option strings from `sync.ANCHOR_SOURCES`
   and `vlm_method` from `captions.vlm_methods()`, so what the widget offers and what the engine
   branches on cannot diverge. Comfy-free at module scope (the combo lists come from a lazy
   `import comfy.samplers` inside `INPUT_TYPES`, and the option strings from lazy package
@@ -294,7 +299,8 @@ without that doc's temporal design.
   failed like the canvas slice, so it was removed, not flagged off. A/B-settled (AB26-AB36):
   vision rows are positionally exact and demand-free, and ANY text (user prompt, generated
   style, captions) re-admits phantom objects in proportion to its volume, so there is no
-  prompt input at all. The rows are a bag. Krea 2's DiT gives every conditioning row RoPE
+  prompt input for the DiT at all (the VL nodes' `prompt` widget fills the caption QUESTION
+  only, see captions.py). The rows are a bag. Krea 2's DiT gives every conditioning row RoPE
   position 0 (measured bit-exact under a shuffle), so the block order carries nothing.
   Fail-fast guards: non-VL CLIP (tokenizer rejects images / no image token), encoder
   seq-length vs token-derived layout, and a real `pooled_output` or stray extras on a
@@ -338,8 +344,17 @@ without that doc's temporal design.
   read `"<surface> (<label>)"`. An unlabeled option resolves to the first preset, and that
   preset's label still resolves when a workflow spells it out even though the selector no
   longer offers the labeled form. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
-  The shipped default is `standard`, whose wording and budgets are the pre-settings-file
-  constants character for character (`RICH_GROUPED_INSTRUCTION`, 768 tokens). The caption
+  THE PROMPT INPUT (2026-09-16): an instruction may carry `PROMPT_PLACEHOLDER` (`{PROMPT}`),
+  which `with_prompt(preset, prompt)` fills by literal replace (never str.format, a prompt can
+  hold braces) into BOTH instructions, stripping the widget's trailing newline; a placeholder
+  met by a blank prompt raises there, naming the preset, the key and the input, and
+  `generate_caption_set` runs `_check_prompt_filled` first so a direct caller that skipped
+  `with_prompt` never captions with the literal placeholder. The prompt reaches the VL model's
+  question only, never the DiT. The FIRST shipped preset is `prompted`, the owner's wording
+  under test (quotes the prompt, holds the caption to the crop, no style caption), so the
+  unlabeled default options now REQUIRE the prompt input; `standard` is second, whose wording
+  and budgets are the pre-settings-file constants character for character
+  (`RICH_GROUPED_INSTRUCTION`, 768 tokens). The caption
   picture size is the `[vision]` table's `caption_megapixels`, ONE size for the tile caption
   and the style caption since 2026-09-02 (a user's own copy still carrying the two per-preset
   `*_megapixels` keys fails with a message naming the move), shipped at
@@ -347,14 +362,20 @@ without that doc's temporal design.
   2026-09-01, TESTS.md test 3, over the 384^2 px it first shipped with). A broken file is a hard error
   before any clip.generate, and the all-in-one node resolves it FIRST, before its
   upscale-model pass and text-encoder load. The engine resolves ONCE per picture in
-  `sync._prepare_run` and hands the `Preset` down, so the ledger's caption count and the
-  pre-pass's own can never come from two different reads.
+  `sync._prepare_run` when no caller hands a preset down, and both VL nodes now do (node.py),
+  so a production run reads the file once per node execution and the engine's own resolve is
+  the direct-caller path; either way the ledger's caption count and the pre-pass's own can
+  never come from two different reads.
   BOTH caption surfaces ask the one `tile_caption_instruction`. A non-empty
   `global_style_instruction` adds ONE whole-image style caption per
   picture, generated FIRST from the vision-encode source (the FULL image on the mask path)
   and prepended to every tile caption, so all tiles follow one style description; "" turns
   it off, and the ledger's caption segment counts it (`preset_picture(style_rows=)` must
-  match `build_tile_positives`' open). The two shipped presets' wording is pinned
+  match `build_tile_positives`' open). `generate_caption_set` writes the two APART, as
+  `(style_texts, captions)`, `join_style_captions` puts the style on top of every tile
+  caption, and `generate_tile_captions` (the engine's call) is the two together. The Captions
+  test node reads the set so its listing shows the style once, labelled, and the Render test
+  node joins it per lane set, so the joined form exists only where the engine reads it. The three shipped presets' wording is pinned
   character-for-character by `test_settings_toml_ships_the_owner_tested_wording` (the owner's
   testing found small wording changes lose consistency), so a deliberate prompt change updates
   pin and file together. The retired settled pair (`RICH_GROUPED_INSTRUCTION`,
@@ -413,7 +434,10 @@ without that doc's temporal design.
   (`W_UPSCALE_STEP` / `W_CLIP_LOAD` / `K_CAPTION` / `W_ENCODE` / `W_ENCODE_CROP` /
   `W_ENCODE_CAPTION_TEXT` / `W_ENCODE_TILE` / `W_DECODE_TILE`, with `vision_encode_units`
   the one place the vision segment is sized from the `[vision]` table), i.e. calibration knobs in ONE place. **The ledger is
-  created in node.py and NOWHERE else** (both VL nodes); `sampling.refine_image`,
+  created by NODES and nowhere else**: node.py's two VL nodes through `build_ledger`, and the
+  Captions test node through `build_caption_ledger` (one CAPTIONS segment, one chunk per
+  caption, since without the shim core's per-token bar reset the display at every caption and
+  stopped where the stop token fired); `sampling.refine_image`,
   `sync.refine_sync`, `sync.build_tile_positives`, `captions.generate_tile_captions` and
   `upscale.prepare_upscaled` only ACCEPT one as `progress=None` and build nothing when it is
   None — so the base node, every direct caller and the `tests-AB` harnesses keep their old
@@ -447,19 +471,38 @@ without that doc's temporal design.
   sampled) with the crop, overlap and core rects and a `"{index} r{row}c{col}"` label per tile.
   The Upscale node is `upscale.prepare_upscaled` at the layout's multiplier and is OPTIONAL (an
   already upscaled image at `upscale_by` 1.0 skips it). The Captions node runs
-  `captions.generate_tile_captions` over the PADDED canvas with the chosen preset overridden by
-  its widgets (an empty string or 0 keeps the preset's, except `caption_megapixels`, which
-  always applies and reads 0 as the crop's own size), returns `TestCaptions` (socket
-  `CATR_CAPTIONS`: the captions plus the target size, the grid shape and every crop rect, so
-  the Render node rejects captions written for another grid) and a readable listing. Its
-  `IS_CHANGED` is the settings fingerprint and its `VALIDATE_INPUTS` re-checks the entire
-  caption_megapixels rule, since naming a widget there disables core's own range check. The
-  Render node builds its sampling objects as the all-in-one node does, passes `progress=None`,
+  `captions.generate_caption_set` over the PADDED canvas from a `preset`: a settings file
+  preset IGNORES the three instruction widgets (so a trial wording stays in them), and the
+  `CUSTOM_PRESET` option (`"custom instructions"`, appended after the file's labels, and a
+  file preset of that name is refused at INPUT_TYPES) builds a `captions.Preset` from
+  `tile_instruction` (required non-empty), `style_instruction` (empty = no style caption) and
+  `max_tokens` (required above 0, both budgets), and `prompt` fills `{PROMPT}` in either
+  through the same `captions.with_prompt`. `style_caption` off and `caption_megapixels`
+  apply to both (0 reads the crop's own size). `tiles` (csv, same parser as the Render node's,
+  `_parse_tile_numbers(text, count, node_name)`) captions the named tiles, plus their
+  bordering tiles from `grid.neighborhood` when `with_neighbors` is on, since a block run at
+  the Render node conditions every lane; empty captions every tile. It returns `TestCaptions`
+  (socket `CATR_CAPTIONS`: one entry per tile in layout order with None for an uncaptioned
+  tile, each the tile's OWN caption, the `style` caption apart (None when the run asked for
+  none), the named `tiles`, the target size, the grid shape and every crop rect, so the Render
+  node rejects captions written for another grid; its `__str__` is the readable listing,
+  the style once under a `style caption` label above the tiles, the same for a file preset
+  and the custom option, because core's Preview as Text falls back to `str()`), that listing
+  as `text`, and the
+  named tiles as a csv `tiles` STRING for the Render node's `tiles` input. The run is ONE
+  progress bar through `progress.build_caption_ledger` (hidden `unique_id` for the status
+  line). Its `IS_CHANGED` is the settings fingerprint and its `VALIDATE_INPUTS` re-checks the
+  entire caption_megapixels rule, since naming a widget there disables core's own range check.
+  The Render node rejects a caption set with a None on any lane it runs (`_full_captions` for
+  the full canvas, `_block_captions` per block, both BEFORE any model call, naming the tiles
+  and the with_neighbors fix). The Render node builds its sampling objects as the all-in-one
+  node does, passes `progress=None`,
   and either runs the full canvas (empty `tiles`, with `layout=` handed in so the solve cannot
   drift) or, per csv tile number, ONE REGION RUN over `grid.sub_layout`'s block: the mask is
   ones on `sub.region` through `node._normalize_mask` (image device), `_check_region_crop`
   asserts the engine's bbox plus anchor crop IS the block, the captions are the parent's at
-  the block's parent indices, the noise is `upscale.SlicedCanvasNoise` at the padded canvas
+  the block's parent indices with the style joined on top by `_lane_captions` (the ONE place
+  the test chain joins them), the noise is `upscale.SlicedCanvasNoise` at the padded canvas
   plus its `noise_fields`, and the outputs are the tile's parent crop and the block cut from
   the result, as IMAGE lists. Every sub layout is solved BEFORE the first model call so the
   ring reach error is cheap. `with_neighbors` off renders the tile alone (block = its crop,

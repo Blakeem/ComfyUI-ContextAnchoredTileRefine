@@ -15,7 +15,7 @@ import pytest
 import torch
 from test_captions import FakeCaptionClip
 
-from context_anchored_tile_refine import captions, grid, sampling, testing, upscale, vl
+from context_anchored_tile_refine import captions, grid, progress, sampling, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine
 from context_anchored_tile_refine.testing import (
     ContextAnchoredTileTestCaptions,
@@ -201,7 +201,7 @@ def test_the_upscale_node_rejects_a_batch_above_one(monkeypatch):
 # --- the Captions node -----------------------------------------------------------------
 
 # The artwork preset is the shipped file's second block, the only one that asks for a style
-# caption, which is what makes the style half of every override visible.
+# caption, which is what makes the style half of every setting visible.
 ARTWORK_TILE = ("succinct prose containing relative and absolute positions of specific things "
                 "with object and character identifying demographics.")
 ARTWORK_STYLE = ("succinct flowing prose of only the overall style and artistic medium and "
@@ -214,6 +214,18 @@ CAPTION_WIDGETS = {
     "style_instruction": "",
     "max_tokens": 0,
     "caption_megapixels": captions.SHIPPED_CAPTION_MEGAPIXELS,
+    "tiles": "",
+    "with_neighbors": True,
+    "prompt": "",
+}
+
+# The custom option with every widget it reads filled in, so a test changes one at a time.
+CUSTOM_WIDGETS = {
+    "preset": testing.CUSTOM_PRESET,
+    "tile_instruction": "name the objects",
+    "style_instruction": "name the medium",
+    "max_tokens": 64,
+    "prompt": "",
 }
 
 
@@ -223,29 +235,55 @@ def _caption_layout():
                   max_tile_width=512, max_tile_height=512).layout
 
 
+def _grid_layout():
+    # A 4x4 grid on a 600x600 canvas (the Render node's own fixture), where tile 5 has eight
+    # bordering tiles and tile 0 has three.
+    return _solve(image=torch.rand(1, 600, 600, 3), upscale_by=1.0, max_tile_width=288,
+                  max_tile_height=288).layout
+
+
 def _caption(clip, layout=None, image=None, **overrides):
-    """Run the Captions node. Returns its two outputs named."""
+    """Run the Captions node. Returns its three outputs named."""
     widgets = dict(CAPTION_WIDGETS)
     widgets.update(overrides)
     test_layout = _caption_layout() if layout is None else layout
-    picture = torch.rand(1, 300, 600, 3) if image is None else image
-    written, text = ContextAnchoredTileTestCaptions().caption_tiles(
-        image=picture, layout=test_layout, clip=clip, **widgets)
-    return SimpleNamespace(written=written, text=text)
+    if image is None:
+        width, height = test_layout.target_size
+        image = torch.rand(1, height, width, 3)
+    written, text, tiles = ContextAnchoredTileTestCaptions().caption_tiles(
+        image=image, layout=test_layout, clip=clip, **widgets)
+    return SimpleNamespace(written=written, text=text, tiles=tiles)
 
 
 def _asking_clip():
     return FakeCaptionClip(answer=lambda image, instruction: f"asked {instruction}")
 
 
-def test_the_preset_widget_offers_the_settings_files_own_presets():
+def _counting_clip():
+    clip = FakeCaptionClip(answer=lambda image, instruction: f"caption {len(clip.generate_calls)}")
+    return clip
+
+
+def test_the_preset_widget_offers_the_settings_files_own_presets_then_the_custom_option():
     # preset_labels is read once per session for the reason vlm_methods is, so the widget the
     # frontend cached at startup cannot offer a preset the run then fails to resolve.
     preset = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"]["preset"]
 
-    assert captions.preset_labels() == ("standard", "artwork")
-    assert preset[0] == ["standard", "artwork"]
-    assert preset[1]["default"] == "standard"
+    assert captions.preset_labels() == ("prompted", "standard", "artwork")
+    assert preset[0] == ["prompted", "standard", "artwork", "custom instructions"]
+    assert preset[1]["default"] == "prompted"
+
+
+def test_a_settings_preset_named_like_the_custom_option_is_refused(monkeypatch):
+    # The two would be one combo entry routed two ways, so the file is told to rename it. The
+    # label list is read through the cached preset_labels, which the autouse fixture clears.
+    shipped = captions.load_settings()
+    presets = {**shipped.presets, testing.CUSTOM_PRESET: shipped.presets["standard"]}
+    monkeypatch.setattr(captions, "load_settings",
+                        lambda path=None: captions.Settings(vision=shipped.vision, presets=presets))
+
+    with pytest.raises(ValueError, match="defines a preset named 'custom instructions'"):
+        ContextAnchoredTileTestCaptions.INPUT_TYPES()
 
 
 def test_the_caption_size_widget_defaults_to_the_settings_files_own_value():
@@ -260,7 +298,70 @@ def test_every_caption_input_has_a_tooltip():
         assert "tooltip" in definition[1], name
 
 
-def test_the_preset_is_read_from_the_file_when_no_widget_overrides_it(comfy_stubs):
+def test_the_captions_node_asks_for_its_node_id():
+    # The ledger writes its status line under the node, and core hands the id in as a hidden
+    # input only.
+    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["hidden"] == {"unique_id": "UNIQUE_ID"}
+
+
+def test_the_captions_node_returns_the_captions_the_listing_and_the_tiles():
+    assert ContextAnchoredTileTestCaptions.RETURN_TYPES == ("CATR_CAPTIONS", "STRING", "STRING")
+    assert ContextAnchoredTileTestCaptions.RETURN_NAMES == ("captions", "text", "tiles")
+
+
+def test_the_prompt_widget_is_the_vl_nodes_own(comfy_stubs):
+    # One definition (node._prompt) on every node that fills {PROMPT}, so the wording and the
+    # default cannot drift between the production nodes and the test chain.
+    from context_anchored_tile_refine import node
+
+    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"]["prompt"] == node._prompt()
+
+
+def test_the_prompt_is_written_into_the_default_preset(comfy_stubs):
+    # The shipped default asks for {PROMPT}, and the node fills it from its own widget, the
+    # same captions.with_prompt the production nodes run.
+    clip = _asking_clip()
+    shipped = captions.load_settings().presets["prompted"]["tile_caption_instruction"]
+
+    result = _caption(clip, preset="prompted", prompt="a fox in the centre\n")
+
+    expected = shipped.replace("{PROMPT}", "a fox in the centre")
+    assert "a fox in the centre" in expected
+    assert [call["text"] for call in clip.generate_calls] == [expected] * 2
+    assert result.written.preset == "prompted"
+
+
+def test_the_prompt_is_written_into_a_custom_instruction(comfy_stubs):
+    clip = _asking_clip()
+
+    _caption(clip, **{**CUSTOM_WIDGETS, "tile_instruction": 'Full prompt: "{PROMPT}". Name it.',
+                      "style_instruction": "Style of {PROMPT}.", "prompt": "a fox"})
+
+    assert [call["text"] for call in clip.generate_calls] == [
+        "Style of a fox.", 'Full prompt: "a fox". Name it.', 'Full prompt: "a fox". Name it.']
+
+
+def test_a_blank_prompt_against_a_preset_that_asks_for_one_is_refused_before_any_caption(comfy_stubs):
+    clip = _asking_clip()
+
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
+        _caption(clip, preset="prompted", prompt="")
+
+    assert clip.generate_calls == []
+
+
+def test_every_caption_is_asked_with_the_reasoning_turn_on(comfy_stubs):
+    # The test chain runs the engine's own caption pass, so every question carries
+    # thinking=True and strip_thinking then cuts the reasoning off the answer.
+    clip = _asking_clip()
+
+    _caption(clip, preset="artwork")
+
+    assert len(clip.generate_calls) == 3
+    assert all(call["thinking"] is True for call in clip.tokenize_calls)
+
+
+def test_the_preset_is_read_from_the_file_when_named(comfy_stubs):
     # The default preset is the FIRST block and the node asks for it by label, so the wording
     # and the budget both come from the file rather than from a constant here.
     clip = _asking_clip()
@@ -272,42 +373,62 @@ def test_the_preset_is_read_from_the_file_when_no_widget_overrides_it(comfy_stub
     assert result.written.preset == "standard"
 
 
-def test_the_instruction_widgets_replace_both_of_the_presets_questions(comfy_stubs):
+def test_a_named_preset_ignores_the_instruction_and_budget_widgets(comfy_stubs):
+    # A trial wording stays in the widgets while a preset runs, so switching between the two
+    # never means clearing the fields.
     clip = _asking_clip()
 
     result = _caption(clip, preset="artwork", tile_instruction="name the objects",
-                      style_instruction="name the medium")
-
-    assert [call["text"] for call in clip.generate_calls] == [
-        "name the medium", "name the objects", "name the objects"]
-    # The style caption is already the first line of every tile caption, which is how the
-    # engine feeds it to the DiT.
-    assert result.written.captions == (("asked name the medium\nasked name the objects",),) * 2
-
-
-def test_an_empty_instruction_widget_keeps_the_presets_own_question(comfy_stubs):
-    clip = _asking_clip()
-
-    _caption(clip, preset="artwork")
+                      style_instruction="name the medium", max_tokens=64)
 
     assert [call["text"] for call in clip.generate_calls] == [
         ARTWORK_STYLE, ARTWORK_TILE, ARTWORK_TILE]
-
-
-def test_the_budget_widget_replaces_both_of_the_presets_budgets(comfy_stubs):
-    clip = _asking_clip()
-
-    _caption(clip, preset="artwork", max_tokens=64)
-
-    assert [call["max_length"] for call in clip.generate_calls] == [64, 64, 64]
-
-
-def test_a_zero_budget_keeps_the_presets_own_budgets(comfy_stubs):
-    clip = _asking_clip()
-
-    _caption(clip, preset="artwork", max_tokens=0)
-
     assert [call["max_length"] for call in clip.generate_calls] == [768, 768, 768]
+    assert result.written.preset == "artwork"
+
+
+def test_the_custom_option_writes_from_the_three_widgets(comfy_stubs):
+    clip = _asking_clip()
+
+    result = _caption(clip, **CUSTOM_WIDGETS)
+
+    assert [call["text"] for call in clip.generate_calls] == [
+        "name the medium", "name the objects", "name the objects"]
+    assert [call["max_length"] for call in clip.generate_calls] == [64, 64, 64]
+    # The style caption is kept apart from the tile captions. The Render node joins them.
+    assert result.written.style == ("asked name the medium",)
+    assert result.written.captions == (("asked name the objects",),) * 2
+    assert result.written.preset == "custom instructions"
+
+
+def test_the_custom_option_still_reads_the_caption_size_widget(comfy_stubs, monkeypatch):
+    seen = []
+    monkeypatch.setattr(captions, "resample_for_vl",
+                        lambda pixels, budget=None: seen.append(budget) or pixels)
+
+    _caption(_asking_clip(), caption_megapixels=0.25, **CUSTOM_WIDGETS)
+
+    assert seen == [250_000] * 3
+
+
+def test_an_empty_custom_style_instruction_writes_no_style_caption(comfy_stubs):
+    clip = _asking_clip()
+
+    result = _caption(clip, **dict(CUSTOM_WIDGETS, style_instruction="  "))
+
+    assert [call["text"] for call in clip.generate_calls] == ["name the objects"] * 2
+    assert result.written.style is None
+    assert result.written.captions == (("asked name the objects",),) * 2
+
+
+def test_the_custom_option_rejects_an_empty_tile_instruction(comfy_stubs):
+    with pytest.raises(ValueError, match="with an empty tile_instruction"):
+        _caption(_asking_clip(), **dict(CUSTOM_WIDGETS, tile_instruction=" "))
+
+
+def test_the_custom_option_rejects_a_zero_budget(comfy_stubs):
+    with pytest.raises(ValueError, match="with max_tokens 0"):
+        _caption(_asking_clip(), **dict(CUSTOM_WIDGETS, max_tokens=0))
 
 
 def test_the_caption_size_widget_sets_the_picture_the_vl_model_reads(comfy_stubs):
@@ -321,14 +442,17 @@ def test_the_caption_size_widget_sets_the_picture_the_vl_model_reads(comfy_stubs
         assert width * height == pytest.approx(250_000, rel=0.02)
 
 
-def test_style_caption_off_leaves_the_preset_with_no_style_instruction(comfy_stubs):
-    # artwork asks for a style caption, so switching it off has to be what removes it.
+@pytest.mark.parametrize("widgets", [{"preset": "artwork"}, CUSTOM_WIDGETS])
+def test_style_caption_off_removes_the_style_caption(comfy_stubs, widgets):
+    # artwork asks for a style caption and the custom widgets carry one, so switching the
+    # boolean off has to be what removes it on both.
     clip = _asking_clip()
 
-    result = _caption(clip, preset="artwork", style_caption=False)
+    result = _caption(clip, style_caption=False, **widgets)
 
-    assert [call["text"] for call in clip.generate_calls] == [ARTWORK_TILE, ARTWORK_TILE]
-    assert result.written.captions == ((f"asked {ARTWORK_TILE}",),) * 2
+    assert len(clip.generate_calls) == 2
+    assert result.written.style is None
+    assert all("\n" not in rows[0] for rows in result.written.captions)
 
 
 def test_every_tile_is_captioned_from_the_padded_canvas(comfy_stubs, monkeypatch):
@@ -356,16 +480,117 @@ def test_the_captions_object_carries_the_grid_it_was_written_for(comfy_stubs):
         (tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
         for tile in layout.layout.tiles)
     assert result.written.captions == (("a plain caption",), ("a plain caption",))
+    assert result.written.style is None
+    assert result.written.tiles == ()
 
 
 def test_the_text_output_lists_every_tile_by_its_overlay_number(comfy_stubs):
-    clip = FakeCaptionClip(answer=lambda image, instruction: f"tile {len(clip.generate_calls)}")
+    result = _caption(_counting_clip())
 
-    result = _caption(clip)
+    assert result.text == ("preset standard, 2 tiles captioned\n\n"
+                           "tile 0 r0c0\ncaption 1\n\n"
+                           "tile 1 r0c1\ncaption 2")
+    # Core's Preview as Text node falls back to str() for a value it cannot serialize, so the
+    # captions socket reads the same as the text output.
+    assert str(result.written) == result.text
+    assert result.tiles == ""
 
-    assert result.text == ("2 tiles, preset standard\n\n"
-                           "0 r0c0: tile 1\n\n"
-                           "1 r0c1: tile 2")
+
+@pytest.mark.parametrize("widgets", [{"preset": "artwork"}, CUSTOM_WIDGETS])
+def test_the_text_output_lists_the_style_caption_once_at_the_top(comfy_stubs, widgets):
+    # The style caption is generated once and read once, so it is listed once, labelled, above
+    # the tiles, and the listing reads the same whether a file preset or the custom option
+    # wrote it.
+    clip = _counting_clip()
+
+    result = _caption(clip, **widgets)
+
+    assert result.text == (f"preset {widgets['preset']}, 2 tiles captioned\n\n"
+                           "style caption\ncaption 1\n\n"
+                           "tile 0 r0c0\ncaption 2\n\n"
+                           "tile 1 r0c1\ncaption 3")
+    assert str(result.written) == result.text
+
+
+def test_named_tiles_alone_are_captioned_with_neighbors_off(comfy_stubs):
+    # The reason the widget exists: one caption instead of sixteen while a wording is tuned.
+    clip = _counting_clip()
+
+    result = _caption(clip, layout=_grid_layout(), tiles="5", with_neighbors=False)
+
+    assert len(clip.generate_calls) == 1
+    assert result.written.captions == tuple(("caption 1",) if index == 5 else None for index in range(16))
+    assert result.written.tiles == (5,)
+    assert result.tiles == "5"
+    assert result.text == "preset standard, 1 of 16 tiles captioned\n\ntile 5 r1c1\ncaption 1"
+
+
+def test_named_tiles_bring_their_bordering_tiles_with_neighbors_on(comfy_stubs):
+    # Tile Test: Render runs a named tile with its bordering tiles as lanes, and every lane
+    # needs a caption, so the block's tiles are written too. The named tiles come first, in
+    # the order written, and the bordering tiles after in layout order, named ones excluded.
+    clip = _counting_clip()
+
+    result = _caption(clip, layout=_grid_layout(), tiles="5, 0")
+
+    captioned = [index for index, rows in enumerate(result.written.captions) if rows is not None]
+    assert captioned == [0, 1, 2, 4, 5, 6, 8, 9, 10]
+    assert result.written.captions[5] == ("caption 1",)
+    assert result.written.captions[0] == ("caption 2",)
+    assert result.written.captions[1] == ("caption 3",)
+    assert result.written.tiles == (5, 0)
+    assert result.tiles == "5, 0"
+    assert result.text.startswith("preset standard, 9 of 16 tiles captioned\n\n"
+                                  "tile 5 r1c1\ncaption 1\n\ntile 0 r0c0\ncaption 2\n\n"
+                                  "bordering tiles\n\ntile 1 r0c1\ncaption 3\n\n")
+
+
+def test_the_style_caption_is_written_once_for_a_tile_list(comfy_stubs):
+    clip = _asking_clip()
+
+    result = _caption(clip, layout=_grid_layout(), preset="artwork", tiles="5", with_neighbors=False)
+
+    assert [call["text"] for call in clip.generate_calls] == [ARTWORK_STYLE, ARTWORK_TILE]
+    assert result.written.style == (f"asked {ARTWORK_STYLE}",)
+    assert result.written.captions[5] == (f"asked {ARTWORK_TILE}",)
+
+
+@pytest.mark.parametrize("text", ["two", "5,x"])
+def test_the_captions_node_rejects_a_csv_entry_that_is_not_a_number(comfy_stubs, text):
+    with pytest.raises(ValueError, match=r"Tile Test: Captions was given the tile .* which is not a tile number"):
+        _caption(FakeCaptionClip(), layout=_grid_layout(), tiles=text)
+
+
+def test_the_captions_node_rejects_a_tile_number_outside_the_grid(comfy_stubs):
+    with pytest.raises(ValueError, match=r"Tile Test: Captions was given tile 16, and this layout has 16 tiles"):
+        _caption(FakeCaptionClip(), layout=_grid_layout(), tiles="16")
+
+
+def test_the_run_is_one_progress_bar_that_ends_full(comfy_stubs):
+    # Core builds a per-token bar inside every clip.generate and the caption pass built one of
+    # its own, so the display reset at every caption and stopped where the stop token fired.
+    # The ledger's shim routes the inner bars into one bar over the whole run.
+    clip = _asking_clip()
+
+    _caption(clip, layout=_grid_layout(), preset="artwork", tiles="5")
+
+    assert len(comfy_stubs["progress_bars"]) == 1
+    bar = comfy_stubs["progress_bars"][0]
+    total = round(10 * progress.K_CAPTION * progress.EMIT_SCALE)
+    assert bar.total == total
+    values = [value for value, _total, _preview in bar.updates]
+    assert values == sorted(values)
+    assert bar.updates[-1][:2] == (total, total)
+    assert clip.generate_calls[0]["text"] == ARTWORK_STYLE
+
+
+def test_the_progress_shim_is_restored_after_the_run(comfy_stubs):
+    import comfy.utils
+
+    before = comfy.utils.ProgressBar
+    _caption(_asking_clip())
+
+    assert comfy.utils.ProgressBar is before
 
 
 def test_the_captions_node_rejects_a_batch_above_one():
@@ -450,10 +675,14 @@ def _positional(height, width):
     return (rows + cols)[None, :, :, None].expand(1, height, width, 3).contiguous()
 
 
-def _captions_for(layout):
+def _captions_for(layout, only=None, style=None):
+    # `only` is the tile numbers a partial caption set covers; None covers every tile.
     tiles = layout.layout.tiles
     return testing.TestCaptions(
-        captions=tuple((f"caption {index}",) for index in range(len(tiles))),
+        captions=tuple((f"caption {index}",) if only is None or index in only else None
+                       for index in range(len(tiles))),
+        style=style,
+        tiles=() if only is None else tuple(only),
         target_size=layout.target_size,
         grid=(layout.layout.sol_x.n, layout.layout.sol_y.n),
         rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
@@ -597,6 +826,32 @@ def test_the_connected_captions_reach_the_engine_on_a_caption_surface(comfy_stub
     assert recorded["calls"][0]["tile_captions"] == given.captions
 
 
+def test_the_style_caption_is_joined_onto_every_lane_for_the_engine(comfy_stubs, monkeypatch):
+    # The captions object keeps the style apart, and the engine reads one caption per lane with
+    # the style on top, the form captions.generate_tile_captions writes on a production run.
+    layout = _render_layout()
+    given = _captions_for(layout, style=("the medium",))
+
+    recorded, _ = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
+                          given_captions=given)
+
+    assert recorded["calls"][0]["tile_captions"] == tuple(
+        (f"the medium\ncaption {index}",) for index in range(16))
+
+
+def test_the_style_caption_is_joined_onto_every_block_lane(comfy_stubs, monkeypatch):
+    layout = _render_layout()
+    given = _captions_for(layout, style=("the medium",))
+
+    recorded, _ = _render(monkeypatch, layout=layout, tiles="10",
+                          surface=captions.VLM_METHOD_CAPTIONS, given_captions=given)
+    call = recorded["calls"][0]
+    sub = call["layout"]
+
+    assert call["tile_captions"] == tuple(
+        (f"the medium\ncaption {(1 + tile.row) * 4 + 1 + tile.col}",) for tile in sub.layout.tiles)
+
+
 def test_the_vision_surface_ignores_a_connected_captions_object(comfy_stubs, monkeypatch):
     # The vision surface builds no captions at all, and the engine rejects a caption set handed
     # to it, so a connected socket must not reach it.
@@ -692,6 +947,58 @@ def test_every_block_lane_carries_its_parent_tiles_caption(comfy_stubs, monkeypa
     assert call["tile_captions"] == tuple(
         given.captions[(1 + tile.row) * 4 + 1 + tile.col] for tile in sub.layout.tiles)
     assert call["tile_captions"][0] == ("caption 5",)
+
+
+def test_a_caption_set_covering_the_block_is_enough_for_a_block_run(comfy_stubs, monkeypatch):
+    # What Tile Test: Captions writes for tiles="5" with its with_neighbors on: the tile and
+    # its eight bordering tiles, and nothing else.
+    layout = _render_layout()
+    given = _captions_for(layout, only=(5, 0, 1, 2, 4, 6, 8, 9, 10))
+    recorded, _ = _render(monkeypatch, layout=layout, tiles="5",
+                          surface=captions.VLM_METHOD_CAPTIONS, given_captions=given)
+
+    assert recorded["calls"][0]["tile_captions"][4] == ("caption 5",)
+    assert None not in recorded["calls"][0]["tile_captions"]
+
+
+def test_a_block_lane_without_a_caption_is_rejected_before_any_model_call(comfy_stubs, monkeypatch):
+    # Tile Test: Captions with its with_neighbors off writes the named tile only, and a block
+    # run here with with_neighbors on has eight more lanes to condition.
+    layout = _render_layout()
+    recorded = {}
+
+    with pytest.raises(ValueError, match=r"tile 5's block, and tiles 0, 1, 2, 4, 6, 8, 9, 10 have none. "
+                                          r"The captions cover tiles 5. Turn with_neighbors on at Tile Test: Captions"):
+        _render(monkeypatch, layout=layout, tiles="5", surface=captions.VLM_METHOD_CAPTIONS,
+                given_captions=_captions_for(layout, only=(5,)), recorded=recorded)
+    assert recorded["build_sigmas"] is None
+
+
+def test_a_tile_alone_needs_only_its_own_caption(comfy_stubs, monkeypatch):
+    layout = _render_layout()
+    recorded, _ = _render(monkeypatch, layout=layout, tiles="5", with_neighbors=False,
+                          surface=captions.VLM_METHOD_CAPTIONS,
+                          given_captions=_captions_for(layout, only=(5,)))
+
+    assert recorded["calls"][0]["tile_captions"] == (("caption 5",),)
+
+
+def test_the_full_run_rejects_a_caption_set_that_covers_part_of_the_grid(comfy_stubs, monkeypatch):
+    layout = _render_layout()
+    recorded = {}
+
+    with pytest.raises(ValueError, match=r"entire canvas, and the captions cover tiles 5, 6 only"):
+        _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
+                given_captions=_captions_for(layout, only=(5, 6)), recorded=recorded)
+    assert recorded["build_sigmas"] is None
+
+
+def test_the_vision_surface_ignores_a_partial_caption_set(comfy_stubs, monkeypatch):
+    layout = _render_layout()
+    recorded, _ = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_VISION,
+                          given_captions=_captions_for(layout, only=(5,)))
+
+    assert recorded["calls"][0]["tile_captions"] is None
 
 
 def test_the_two_lists_carry_the_tile_crop_and_the_block(comfy_stubs, monkeypatch):

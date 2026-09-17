@@ -44,8 +44,9 @@
 # tokens and captions" and "captions". Every later block labels its own two options, "vision
 # tokens and captions (<label>)" and "captions (<label>)". The selector follows the order of
 # the blocks below, so a preset's two options sit together.
-# Move a block to the top to make it the default. Add, rename or remove a block to change
-# what the selector offers.
+# Move a block to the top to make it the default. Every saved workflow on the unlabeled options
+# then asks that block's question. Add, rename or remove a block to change what the selector
+# offers.
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
 #
@@ -63,6 +64,13 @@
 # global_style_max_tokens    Generation budget for the style answer. Same rules as
 #                            tile_caption_max_tokens.
 #
+# THE IMAGE'S PROMPT
+# An instruction may hold {PROMPT}. The VL nodes and the Tile Test: Captions node write their
+# prompt input in its place before the VL model reads the instruction, so the caption can
+# follow the prompt the image was made from. The prompt reaches the VL model only. The
+# diffusion model still reads the caption and never the prompt. A preset without {PROMPT}
+# ignores the prompt input. A preset with it stops the run when the prompt input is empty.
+#
 # PROMPT RULES
 # A prompt needs its own stop condition, such as a length word (succinct), a count ceiling,
 # or a fixed region list. Without one the answer runs to max_tokens.
@@ -72,10 +80,17 @@ canvas_tokens = 165
 crop_tokens = 110
 caption_megapixels = 0.786432
 
-# The default preset, since it is the first block. It asks what every caption option asked
-# before the presets existed and it writes no style caption, so a workflow saved then keeps
-# its own value. EU spelling is deliberate, since it measured better than US spelling in A/B
-# testing.
+# The default preset, since it is the first block. It holds each tile's caption to the crop
+# and gives the VL model the image's prompt, so a caption names what the prompt names. It
+# needs the prompt input filled and writes no style caption.
+[presets.prompted]
+tile_caption_instruction = "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
+tile_caption_max_tokens = 768
+global_style_instruction = ""
+global_style_max_tokens = 768
+
+# What every caption option asked before the presets existed, with no style caption. EU
+# spelling is deliberate, since it measured better than US spelling in A/B testing.
 [presets.standard]
 tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry."
 tile_caption_max_tokens = 768

@@ -515,3 +515,15 @@ def _routed_bar_class(ledger):
 def build_ledger(vlm_method, steps, batch=1, upscale_model=False, clip_load=False, unique_id=None):
     # The one constructor node.py calls: the plan, then the ledger over it.
     return Ledger(build_plan(vlm_method, steps, batch, upscale_model, clip_load), unique_id=unique_id)
+
+
+def build_caption_ledger(n_captions, unique_id=None):
+    """The ledger for a run that writes captions and nothing else (the Captions test node):
+    one CAPTIONS segment with one chunk per caption, already open. Without it that node
+    emits from two bars per caption, core's per-token bar and the caption pass's own, and
+    the display resets at every caption."""
+    count = max(int(n_captions), 1)
+    units = count * K_CAPTION
+    ledger = Ledger(((CAPTIONS, units),), unique_id=unique_id)
+    ledger.open(CAPTIONS, units, chunks=count)
+    return ledger

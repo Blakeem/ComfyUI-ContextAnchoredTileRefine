@@ -28,6 +28,14 @@ def _vlm_method():
     return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on vision tokens of its own crop and its slice of the entire image, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to set the token counts and write your own tile prompts."})
 
 
+def _prompt():
+    # The image's prompt, defined once so both VL nodes and the Captions test node offer the
+    # same widget. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt)
+    # and reaches the VL model's question only, never the DiT, so the A/B rule that no text
+    # conditions a tile still holds.
+    return ("STRING", {"default": "", "multiline": True, "tooltip": "The prompt the image was made from. It fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it writes each tile's caption. A preset without {PROMPT} ignores it, and one with it needs it filled."})
+
+
 def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
     # The /8 and range rules for the four tile-geometry widgets, in ONE place: the production
     # nodes and the tile testing nodes both solve the same grid, so a rule that lived in only
@@ -142,9 +150,11 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     the settings file's [vision] table. Positionally exact, free of text demands, and aware
     of its place in the image, so tiles neither re-instantiate prompt objects they don't
     contain nor drift apart in story (gaze, tone, palette). The guider's positive text is
-    ignored by construction; its negative still applies. No prompt input exists because none
-    is needed. ControlNet is ignored on this node (the per-tile positive carries no control
-    chain); use the base Context-Anchored Tile Refine node for control.
+    ignored by construction; its negative still applies. The `prompt` input is not DiT text:
+    it fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it
+    writes a tile's caption (captions.with_prompt). ControlNet is ignored on this node (the
+    per-tile positive carries no control chain); use the base Context-Anchored Tile Refine
+    node for control.
     vlm_method picks WHICH surface fills that positive: the vision rows (default), a
     per-tile VLM caption of the tile's own crop, or both (see captions.py).
     With a mask, the canvas rows come from the FULL image, so a masked refine stays aware
@@ -163,6 +173,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). The guider's positive prompt is ignored and its negative still applies."})
+        input_types["required"]["prompt"] = _prompt()
         # The node's own id, so the ledger can write the live phase line under its progress
         # bar. Hidden inputs create no socket and no widget and never enter widgets_values,
         # so this is invisible to the append-only widget rule above. ComfyUI passes it to
@@ -179,11 +190,16 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
 
         return captions.settings_fingerprint()
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None, unique_id=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, prompt, mask=None, unique_id=None):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
-        from . import progress, sampling
+        from . import captions, progress, sampling
+
+        # The settings file is read HERE and the block handed down, so the prompt input fills
+        # the preset's {PROMPT} before the engine's pre-pass, and a blank prompt against a
+        # preset that asks for one fails before any VAE or VL encode.
+        preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
 
         # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
         # run's shape is in hand, and one owner means the engine never has to decide whether
@@ -192,7 +208,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         ledger = progress.build_ledger(vlm_method, int(sigmas.numel()) - 1, batch=int(image.shape[0]),
                                        unique_id=unique_id)
         with ledger:
-            refined = sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, progress=ledger)
+            refined = sampling.refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=mask, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, progress=ledger, preset=preset)
             ledger.finish()
         return (refined,)
 
@@ -204,9 +220,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     (NOISE / SAMPLER / SIGMAS / GUIDER) built in-process from widgets by upscale.py, and
     the whole-image upscale stage run first so no tile is ever resampled. No mask input
     (use ContextAnchoredTileRefineVL for a region pass) and no positive prompt input —
-    the positive is a placeholder that every tile's vision rows replace, so a prompt
+    the positive is a placeholder that every tile's vision rows replace, so DiT text
     here would only re-admit the phantom objects the VL path exists to remove. The
-    optional negative is the one text channel that still applies.
+    `prompt` input fills {PROMPT} in the caption preset's instructions instead, so it
+    reaches the VL model's question and never the DiT. The optional negative is the one
+    text channel that still applies.
     vlm_method picks WHICH surface fills that positive: the vision rows (default), a
     per-tile VLM caption of the tile's own crop, or both (see captions.py).
     """
@@ -239,6 +257,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 # and these keep their defaults — the pre-select behaviour.
                 "anchor_source": _anchor_source(),
                 "vlm_method": _vlm_method(),
+                "prompt": _prompt(),
             },
             "optional": {
                 "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model, run over the entire image before any tiling."}),
@@ -260,7 +279,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
 
         return captions.settings_fingerprint()
 
-    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None, unique_id=None):
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, prompt, upscale_model=None, negative=None, unique_id=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
@@ -274,10 +293,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         noise = None
 
         _validate_image(image)
-        # The settings file is read FIRST: this node runs the upscale-model pass and the
-        # text-encoder load before the engine's own read in sync._prepare_run, so a typo in
-        # the file would otherwise cost minutes of GPU time to reach.
-        captions.resolve_method(vlm_method)
+        # The settings file is read FIRST and the block handed down: this node runs the
+        # upscale-model pass and the text-encoder load before the engine's pre-pass, so a typo
+        # in the file, or a blank prompt against a preset that asks for one, would otherwise
+        # cost minutes of GPU time to reach.
+        preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
         # pass), and `with` scopes the comfy.utils.ProgressBar shim to the whole run.
@@ -322,6 +342,6 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             # unsupported sampler before any encode, and core's sampler_object wraps several names
             # in a private function (dpm_fast -> dpm_fast_function), so resolving the rejection off
             # the OBJECT alone would name something this node's widget never offered.
-            refined = sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, progress=ledger)
+            refined = sampling.refine_image(upscaled, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, progress=ledger, preset=preset)
             ledger.finish()
         return (refined,)
