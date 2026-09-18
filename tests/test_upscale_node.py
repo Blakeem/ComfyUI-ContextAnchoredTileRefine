@@ -200,8 +200,8 @@ def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypa
     # the upscale-model pass and the text-encoder load each cost minutes to reach.
     recorded = {}
 
-    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
-        _drive(monkeypatch, recorded=recorded, prompt="")
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
+        _drive(monkeypatch, recorded=recorded, prompt=None)
 
     assert recorded["prepare_upscaled"] is None
     assert recorded["encode_empty"] is None

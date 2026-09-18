@@ -32,9 +32,6 @@ VL_REQUIRED_ORDER = [
     "anchor_source",
     "vlm_method",
     "clip",
-    # The image's prompt for the caption question, appended last for the same positional
-    # restore reason as the two selects.
-    "prompt",
 ]
 
 TYPE_BY_NAME = {
@@ -57,12 +54,11 @@ TYPE_BY_NAME = {
 ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
 # One option per caption surface per settings.toml preset, grouped by preset and in file
 # order, with the vision-only surface leading. Pinned as the SHIPPED file writes it: a preset
-# added or renamed there changes what every saved workflow's combo can hold. The FIRST
-# preset's two options carry no label, so they are byte-identical to what the widget offered
-# before the presets existed.
+# added or renamed there changes what every saved workflow's combo can hold. Every preset is
+# labeled, the first included, so the selector names the preset the default asks.
 VLM_METHOD_OPTIONS = [
     "vision tokens",
-    "vision tokens and captions", "captions",
+    "vision tokens and captions (prompted)", "captions (prompted)",
     "vision tokens and captions (standard)", "captions (standard)",
     "vision tokens and captions (artwork)", "captions (artwork)",
 ]
@@ -171,11 +167,11 @@ def test_validate_inputs_rejects_below_min():
 
 def test_validate_inputs_accepts_a_caption_option_the_selector_no_longer_offers():
     # Naming vlm_method in VALIDATE_INPUTS is what bypasses core's own combo-list check
-    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). The
-    # default preset's LABELED form is the case that needs it: the selector offers that preset
-    # unlabeled, so a workflow saved while it was labeled would otherwise fail to queue with
-    # "Value not in list" even though resolve_method finds its block.
-    for saved in ("vision tokens and captions (standard)", "captions (standard)"):
+    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). The bare
+    # caption strings are the case that needs it: a workflow saved before the presets existed
+    # holds them, the selector no longer offers them, and they would otherwise fail to queue
+    # with "Value not in list" even though resolve_method routes them to the first preset.
+    for saved in ("vision tokens and captions", "captions"):
         assert ContextAnchoredTileRefineVL.VALIDATE_INPUTS(vlm_method=saved) is True, saved
     for current in VLM_METHOD_OPTIONS:
         assert ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(vlm_method=current) is True, current
@@ -197,11 +193,12 @@ def test_vl_required_order_is_pinned():
     assert input_types["required"]["clip"][0] == "CLIP"
 
 
-def test_vl_optional_is_mask_only():
+def test_vl_optional_is_mask_then_prompt():
     # The masked VL refine encodes the whole image and offsets the region's tiles
-    # into its frame (vl.py slice_indices offsets), so the mask input is supported.
+    # into its frame (vl.py slice_indices offsets), so the mask input is supported. The prompt
+    # is a socket, so its place carries no positional-restore risk.
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(input_types["optional"]) == ["mask"]
+    assert list(input_types["optional"]) == ["mask", "prompt"]
 
 
 def test_vl_every_input_has_a_tooltip():
@@ -220,7 +217,7 @@ def test_vl_method_widget_is_pinned(comfy_stubs):
     for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
         definition = node.INPUT_TYPES()["required"]["vlm_method"]
         assert definition[0] == VLM_METHOD_OPTIONS, node.__name__
-        assert definition[1]["default"] == "vision tokens and captions", node.__name__
+        assert definition[1]["default"] == "vision tokens and captions (prompted)", node.__name__
         assert definition[1]["default"] in definition[0], node.__name__
     assert list(captions.vlm_methods()) == VLM_METHOD_OPTIONS
 
@@ -271,11 +268,11 @@ def test_the_hidden_node_id_adds_no_socket_and_no_widget(comfy_stubs):
     # extra name in either one would shift every saved workflow's tuned values.
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
     assert list(vl["required"]) == VL_REQUIRED_ORDER
-    assert list(vl["optional"]) == ["mask"]
+    assert list(vl["optional"]) == ["mask", "prompt"]
 
     upscale = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     assert list(upscale["required"]) == UPSCALE_REQUIRED_ORDER
-    assert list(upscale["optional"]) == ["upscale_model", "negative"]
+    assert list(upscale["optional"]) == ["upscale_model", "negative", "prompt"]
 
 
 def test_vl_node_class_attributes():
@@ -335,7 +332,6 @@ UPSCALE_REQUIRED_ORDER = [
     # compatible past the end of a legacy saved array. Same rule as VL_REQUIRED_ORDER.
     "anchor_source",
     "vlm_method",
-    "prompt",
 ]
 
 UPSCALE_TYPE_BY_NAME = {
@@ -372,7 +368,7 @@ UPSCALE_WIDGET_OPTIONS = {
     "max_tile_width": {"default": 1536, "min": 256, "max": 16384, "step": 8},
     "max_tile_height": {"default": 2048, "min": 256, "max": 16384, "step": 8},
     "anchor_source": {"default": "source image"},
-    "vlm_method": {"default": "vision tokens and captions"},
+    "vlm_method": {"default": "vision tokens and captions (prompted)"},
     "context_anchor": {"default": 32, "min": 0, "max": 512, "step": 8},
     "context_overlap": {"default": 32, "min": 0, "max": 512, "step": 8},
 }
@@ -383,9 +379,10 @@ def test_upscale_required_order_is_pinned(comfy_stubs):
     assert list(input_types["required"]) == UPSCALE_REQUIRED_ORDER
 
 
-def test_upscale_optional_is_model_and_negative(comfy_stubs):
+def test_upscale_optional_is_model_negative_then_prompt(comfy_stubs):
+    # The prompt sits under the negative, where the two text links read together.
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
-    assert list(input_types["optional"]) == ["upscale_model", "negative"]
+    assert list(input_types["optional"]) == ["upscale_model", "negative", "prompt"]
 
 
 def test_upscale_has_no_mask_or_positive_text_input(comfy_stubs):
@@ -400,15 +397,15 @@ def test_upscale_has_no_mask_or_positive_text_input(comfy_stubs):
         assert absent not in all_inputs, absent
 
 
-def test_prompt_widget_is_pinned_on_both_vl_nodes(comfy_stubs):
+def test_prompt_socket_is_pinned_on_both_vl_nodes(comfy_stubs):
     # ONE definition (node._prompt) serves both nodes and the Captions test node, so the
-    # tooltip and the default cannot drift. Default "" is what a saved workflow restores past
-    # the end of its widgets_values, and the shipped `standard` and `artwork` presets ignore it.
+    # tooltip cannot drift. forceInput makes it a socket with no widget, so it never enters
+    # widgets_values and an older saved workflow loads with it unconnected.
     for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
-        definition = node.INPUT_TYPES()["required"]["prompt"]
+        definition = node.INPUT_TYPES()["optional"]["prompt"]
         assert definition[0] == "STRING", node.__name__
-        assert definition[1]["default"] == "", node.__name__
-        assert definition[1]["multiline"] is True, node.__name__
+        assert definition[1]["forceInput"] is True, node.__name__
+        assert "default" not in definition[1], node.__name__
         assert "{PROMPT}" in definition[1]["tooltip"], node.__name__
 
 
@@ -486,4 +483,4 @@ def test_upscale_input_types_does_not_leak_into_the_other_nodes(comfy_stubs):
 
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
     assert list(vl["required"]) == VL_REQUIRED_ORDER
-    assert list(vl["optional"]) == ["mask"]
+    assert list(vl["optional"]) == ["mask", "prompt"]

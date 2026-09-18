@@ -421,6 +421,8 @@ class ContextAnchoredTileTestCaptions:
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the tile the VL model reads. Use 0 for the crop's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels."}),
                 "tiles": ("STRING", {"default": "", "tooltip": "Comma separated tile numbers, as Tile Test: Layout labels them. Empty captions every tile. The same list comes out of the tiles output for Tile Test: Render."}),
                 "with_neighbors": ("BOOLEAN", {"default": True, "tooltip": "Caption the bordering tiles of every named tile as well, which Tile Test: Render needs when its with_neighbors is on. Off captions the named tiles only."}),
+            },
+            "optional": {
                 "prompt": node._prompt(),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -453,7 +455,7 @@ class ContextAnchoredTileTestCaptions:
 
     def caption_tiles(self, image, layout, clip, preset, tile_instruction, style_caption,
                       style_instruction, max_tokens, caption_megapixels, tiles, with_neighbors,
-                      prompt, unique_id=None):
+                      prompt=None, unique_id=None):
         # ---- inputs
         if image.shape[0] != 1:
             raise ValueError(

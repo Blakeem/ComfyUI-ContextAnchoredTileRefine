@@ -95,12 +95,13 @@ def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monk
 
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
+    # No prompt keyword at all is what ComfyUI passes for an unconnected optional socket.
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
         ContextAnchoredTileRefineVL().refine(
             image=torch.rand(1, 96, 104, 3), guider=FakeGuider(), sampler=object(),
             sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
             max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
-            anchor_source="source image", vlm_method="captions", clip=object(), prompt="   ")
+            anchor_source="source image", vlm_method="captions", clip=object())
 
 
 def test_connected_mask_refines(comfy_stubs):

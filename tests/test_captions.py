@@ -215,21 +215,21 @@ def test_settings_toml_ships_the_owner_tested_wording():
 def test_every_preset_adds_one_option_per_caption_surface():
     # A preset's own two options sit together and in file order, so the selector reads the way
     # the settings file was written. The vision-only surface leads and carries no label,
-    # because it asks the VLM nothing. The FIRST preset's two options carry no label either,
-    # which is what makes them the strings a pre-preset workflow already holds.
+    # because it asks the VLM nothing. Every preset's options carry its label, the first
+    # included, so the selector names the preset the default asks.
     assert list(captions.vlm_methods()) == [
         "vision tokens",
-        "vision tokens and captions", "captions",
+        "vision tokens and captions (prompted)", "captions (prompted)",
         "vision tokens and captions (standard)", "captions (standard)",
         "vision tokens and captions (artwork)", "captions (artwork)",
     ]
-    assert captions.default_vlm_method() == captions.VLM_METHOD_VISION_CAPTIONS
+    assert captions.default_vlm_method() == "vision tokens and captions (prompted)"
 
 
 def test_the_default_preset_answers_to_both_forms_of_its_name():
-    # The selector offers the default preset unlabeled, but a workflow that spells its label
-    # out (what a workflow saved between 1.6.0 and the default preset carries) must reach the
-    # SAME block rather than a "no such preset" error.
+    # The selector offers the default preset labeled, and a workflow saved before the presets
+    # existed holds the bare string. Both must reach the SAME block rather than a "no such
+    # preset" error.
     unlabeled = captions.resolve_method("vision tokens and captions")
     labeled = captions.resolve_method("vision tokens and captions (prompted)")
     assert unlabeled == labeled
@@ -275,15 +275,17 @@ def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder():
         preset = captions.resolve_method(method)
         assert captions.with_prompt(preset, "a fox") == preset, method
         assert captions.with_prompt(preset, "") == preset, method
+        assert captions.with_prompt(preset, None) == preset, method
 
 
 @pytest.mark.parametrize(("tile", "style", "key"), [
     ('Full prompt: "{PROMPT}".', "", "tile_caption_instruction"),
     ("Name it.", "Style of {PROMPT}.", "global_style_instruction"),
 ])
-@pytest.mark.parametrize("prompt", ["", "   \n"])
-def test_with_prompt_refuses_a_blank_prompt_where_an_instruction_asks_for_one(tile, style, key, prompt):
-    with pytest.raises(RuntimeError, match=rf"preset 'demo' asks for \{{PROMPT\}} in its {key}.*prompt input is empty"):
+# None is the unconnected socket, "" and whitespace a connected primitive with nothing in it.
+@pytest.mark.parametrize("prompt", [None, "", "   \n"])
+def test_with_prompt_refuses_a_missing_prompt_where_an_instruction_asks_for_one(tile, style, key, prompt):
+    with pytest.raises(RuntimeError, match=rf"preset 'demo' asks for \{{PROMPT\}} in its {key}.*not connected or is empty"):
         captions.with_prompt(_prompted_preset(tile=tile, style=style), prompt)
 
 
@@ -302,22 +304,20 @@ def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
     # The frontend caches a node's definition at startup, so a list that changed between
     # calls would offer values the backend then rejects. A preset added mid-session must
     # therefore NOT appear until a restart, which is what the cache buys — so the file is
-    # rewritten here with no clear and the first answer has to stand. The renamed preset is
-    # the SECOND one, because the first is the unlabeled default and a rename there would not
-    # show in the list at all.
+    # rewritten here with no clear and the first answer has to stand.
     two_presets = GOOD_SETTINGS + PRESET.replace("[presets.demo]", "[presets.extra]")
-    unlabeled = ["vision tokens", "vision tokens and captions", "captions"]
+    first = ["vision tokens", "vision tokens and captions (demo)", "captions (demo)"]
     path = write_settings(tmp_path, two_presets, monkeypatch)
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
+        *first, "vision tokens and captions (extra)", "captions (extra)"]
 
     path.write_text(two_presets.replace("[presets.extra]", "[presets.added]"))
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
+        *first, "vision tokens and captions (extra)", "captions (extra)"]
 
     captions.vlm_methods.cache_clear()             # a restart, and the new preset appears
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (added)", "captions (added)"]
+        *first, "vision tokens and captions (added)", "captions (added)"]
 
 
 @pytest.mark.parametrize(("vlm_method", "surface", "label"), [

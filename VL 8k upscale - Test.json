@@ -1,336 +1,1315 @@
 {
-  "283": {
-    "inputs": {
-      "unet_name": "krea2SATDirtyrealism_krea2SAT.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "Load Diffusion Model"
-    }
-  },
-  "291": {
-    "inputs": {
-      "value": 52
-    },
-    "class_type": "int",
-    "_meta": {
-      "title": "Steps"
-    }
-  },
-  "294": {
-    "inputs": {
-      "clip_name": "qwen3-vl-4b-heretic_int8.safetensors",
-      "type": "krea2",
-      "device": "default"
-    },
-    "class_type": "CLIPLoader",
-    "_meta": {
-      "title": "Load CLIP"
-    }
-  },
-  "295": {
-    "inputs": {
-      "vae_name": "krea2RealVae_v10.safetensors"
-    },
-    "class_type": "VAELoader",
-    "_meta": {
-      "title": "Load VAE"
-    }
-  },
-  "306": {
-    "inputs": {
-      "value": 4
-    },
-    "class_type": "int",
-    "_meta": {
-      "title": "Upscale Multiplier"
-    }
-  },
-  "309": {
-    "inputs": {
-      "value": 1024
-    },
-    "class_type": "int",
-    "_meta": {
-      "title": "Width"
-    }
-  },
-  "310": {
-    "inputs": {
-      "value": 576
-    },
-    "class_type": "int",
-    "_meta": {
-      "title": "Height"
-    }
-  },
-  "315": {
-    "inputs": {
-      "value": 3.5
-    },
-    "class_type": "PrimitiveFloat",
-    "_meta": {
-      "title": "CFG"
-    }
-  },
-  "318": {
-    "inputs": {
-      "text": [
-        "346",
-        0
+  "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
+  "revision": 0,
+  "last_node_id": 394,
+  "last_link_id": 1088,
+  "nodes": [
+    {
+      "id": 325,
+      "type": "UpscaleModelLoader",
+      "pos": [
+        2010,
+        740
       ],
-      "clip": [
-        "294",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Negative Prompt)"
-    }
-  },
-  "325": {
-    "inputs": {
-      "model_name": "4xFaceUpDAT.safetensors"
-    },
-    "class_type": "UpscaleModelLoader",
-    "_meta": {
-      "title": "Load Upscale Model"
-    }
-  },
-  "345": {
-    "inputs": {
-      "value": 4
-    },
-    "class_type": "int",
-    "_meta": {
-      "title": "Batch Size"
-    }
-  },
-  "346": {
-    "inputs": {
-      "value": "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
-    },
-    "class_type": "PrimitiveStringMultiline",
-    "_meta": {
-      "title": "Negative Prompt"
-    }
-  },
-  "373": {
-    "inputs": {
-      "images": [
-        "385",
-        0
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "Preview Image"
-    }
-  },
-  "375": {
-    "inputs": {
-      "filename_prefix": "ComfyUI-2x",
-      "images": [
-        "373",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
-  "376": {
-    "inputs": {
-      "mode": "on empty queue",
-      "volume": 0.5,
-      "file": "notify.mp3",
-      "any": [
-        "373",
-        0
-      ]
-    },
-    "class_type": "PlaySound|pysssss",
-    "_meta": {
-      "title": "PlaySound 🐍"
-    }
-  },
-  "381": {
-    "inputs": {
-      "image": "ComfyUI-2x_00788_.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Load Image"
-    }
-  },
-  "382": {
-    "inputs": {
-      "upscale_by": 2,
-      "max_tile_width": 2048,
-      "max_tile_height": 1728,
-      "context_anchor": 32,
-      "context_overlap": 256,
-      "image": [
-        "381",
-        0
-      ]
-    },
-    "class_type": "ContextAnchoredTileTestLayout",
-    "_meta": {
-      "title": "Tile Test: Layout"
-    }
-  },
-  "383": {
-    "inputs": {
-      "image": [
-        "381",
-        0
+      "size": [
+        320,
+        70
       ],
-      "layout": [
-        "382",
-        0
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "UPSCALE_MODEL",
+          "type": "UPSCALE_MODEL",
+          "slot_index": 0,
+          "links": [
+            1055
+          ]
+        }
       ],
-      "upscale_model": [
-        "325",
-        0
-      ]
+      "properties": {
+        "Node name for S&R": "UpscaleModelLoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "widgets_values": [
+        "4xFaceUpDAT.safetensors"
+      ],
+      "widgets_values_named": {
+        "model_name": "4xFaceUpDAT.safetensors"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
     },
-    "class_type": "ContextAnchoredTileTestUpscale",
-    "_meta": {
-      "title": "Tile Test: Upscale"
-    }
-  },
-  "385": {
-    "inputs": {
-      "seed": 42,
-      "sampler_name": "dpmpp_2m_sde",
-      "scheduler": "sgm_uniform",
-      "steps": 20,
-      "cfg": [
-        "315",
-        0
+    {
+      "id": 370,
+      "type": "Krea2ControlLoRALoader",
+      "pos": [
+        2400,
+        300
       ],
-      "denoise": 0.35,
-      "anchor_source": "source image",
-      "surface": "vision tokens and captions",
-      "canvas_tokens": 20,
-      "crop_tokens": 30,
-      "tiles": [
-        "389",
-        2
+      "size": [
+        470,
+        120
       ],
-      "with_neighbors": false,
-      "image": [
-        "383",
-        0
+      "flags": {},
+      "order": 10,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1022
+        }
       ],
-      "layout": [
-        "382",
-        0
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1062
+          ]
+        }
       ],
-      "model": [
-        "283",
-        0
-      ],
-      "clip": [
-        "294",
-        0
-      ],
-      "vae": [
-        "295",
-        0
-      ],
-      "captions": [
-        "389",
-        0
-      ],
-      "negative": [
-        "318",
-        0
-      ]
-    },
-    "class_type": "ContextAnchoredTileTestRender",
-    "_meta": {
-      "title": "Tile Test: Render"
-    }
-  },
-  "386": {
-    "inputs": {
-      "value": [
-        "389",
+      "properties": {
+        "Node name for S&R": "Krea2ControlLoRALoader"
+      },
+      "widgets_values": [
+        "chroma-flash-heun_r32-fp32.safetensors",
         1
-      ]
-    },
-    "class_type": "PrimitiveStringMultiline",
-    "_meta": {
-      "title": "Text (Multiline)"
-    }
-  },
-  "387": {
-    "inputs": {
-      "images": [
-        "382",
-        1
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "Preview Image"
-    }
-  },
-  "388": {
-    "inputs": {
-      "images": [
-        "385",
-        1
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "Preview Image"
-    }
-  },
-  "389": {
-    "inputs": {
-      "preset": "artwork",
-      "tile_instruction": "",
-      "style_caption": true,
-      "style_instruction": "",
-      "max_tokens": 0,
-      "caption_megapixels": 0.786432,
-      "tiles": "1",
-      "with_neighbors": false,
-      "image": [
-        "383",
-        0
       ],
-      "layout": [
-        "382",
-        0
+      "widgets_values_named": {
+        "lora_name": "chroma-flash-heun_r32-fp32.safetensors",
+        "strength": 1
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 375,
+      "type": "SaveImage",
+      "pos": [
+        6300,
+        480
       ],
-      "clip": [
-        "294",
-        0
+      "size": [
+        230,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1036
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "ComfyUI-2x"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "ComfyUI-2x"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 376,
+      "type": "PlaySound|pysssss",
+      "pos": [
+        6280,
+        750
+      ],
+      "size": [
+        240,
+        150
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "any",
+          "type": "*",
+          "link": 1037
+        }
+      ],
+      "outputs": [
+        {
+          "name": "*",
+          "shape": 6,
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PlaySound|pysssss"
+      },
+      "widgets_values": [
+        "on empty queue",
+        0.5,
+        "notify.mp3"
+      ],
+      "widgets_values_named": {
+        "mode": "on empty queue",
+        "volume": 0.5,
+        "file": "notify.mp3"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 373,
+      "type": "PreviewImage",
+      "pos": [
+        5740,
+        290
+      ],
+      "size": [
+        520,
+        710
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1071
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            1036,
+            1037
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 283,
+      "type": "UNETLoader",
+      "pos": [
+        1990,
+        300
+      ],
+      "size": [
+        360,
+        90
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1022
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "krea2SATDirtyrealism_krea2SAT.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "krea2SATDirtyrealism_krea2SAT.safetensors",
+        "weight_dtype": "default"
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 295,
+      "type": "VAELoader",
+      "pos": [
+        2010,
+        610
+      ],
+      "size": [
+        320,
+        70
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            1063
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "krea2RealVae_v10.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "krea2RealVae_v10.safetensors"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 294,
+      "type": "CLIPLoader",
+      "pos": [
+        1990,
+        440
+      ],
+      "size": [
+        360,
+        120
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            864,
+            1067,
+            1078
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3-vl-4b-heretic_int8.safetensors",
+        "krea2",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3-vl-4b-heretic_int8.safetensors",
+        "type": "krea2",
+        "device": "default"
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 382,
+      "type": "ContextAnchoredTileTestLayout",
+      "pos": [
+        4980,
+        300
+      ],
+      "size": [
+        270,
+        200
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1053
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "links": [
+            1054,
+            1066,
+            1074
+          ]
+        },
+        {
+          "name": "overlay",
+          "type": "IMAGE",
+          "links": [
+            1069
+          ]
+        },
+        {
+          "name": "tile_count",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestLayout"
+      },
+      "widgets_values": [
+        4,
+        2048,
+        1728,
+        32,
+        256
+      ],
+      "widgets_values_named": {
+        "upscale_by": 4,
+        "max_tile_width": 2048,
+        "max_tile_height": 1728,
+        "context_anchor": 32,
+        "context_overlap": 256
+      }
+    },
+    {
+      "id": 296,
+      "type": "Note",
+      "pos": [
+        4740,
+        300
+      ],
+      "size": [
+        230,
+        250
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Dimensions",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "Near 1 megapixel and a multiple of 64\n\n1024 x 1024 (1:1 Square)\n1152 x 896 (9:7)\n896 x 1152 (7:9)\n1216 x 832 (19:13)\n832 x 1216 (13:19)\n1344 x 768 (7:4 Horizontal)\n768 x 1344 (4:7 Vertical)\n1536 x 640 (12:5 Horizontal)\n640 x 1536 (5:12 Vertical)\n\nOther:\n768 x 1024 (3:4)\n768 x 1152 (4:6)\n768 x 1280 (3:5)\n1024 × 576 (16:9 widescreen)\n768 x 1152 (2:3 Portrait)"
+      ],
+      "widgets_values_named": {
+        "text": "Near 1 megapixel and a multiple of 64\n\n1024 x 1024 (1:1 Square)\n1152 x 896 (9:7)\n896 x 1152 (7:9)\n1216 x 832 (19:13)\n832 x 1216 (13:19)\n1344 x 768 (7:4 Horizontal)\n768 x 1344 (4:7 Vertical)\n1536 x 640 (12:5 Horizontal)\n640 x 1536 (5:12 Vertical)\n\nOther:\n768 x 1024 (3:4)\n768 x 1152 (4:6)\n768 x 1280 (3:5)\n1024 × 576 (16:9 widescreen)\n768 x 1152 (2:3 Portrait)"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 392,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        4330,
+        330
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1083
+          ]
+        }
+      ],
+      "title": "VLM Tile Caption Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
+      ],
+      "widgets_values_named": {
+        "value": "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
+      }
+    },
+    {
+      "id": 393,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        4330,
+        590
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1084
+          ]
+        }
+      ],
+      "title": "VLM Overall Style Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Concise prose containing only the style of media used and the general style within that type of media."
+      ],
+      "widgets_values_named": {
+        "value": "Concise prose containing only the style of media used and the general style within that type of media."
+      }
+    },
+    {
+      "id": 389,
+      "type": "ContextAnchoredTileTestCaptions",
+      "pos": [
+        4750,
+        590
+      ],
+      "size": [
+        400,
+        390
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1077
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1074
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1078
+        },
+        {
+          "name": "prompt",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1085
+        },
+        {
+          "name": "tile_instruction",
+          "type": "STRING",
+          "widget": {
+            "name": "tile_instruction"
+          },
+          "link": 1083
+        },
+        {
+          "name": "style_instruction",
+          "type": "STRING",
+          "widget": {
+            "name": "style_instruction"
+          },
+          "link": 1084
+        }
+      ],
+      "outputs": [
+        {
+          "name": "captions",
+          "type": "CATR_CAPTIONS",
+          "links": [
+            1076,
+            1079
+          ]
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "tiles",
+          "type": "STRING",
+          "links": [
+            1080
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestCaptions"
+      },
+      "widgets_values": [
+        "custom instructions",
+        "",
+        true,
+        "",
+        768,
+        0.15,
+        "",
+        false
+      ],
+      "widgets_values_named": {
+        "preset": "custom instructions",
+        "tile_instruction": "",
+        "style_caption": true,
+        "style_instruction": "",
+        "max_tokens": 768,
+        "caption_megapixels": 0.15,
+        "tiles": "",
+        "with_neighbors": false
+      }
+    },
+    {
+      "id": 383,
+      "type": "ContextAnchoredTileTestUpscale",
+      "pos": [
+        4390,
+        860
+      ],
+      "size": [
+        240,
+        90
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1073
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1054
+        },
+        {
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": 1055
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1077,
+            1081
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestUpscale"
+      }
+    },
+    {
+      "id": 390,
+      "type": "PreviewAny",
+      "pos": [
+        4330,
+        1070
+      ],
+      "size": [
+        560,
+        670
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1079
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 391,
+      "type": "LiebsPicker",
+      "pos": [
+        4960,
+        1090
+      ],
+      "size": [
+        270,
+        90
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1081
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGES",
+          "type": "IMAGE",
+          "links": [
+            1082
+          ]
+        },
+        {
+          "name": "IMAGES",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LiebsPicker"
+      },
+      "widgets_values": [
+        "none",
+        null,
+        null
+      ],
+      "widgets_values_named": {
+        "selected": "none",
+        "picker_tab_id": null,
+        "title": null
+      }
+    },
+    {
+      "id": 385,
+      "type": "ContextAnchoredTileTestRender",
+      "pos": [
+        5420,
+        310
+      ],
+      "size": [
+        270,
+        470
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1082
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1066
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1062
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1067
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1063
+        },
+        {
+          "name": "captions",
+          "shape": 7,
+          "type": "CATR_CAPTIONS",
+          "link": 1076
+        },
+        {
+          "name": "negative",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 1064
+        },
+        {
+          "name": "tiles",
+          "type": "STRING",
+          "widget": {
+            "name": "tiles"
+          },
+          "link": 1080
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tiles",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            1071
+          ]
+        },
+        {
+          "name": "blocks",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestRender"
+      },
+      "widgets_values": [
+        42,
+        "fixed",
+        "dpmpp_2m_sde",
+        "sgm_uniform",
+        20,
+        3.5,
+        0.35,
+        "source image",
+        "vision tokens and captions",
+        20,
+        30,
+        "1",
+        false
+      ],
+      "widgets_values_named": {
+        "seed": 42,
+        "control_after_generate": "fixed",
+        "sampler_name": "dpmpp_2m_sde",
+        "scheduler": "sgm_uniform",
+        "steps": 20,
+        "cfg": 3.5,
+        "denoise": 0.35,
+        "anchor_source": "source image",
+        "surface": "vision tokens and captions",
+        "canvas_tokens": 20,
+        "crop_tokens": 30,
+        "tiles": "1",
+        "with_neighbors": false
+      }
+    },
+    {
+      "id": 394,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2400,
+        470
+      ],
+      "size": [
+        510,
+        160
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1085
+          ]
+        }
+      ],
+      "title": "Positive Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "value": ""
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 346,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2380,
+        680
+      ],
+      "size": [
+        520,
+        160
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            865
+          ]
+        }
+      ],
+      "title": "Negative Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "blurry, Bokeh, noise, jpeg compression, scribbles, AI generated, shredded cloth"
+      ],
+      "widgets_values_named": {
+        "value": "blurry, Bokeh, noise, jpeg compression, scribbles, AI generated, shredded cloth"
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 381,
+      "type": "LoadImage",
+      "pos": [
+        2940,
+        310
+      ],
+      "size": [
+        290,
+        320
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1053,
+            1073
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "ComfyUI-2x_00815_.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "ComfyUI-2x_00815_.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 387,
+      "type": "PreviewImage",
+      "pos": [
+        3290,
+        320
+      ],
+      "size": [
+        840,
+        590
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1069
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 318,
+      "type": "CLIPTextEncode",
+      "pos": [
+        2380,
+        890
+      ],
+      "size": [
+        290,
+        110
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 864
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 865
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            1064
+          ]
+        }
+      ],
+      "title": "CLIP Text Encode (Negative Prompt)",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "text": ""
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    }
+  ],
+  "links": [
+    [
+      864,
+      294,
+      0,
+      318,
+      0,
+      "CLIP"
+    ],
+    [
+      865,
+      346,
+      0,
+      318,
+      1,
+      "STRING"
+    ],
+    [
+      1022,
+      283,
+      0,
+      370,
+      0,
+      "MODEL"
+    ],
+    [
+      1036,
+      373,
+      0,
+      375,
+      0,
+      "IMAGE"
+    ],
+    [
+      1037,
+      373,
+      0,
+      376,
+      0,
+      "IMAGE"
+    ],
+    [
+      1053,
+      381,
+      0,
+      382,
+      0,
+      "IMAGE"
+    ],
+    [
+      1054,
+      382,
+      0,
+      383,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1055,
+      325,
+      0,
+      383,
+      2,
+      "UPSCALE_MODEL"
+    ],
+    [
+      1062,
+      370,
+      0,
+      385,
+      2,
+      "MODEL"
+    ],
+    [
+      1063,
+      295,
+      0,
+      385,
+      4,
+      "VAE"
+    ],
+    [
+      1064,
+      318,
+      0,
+      385,
+      6,
+      "CONDITIONING"
+    ],
+    [
+      1066,
+      382,
+      0,
+      385,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1067,
+      294,
+      0,
+      385,
+      3,
+      "CLIP"
+    ],
+    [
+      1069,
+      382,
+      1,
+      387,
+      0,
+      "IMAGE"
+    ],
+    [
+      1071,
+      385,
+      0,
+      373,
+      0,
+      "IMAGE"
+    ],
+    [
+      1073,
+      381,
+      0,
+      383,
+      0,
+      "IMAGE"
+    ],
+    [
+      1074,
+      382,
+      0,
+      389,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1076,
+      389,
+      0,
+      385,
+      5,
+      "CATR_CAPTIONS"
+    ],
+    [
+      1077,
+      383,
+      0,
+      389,
+      0,
+      "IMAGE"
+    ],
+    [
+      1078,
+      294,
+      0,
+      389,
+      2,
+      "CLIP"
+    ],
+    [
+      1079,
+      389,
+      0,
+      390,
+      0,
+      "CATR_CAPTIONS"
+    ],
+    [
+      1080,
+      389,
+      2,
+      385,
+      7,
+      "STRING"
+    ],
+    [
+      1081,
+      383,
+      0,
+      391,
+      0,
+      "IMAGE"
+    ],
+    [
+      1082,
+      391,
+      0,
+      385,
+      0,
+      "IMAGE"
+    ],
+    [
+      1083,
+      392,
+      0,
+      389,
+      4,
+      "STRING"
+    ],
+    [
+      1084,
+      393,
+      0,
+      389,
+      5,
+      "STRING"
+    ],
+    [
+      1085,
+      394,
+      0,
+      389,
+      3,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 8,
+      "title": "Captions",
+      "bounding": [
+        4170,
+        210,
+        1180,
+        800
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 9,
+      "title": "Generate",
+      "bounding": [
+        1950,
+        210,
+        2210,
+        800
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 12,
+      "title": "Upscale",
+      "bounding": [
+        5360,
+        210,
+        1180,
+        800
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.9229599817706672,
+      "offset": [
+        -3570.6148403594498,
+        110.03778000309902
       ]
     },
-    "class_type": "ContextAnchoredTileTestCaptions",
-    "_meta": {
-      "title": "Tile Test: Captions"
-    }
+    "frontendVersion": "1.52.7"
   },
-  "390": {
-    "inputs": {
-      "source": [
-        "389",
-        0
-      ]
-    },
-    "class_type": "PreviewAny",
-    "_meta": {
-      "title": "Preview as Text"
-    }
-  }
+  "version": 0.4
 }

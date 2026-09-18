@@ -39,14 +39,13 @@
 # tiles received about 110 crop tokens and 132 to 195 canvas tokens each.
 #
 # PRESETS
-# Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes.
-# The FIRST block is the default preset. Its two options carry no label and read "vision
-# tokens and captions" and "captions". Every later block labels its own two options, "vision
-# tokens and captions (<label>)" and "captions (<label>)". The selector follows the order of
-# the blocks below, so a preset's two options sit together.
-# Move a block to the top to make it the default. Every saved workflow on the unlabeled options
-# then asks that block's question. Add, rename or remove a block to change what the selector
-# offers.
+# Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes,
+# "vision tokens and captions (<label>)" and "captions (<label>)". The selector follows the
+# order of the blocks below, so a preset's two options sit together. The FIRST block is the
+# default preset. A workflow saved before the presets existed holds the bare "vision tokens
+# and captions" or "captions" option, which runs on the first block.
+# Move a block to the top to make it the default. Add, rename or remove a block to change
+# what the selector offers.
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
 #

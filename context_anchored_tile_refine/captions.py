@@ -383,19 +383,20 @@ def load_settings(path=None):
 
 def build_vlm_methods(presets):
     """The vlm_method selector's options: the vision-only surface, then both caption surfaces
-    of every preset. Grouped by preset and in file order, so a preset's two options sit
-    together and the list is ordered by whoever wrote the settings file.
+    of every preset, each named "<surface> (<label>)". Grouped by preset and in file order, so
+    a preset's two options sit together and the list is ordered by whoever wrote the settings
+    file. The FIRST preset is the DEFAULT.
 
-    The FIRST preset is the DEFAULT and its two options carry NO label, so they read
-    "vision tokens and captions" and "captions". Those are the exact strings a workflow saved
-    before the presets existed holds, so such a workflow keeps its own value and its own
-    result with nothing to re-pick. Labelling them instead would have made every one of them
-    a value the selector no longer offers.
+    Every preset is labeled, the first included, so the selector names the preset a run asks
+    (until 2026-09-16 the first preset's options carried no label, which hid which preset the
+    default was). The bare surface strings ("vision tokens and captions", "captions") are what
+    a workflow saved before the presets existed holds. The selector no longer offers them, but
+    `method_surface` accepts them, `resolve_method` routes them to the first preset and the VL
+    nodes' VALIDATE_INPUTS bypasses core's combo-list check, so such a workflow keeps running.
     """
     options = [VLM_METHOD_VISION]
-    for index, label in enumerate(presets):
-        suffix = "" if index == 0 else f" ({label})"
-        options.extend(f"{surface}{suffix}" for surface in CAPTION_SURFACES)
+    for label in presets:
+        options.extend(f"{surface} ({label})" for surface in CAPTION_SURFACES)
     return options
 
 
@@ -422,10 +423,8 @@ def preset_labels():
 
 
 def default_vlm_method():
-    # The default preset's slice+caption option, which carries no label (build_vlm_methods),
-    # so this is the plain "vision tokens and captions" the widget defaulted to before the
-    # presets existed. The vision-only surface leads the list and is not it: the two halves
-    # together are what the campaign settled on.
+    # The first preset's slice+caption option (build_vlm_methods). The vision-only surface
+    # leads the list and is not it: the two halves together are what the campaign settled on.
     return vlm_methods()[1]
 
 
@@ -448,8 +447,8 @@ def method_surface(vlm_method):
 
 def method_label(vlm_method):
     """The preset label a vlm_method option carries. "" for the vision-only surface, and for
-    the two unlabeled caption options, which are the DEFAULT preset's (`build_vlm_methods`)
-    and are what a workflow saved before the presets existed holds."""
+    the two bare caption options a workflow saved before the presets existed holds, which
+    `resolve_method` routes to the FIRST preset."""
     surface = method_surface(vlm_method)
     if vlm_method == surface:
         return ""
@@ -460,10 +459,9 @@ def resolve_method(vlm_method):
     """One vlm_method option resolved to the `Preset` the engine runs on.
 
     The settings file is read HERE, once per run, so an edit applies with no ComfyUI restart.
-    "vision tokens" takes only the [vision] table. A caption option takes its preset as well;
-    an unlabeled one takes the first preset, which is the default one the selector offers
-    unlabeled. Its label still resolves when a workflow spells it out, so the two forms of the
-    default preset are one block and a workflow saved under either keeps running.
+    "vision tokens" takes only the [vision] table. A caption option takes its preset as well,
+    and a bare one (no label, what a pre-preset workflow holds) takes the first preset, so the
+    default preset resolves under its labeled option and under the bare string alike.
     """
     surface = method_surface(vlm_method)
     settings = load_settings()
@@ -494,21 +492,22 @@ def resolve_method(vlm_method):
 def _fill_prompt(instruction, prompt, label, key):
     if PROMPT_PLACEHOLDER not in instruction:
         return instruction
-    if not prompt.strip():
+    if prompt is None or not prompt.strip():
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} asks for {PROMPT_PLACEHOLDER} "
-            f"in its {key} and the node's prompt input is empty. Connect or type the image's "
-            f"prompt, or remove {PROMPT_PLACEHOLDER} from the instruction.")
+            f"in its {key} and the node's prompt input is not connected or is empty. Connect "
+            f"the positive prompt's text to prompt, or remove {PROMPT_PLACEHOLDER} from the "
+            "instruction.")
     return instruction.replace(PROMPT_PLACEHOLDER, prompt.strip())
 
 
 def with_prompt(preset, prompt):
     """`preset` with the node's prompt input written into every {PROMPT} its two instructions
-    carry. The prompt is stripped, so a multiline widget's trailing newline never lands inside
-    the instruction's quotes. A preset without the placeholder is handed back unchanged, so
-    the prompt is a no-op on it and on the vision-only surface. A placeholder met by a blank
-    prompt is a hard error here, before any GPU time, rather than a question that quotes an
-    empty prompt at every tile."""
+    carry. `prompt` is None when the optional socket is unconnected. The text is stripped, so
+    a multiline primitive's trailing newline never lands inside the instruction's quotes. A
+    preset without the placeholder is handed back unchanged, so the prompt is a no-op on it
+    and on the vision-only surface. A placeholder met by no prompt is a hard error here,
+    before any GPU time, rather than a question that quotes an empty prompt at every tile."""
     return replace(
         preset,
         tile_instruction=_fill_prompt(preset.tile_instruction, prompt, preset.label,

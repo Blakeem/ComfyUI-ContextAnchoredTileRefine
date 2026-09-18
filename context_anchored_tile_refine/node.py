@@ -30,10 +30,12 @@ def _vlm_method():
 
 def _prompt():
     # The image's prompt, defined once so both VL nodes and the Captions test node offer the
-    # same widget. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt)
+    # same input. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt)
     # and reaches the VL model's question only, never the DiT, so the A/B rule that no text
-    # conditions a tile still holds.
-    return ("STRING", {"default": "", "multiline": True, "tooltip": "The prompt the image was made from. It fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it writes each tile's caption. A preset without {PROMPT} ignores it, and one with it needs it filled."})
+    # conditions a tile still holds. A SOCKET, never a widget (forceInput): the same text the
+    # positive prompt was encoded from is linked in, and a socket never enters widgets_values,
+    # so its place in the input list is free of the positional restore rule.
+    return ("STRING", {"forceInput": True, "tooltip": "The prompt the image was made from, as a text link. Connect the positive prompt's text. It fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it writes each tile's caption. A preset without {PROMPT} ignores it, and one with it needs it connected."})
 
 
 def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
@@ -173,7 +175,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         input_types["required"]["anchor_source"] = _anchor_source()
         input_types["required"]["vlm_method"] = _vlm_method()
         input_types["required"]["clip"] = ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). The guider's positive prompt is ignored and its negative still applies."})
-        input_types["required"]["prompt"] = _prompt()
+        input_types["optional"]["prompt"] = _prompt()
         # The node's own id, so the ledger can write the live phase line under its progress
         # bar. Hidden inputs create no socket and no widget and never enter widgets_values,
         # so this is invisible to the append-only widget rule above. ComfyUI passes it to
@@ -190,15 +192,15 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
 
         return captions.settings_fingerprint()
 
-    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, prompt, mask=None, unique_id=None):
+    def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None, prompt=None, unique_id=None):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
         from . import captions, progress, sampling
 
         # The settings file is read HERE and the block handed down, so the prompt input fills
-        # the preset's {PROMPT} before the engine's pre-pass, and a blank prompt against a
-        # preset that asks for one fails before any VAE or VL encode.
+        # the preset's {PROMPT} before the engine's pre-pass, and an unconnected prompt against
+        # a preset that asks for one fails before any VAE or VL encode.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
 
         # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
@@ -257,11 +259,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
                 # and these keep their defaults — the pre-select behaviour.
                 "anchor_source": _anchor_source(),
                 "vlm_method": _vlm_method(),
-                "prompt": _prompt(),
             },
             "optional": {
                 "upscale_model": ("UPSCALE_MODEL", {"tooltip": "Optional upscale model, run over the entire image before any tiling."}),
                 "negative": ("CONDITIONING", {"tooltip": "Optional negative conditioning. Unconnected it is an empty encode of this node's CLIP."}),
+                "prompt": _prompt(),
             },
             # The node's own id, so the ledger can write the live phase line under its
             # progress bar. Hidden inputs create no socket and no widget and never enter
@@ -279,7 +281,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
 
         return captions.settings_fingerprint()
 
-    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, prompt, upscale_model=None, negative=None, unique_id=None):
+    def refine(self, image, model, clip, vae, seed, sampler_name, scheduler, steps, cfg, denoise, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, upscale_model=None, negative=None, prompt=None, unique_id=None):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
@@ -295,8 +297,8 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         _validate_image(image)
         # The settings file is read FIRST and the block handed down: this node runs the
         # upscale-model pass and the text-encoder load before the engine's pre-pass, so a typo
-        # in the file, or a blank prompt against a preset that asks for one, would otherwise
-        # cost minutes of GPU time to reach.
+        # in the file, or an unconnected prompt against a preset that asks for one, would
+        # otherwise cost minutes of GPU time to reach.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model

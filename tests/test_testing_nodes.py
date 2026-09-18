@@ -314,7 +314,7 @@ def test_the_prompt_widget_is_the_vl_nodes_own(comfy_stubs):
     # default cannot drift between the production nodes and the test chain.
     from context_anchored_tile_refine import node
 
-    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"]["prompt"] == node._prompt()
+    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["optional"]["prompt"] == node._prompt()
 
 
 def test_the_prompt_is_written_into_the_default_preset(comfy_stubs):
@@ -344,8 +344,8 @@ def test_the_prompt_is_written_into_a_custom_instruction(comfy_stubs):
 def test_a_blank_prompt_against_a_preset_that_asks_for_one_is_refused_before_any_caption(comfy_stubs):
     clip = _asking_clip()
 
-    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*prompt input is empty"):
-        _caption(clip, preset="prompted", prompt="")
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
+        _caption(clip, preset="prompted", prompt=None)
 
     assert clip.generate_calls == []
 

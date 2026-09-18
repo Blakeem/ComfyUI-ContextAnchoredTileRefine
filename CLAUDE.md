@@ -63,11 +63,13 @@ without that doc's temporal design.
   `sampler_object` wraps several names in a private function). Both VL nodes carry two selects,
   defined ONCE each as `_anchor_source()` / `_vlm_method()` so their option lists and tooltips
   cannot drift apart, and both APPENDED after `context_overlap` (see the ANCHOR RING invariant
-  for why never mid-list), then a `prompt` STRING (`_prompt()`, shared with the Captions test
-  node) appended LAST (2026-09-16). Each VL node resolves the preset ITSELF,
+  for why never mid-list), and an OPTIONAL `prompt` STRING SOCKET (`_prompt()`, `forceInput`,
+  shared with the Captions test node, after `mask` on the refine node and after `negative` on
+  the upscale node; a socket never enters widgets_values, so its place in the list is free of
+  the positional rule) (2026-09-16). Each VL node resolves the preset ITSELF,
   `captions.with_prompt(captions.resolve_method(vlm_method), prompt)`, and hands it down as
-  `refine_image(preset=...)`, so a blank prompt against a preset that asks for `{PROMPT}` fails
-  before any VAE or VL encode; the engine's own resolve in `sync._prepare_run` is now the
+  `refine_image(preset=...)`, so an unconnected prompt against a preset that asks for `{PROMPT}`
+  fails before any VAE or VL encode; the engine's own resolve in `sync._prepare_run` is now the
   direct-caller path only. `anchor_source` takes its option strings from `sync.ANCHOR_SOURCES`
   and `vlm_method` from `captions.vlm_methods()`, so what the widget offers and what the engine
   branches on cannot diverge. Comfy-free at module scope (the combo lists come from a lazy
@@ -337,13 +339,13 @@ without that doc's temporal design.
   `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
   a new or renamed preset needs a restart, while a preset's own wording is re-read per run by
   `resolve_method` so tuning a prompt does not. Each `[presets.<label>]` block adds ONE option
-  per caption surface, grouped by preset and in file order. The FIRST preset is the DEFAULT
-  and its two options carry NO label (`"captions"`, `"vision tokens and captions"`), which are
-  the exact strings a pre-preset workflow saved, so labelling them would have turned every
-  saved VL workflow into a value the selector no longer offers. Every later preset's options
-  read `"<surface> (<label>)"`. An unlabeled option resolves to the first preset, and that
-  preset's label still resolves when a workflow spells it out even though the selector no
-  longer offers the labeled form. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
+  per caption surface, grouped by preset and in file order, every one read `"<surface>
+  (<label>)"`, the FIRST preset (the DEFAULT) included since 2026-09-16 (before that its two
+  options carried no label, which hid which preset the default was). The bare strings
+  `"captions"` / `"vision tokens and captions"` are what a pre-preset workflow saved: the
+  selector no longer offers them, `method_surface` accepts them, `resolve_method` routes them
+  to the first preset, and the VL nodes' `VALIDATE_INPUTS` names `vlm_method` so core's
+  combo-list check never rejects them. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
   THE PROMPT INPUT (2026-09-16): an instruction may carry `PROMPT_PLACEHOLDER` (`{PROMPT}`),
   which `with_prompt(preset, prompt)` fills by literal replace (never str.format, a prompt can
   hold braces) into BOTH instructions, stripping the widget's trailing newline; a placeholder
@@ -352,7 +354,7 @@ without that doc's temporal design.
   `with_prompt` never captions with the literal placeholder. The prompt reaches the VL model's
   question only, never the DiT. The FIRST shipped preset is `prompted`, the owner's wording
   under test (quotes the prompt, holds the caption to the crop, no style caption), so the
-  unlabeled default options now REQUIRE the prompt input; `standard` is second, whose wording
+  default options now REQUIRE the prompt socket connected; `standard` is second, whose wording
   and budgets are the pre-settings-file constants character for character
   (`RICH_GROUPED_INSTRUCTION`, 768 tokens). The caption
   picture size is the `[vision]` table's `caption_megapixels`, ONE size for the tile caption

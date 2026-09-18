@@ -2,7 +2,7 @@
 
 ComfyUI nodes for tiled refining and upscaling. An already upscaled image is refined a tile at a time with no visible seams. On the VL nodes, a global prompt is replaced by vision conditioning.
 
-Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes: 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images made with this method and they are not cherry picked. Click to view the full-sized image.
+Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes, 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images made with this method and they are not cherry picked. Click to view the full-sized image.
 
 <table>
 <tr>
@@ -30,7 +30,6 @@ Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscal
 | [Tile Refine](#tile-refine) | Most diffusion models. You upscale first and wire the sampling nodes yourself. |
 | [Tile Refine (VL)](#tile-refine-vl) | Krea 2. The same wiring plus `clip` and `prompt`. No positive conditioning is needed. |
 | [Tile Upscale (VL)](#tile-upscale-vl) | Krea 2. Upscale and refine in one node. |
-| [Tile Test chain](#tile-test-chain) | Krea 2. Testing only. Tune tile settings, caption prompts and token counts on chosen tiles without upscaling again. |
 
 The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models, including Krea 2 Turbo, are untested.
 
@@ -41,8 +40,9 @@ The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models,
 | [`max_tile_width` / `max_tile_height`](#dynamic-tile-layout) | all | Largest pixel size the model sees per tile, context rings included. Set to the largest size your model handles well. |
 | [`context_anchor`](#context-rings) | all | Width of the context ring each tile conditions on. The ring holds neighboring tiles together and a masked region to its surroundings. |
 | [`context_overlap`](#context-rings) | all | Width of the band neighboring tiles share. 0 gives hard seams. Smooth gradients need more and detailed scenes need less. |
-| [`anchor_source`](#anchor-source) | VL | What the context ring shows: the unmodified input for maximum fidelity, or the in-progress result so that flawed content can be repaired. |
+| [`anchor_source`](#anchor-source) | VL | The context ring shows either the unmodified input for maximum fidelity, or the in-progress result so that flawed content can be repaired. |
 | [`vlm_method`](#conditioning-on-the-vl-nodes) | VL | What the model is told about each tile. Adding captions repairs flawed content during upscale. |
+| [`prompt`](#caption-presets) | VL | The prompt the image was made from. The caption presets that ask for it read it when they write each tile's caption. |
 | [`mask`](#masked-refine) | Refine, Refine (VL) | Refines only the masked region and leaves everything outside it untouched. |
 | `clip` | VL | The vision-language encoder that builds all tile conditioning. Tested only with Qwen3-VL as used by Krea 2. |
 
@@ -70,30 +70,13 @@ The base node works with most diffusion models. Upscale the image first and feed
 
 ![Context-Anchored Tile Refine (VL)](vl-refine-node.png)
 
-The VL node adds vision conditioning to the base node and is built for Krea 2. Inputs are the base node's plus `clip`, the two VL selects and `prompt`. No positive prompt is needed, since each tile's conditioning is built from the image itself (see [Conditioning on the VL nodes](#conditioning-on-the-vl-nodes)). The guider's positive prompt is ignored and its negative still applies. `prompt` takes the prompt the image was made from, for the caption presets that ask for it. The default caption preset requires it (see [Caption presets](#caption-presets)). Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. A `mask` is supported and keeps the global view (see [Masked refine](#masked-refine)).
+The VL node adds vision conditioning to the base node and is built for Krea 2. Inputs are the base node's plus `clip`, the two VL selects and `prompt`. No positive prompt is needed, since each tile's conditioning is built from the image itself (see [Conditioning on the VL nodes](#conditioning-on-the-vl-nodes)). The guider's positive prompt is ignored and its negative still applies. `prompt` takes the prompt the image was made from. Connect the positive prompt's text to it, since the default caption preset requires it (see [Caption presets](#caption-presets)). Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. A `mask` is supported and keeps the global view (see [Masked refine](#masked-refine)).
 
 ### Tile Upscale (VL)
 
 ![Context-Anchored Tile Upscale (VL)](vl-upscale-node.png)
 
 Tile Upscale (VL) runs the whole flow in one node. The image is upscaled first, through the optional `upscale_model` when connected, and a single lanczos pass brings it to `input size x upscale_by`. It then runs the same VL tile refine as Tile Refine (VL).
-
-### Tile Test chain
-
-Four testing nodes for tuning the VL nodes. They are not production nodes. They run the engine the VL nodes run, so what they render is what the VL nodes will render. Chain them in the order of the table.
-
-| Node | Takes | Returns |
-|---|---|---|
-| Tile Test: Layout | The image before upscaling, `upscale_by` and the four tile settings. | The layout, an overlay of the image with every tile drawn and numbered, and the tile count. |
-| Tile Test: Upscale | The image and the layout, plus the optional `upscale_model`. Skip it for an already upscaled image and set `upscale_by` to 1.0. | The upscaled canvas. |
-| Tile Test: Captions | The canvas, the layout, `clip` and a `preset`. A settings file preset ignores the instruction widgets. The `custom instructions` preset writes from `tile_instruction`, `style_instruction` and `max_tokens` instead. `style_caption` turns the style caption off, and `caption_megapixels` always applies, with 0 reading the crop's own size. `tiles` names the tiles to caption, and `with_neighbors` adds their bordering tiles. Empty `tiles` captions every tile. `prompt` fills `{PROMPT}` in the preset, the same as on the VL nodes. | The captions for the Render node, a text that lists the style caption once at the top and each tile caption under its tile number, and the `tiles` list for the Render node. |
-| Tile Test: Render | The canvas, the layout, the captions, the models and the sampling settings, plus `surface`, `anchor_source`, `canvas_tokens`, `crop_tokens`, `tiles` and `with_neighbors`. | The refined canvas when `tiles` is empty. Otherwise each named tile and the block it was rendered in, as image lists. |
-
-ComfyUI re-runs a node only when one of its inputs changed. The seed lives on the Render node, so a new seed or a new token count re-renders without upscaling or captioning again. A new caption prompt re-runs the Captions and Render nodes only.
-
-To work on one tile, name it in `tiles` on the Captions node and connect the node's `tiles` output to `tiles` on the Render node. The Captions node then writes that tile's caption and, with `with_neighbors` on, the captions of its bordering tiles, which the Render node needs when its own `with_neighbors` is on. The Render node refuses a run whose lanes lack a caption and names the tiles. Connect the `text` output to a Preview as Text node to read the captions.
-
-A tile rendered on its own runs as one region of the full canvas, with its bordering tiles as lanes of the same run, the noise the full run draws there, and its own caption. This keeps the tile close to what the full run produces there. The tiles beyond its bordering tiles are absent, so it is not identical. A tile rendered with its neighbours needs a tile core at least `context_anchor` plus `context_overlap` wide, or the node refuses the render and names the two settings. With `with_neighbors` off the tile renders alone, and its anchor ring then stays unrefined source.
 
 ## Features
 
@@ -137,7 +120,7 @@ Dynamic programming finds the path through the overlap band where the two refine
 
 *Nodes: [Tile Refine](#tile-refine)*
 
-Tiles diffused separately land at slightly different brightness and color levels. The fix is a variant of gain compensation from Brown and Lowe, *Automatic Panoramic Image Stitching* (IJCV 2007): additive, per channel, and sequential. The shared band is the only place both tiles refined the same raw pixels, so the median of the difference there comes from the color shift and not from the content. Subtracting that median puts each tile on its neighbor's level. It runs only at tile seams, not at mask edges.
+Tiles diffused separately land at slightly different brightness and color levels. The fix is an additive, per channel, and sequential variant of gain compensation from Brown and Lowe, *Automatic Panoramic Image Stitching* (IJCV 2007). The shared band is the only place both tiles refined the same raw pixels, so the median of the difference there comes from the color shift and not from the content. Subtracting that median puts each tile on its neighbor's level. It runs only at tile seams, not at mask edges.
 
 ### Seams on the VL nodes
 
@@ -195,13 +178,15 @@ The `[vision]` table at the top of `settings.toml` sets how each tile's conditio
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. The first block is the default preset and its options carry no label. Three ship. `prompted` is the default. It holds each caption to the crop and quotes the image's prompt, so a caption names what the prompt names. `standard` is the wording every caption method asked before 2026-08-21, with no style caption. `artwork` holds placement and demographics and carries one medium to every tile.
+The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. The first block is the default preset. Three ship. `prompted` is the default. It holds each caption to the crop and quotes the image's prompt, so a caption names what the prompt names. `standard` is the wording every caption method asked before 2026-08-21, with no style caption. `artwork` holds placement and demographics and carries one medium to every tile.
 
 A preset holds four keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the entire image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer.
 
-An instruction may hold `{PROMPT}`. The VL nodes and the Captions node write their `prompt` input in its place before the VL model reads the instruction, so the caption can follow the prompt the image was made from. The diffusion model still reads the caption and never the prompt. A preset without `{PROMPT}` ignores the `prompt` input. A preset with it stops the run with an error when `prompt` is empty. Since the default preset asks for it, a workflow saved with the unlabeled `captions` or `vision tokens and captions` option now needs `prompt` filled. Pick the `(standard)` option to keep the earlier wording.
+An instruction may hold `{PROMPT}`. The VL nodes and the Captions node write their `prompt` input in its place before the VL model reads the instruction, so the caption can follow the prompt the image was made from. The diffusion model still reads the caption and never the prompt. A preset without `{PROMPT}` ignores the `prompt` input. A preset with it stops the run with an error when `prompt` is not connected or is empty. A workflow saved before the presets existed holds the bare `captions` or `vision tokens and captions` option, which runs on the first block, so it now needs `prompt` connected. Pick the `(standard)` option to keep the earlier wording.
 
 Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `settings.user.toml` whenever it exists, and a node update never replaces it. Editing a preset's wording applies on the next run, and the nodes re-run when the file changes even when no widget changed. Adding or renaming a preset changes the selector, so it needs a ComfyUI restart.
+
+Four test nodes ship for writing and testing caption prompts. They are not production nodes. `Tile Test: Layout`, `Tile Test: Upscale`, `Tile Test: Captions` and `Tile Test: Render` chain in that order and run the engine the VL nodes run. The Captions node writes its captions from a settings file preset or from its own instruction widgets, so a trial wording needs no file edit. The Render node renders the tiles you name and holds the seed, so a new seed never upscales or captions the image again.
 
 ### Regions, batches, and control
 
@@ -228,6 +213,7 @@ The `guider` input takes any guider, including NAG for models without negative p
 - [Krea 2 8K upscale workflow](Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
 - [Krea 2 refine workflow](Krea%202%20(refine).json)
 - [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)
+- [Tile test chain workflow](VL%208k%20upscale%20-%20Test.json) (the four Tile Test nodes)
 
 ## License
 
