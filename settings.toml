@@ -85,7 +85,7 @@ caption_megapixels = 0.786432
 [presets.prompted]
 tile_caption_instruction = "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
 tile_caption_max_tokens = 768
-global_style_instruction = ""
+global_style_instruction = "Concise prose containing only the style of media used and the general style within that type of media."
 global_style_max_tokens = 768
 
 # What every caption option asked before the presets existed, with no style caption. EU
