@@ -374,10 +374,14 @@ def grounded(tag, prompt_stems):
     return bool(words) and words <= prompt_stems
 
 
+def prompt_tags_question(preset):
+    """prompt_tags_instruction with the prompt in place of its placeholder."""
+    return preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, preset.prompt)
+
+
 def prompt_tags_text(preset):
     """The prompt tags request as the tokenizer reads it."""
-    instruction = preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, preset.prompt)
-    return PROMPT_TAGS_TEMPLATE.format(instruction=instruction)
+    return PROMPT_TAGS_TEMPLATE.format(instruction=prompt_tags_question(preset))
 
 
 def list_prompt_tags(clip, preset):

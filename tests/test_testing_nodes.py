@@ -527,11 +527,11 @@ def test_tile_texts_lists_every_tile_under_its_own_header(comfy_stubs):
     result = _caption(_counting_clip())
 
     assert result.tile_texts == (
-        f"tile_texts: caption kind, 2 tiles\n{TILE_TEXTS_SENTENCE}\n\n"
-        "=== style caption (placed on top of every tile's text) ===\n"
-        "  off, global_style_instruction is not connected\n\n"
-        "=== tile 0 (row 0, column 0) ===\n  caption 1\n\n"
-        "=== tile 1 (row 0, column 1) ===\n  caption 2")
+        f"## tile_texts\nCaption kind, 2 tiles.\n{TILE_TEXTS_SENTENCE}\n\n"
+        "### Style caption\n\nPlaced on top of every tile's text.\n\n"
+        "Off, `global_style_instruction` is not connected.\n\n"
+        "### Tile 0, row 0, column 0\n\n> caption 1\n\n"
+        "### Tile 1, row 0, column 1\n\n> caption 2")
     # Core's Preview as Text node falls back to str() for a value it cannot serialize, so the
     # captions socket reads the same as the tile_texts output.
     assert str(result.written) == result.tile_texts
@@ -542,10 +542,10 @@ def test_tile_texts_lists_the_style_caption_once_at_the_top(comfy_stubs):
     result = _caption(_counting_clip(), global_style_instruction="name the medium")
 
     assert result.tile_texts == (
-        f"tile_texts: caption kind, 2 tiles\n{TILE_TEXTS_SENTENCE}\n\n"
-        "=== style caption (placed on top of every tile's text) ===\n  caption 1\n\n"
-        "=== tile 0 (row 0, column 0) ===\n  caption 2\n\n"
-        "=== tile 1 (row 0, column 1) ===\n  caption 3")
+        f"## tile_texts\nCaption kind, 2 tiles.\n{TILE_TEXTS_SENTENCE}\n\n"
+        "### Style caption\n\nPlaced on top of every tile's text.\n\n> caption 1\n\n"
+        "### Tile 0, row 0, column 0\n\n> caption 2\n\n"
+        "### Tile 1, row 0, column 1\n\n> caption 3")
 
 
 def test_named_tiles_alone_are_captioned_with_neighbors_off(comfy_stubs):
@@ -558,8 +558,8 @@ def test_named_tiles_alone_are_captioned_with_neighbors_off(comfy_stubs):
     assert result.written.captions == tuple(("caption 1",) if index == 5 else None for index in range(16))
     assert result.written.tiles == (5,)
     assert result.tiles == "5"
-    assert result.tile_texts.startswith("tile_texts: caption kind, 1 of 16 tiles\n")
-    assert result.tile_texts.endswith("=== tile 5 (row 1, column 1) ===\n  caption 1")
+    assert result.tile_texts.startswith("## tile_texts\nCaption kind, 1 of 16 tiles.\n")
+    assert result.tile_texts.endswith("### Tile 5, row 1, column 1\n\n> caption 1")
 
 
 def test_named_tiles_bring_their_bordering_tiles_with_neighbors_on(comfy_stubs):
@@ -578,11 +578,11 @@ def test_named_tiles_bring_their_bordering_tiles_with_neighbors_on(comfy_stubs):
     assert result.written.tiles == (5, 0)
     assert result.tiles == "5, 0"
     assert result.tile_texts.startswith(
-        "tile_texts: caption kind, 9 of 16 tiles, named tiles 5, 0 first and then their "
-        "bordering tiles\n")
-    headers = [line for line in result.tile_texts.split("\n") if line.startswith("=== tile ")]
-    assert headers[:3] == ["=== tile 5 (row 1, column 1) ===", "=== tile 0 (row 0, column 0) ===",
-                           "=== tile 1 (row 0, column 1) ==="]
+        "## tile_texts\nCaption kind, 9 of 16 tiles, named tiles 5, 0 first and then their "
+        "bordering tiles.\n")
+    headers = [line for line in result.tile_texts.split("\n") if line.startswith("### Tile ")]
+    assert headers[:3] == ["### Tile 5, row 1, column 1", "### Tile 0, row 0, column 0",
+                           "### Tile 1, row 0, column 1"]
 
 
 def test_the_style_caption_is_written_once_for_a_tile_list(comfy_stubs):
@@ -673,13 +673,11 @@ def test_a_caption_run_fills_the_four_debug_outputs_with_a_title_and_one_sentenc
     assert result.prompt_tags == (
         f"{testing.PROMPT_TAGS_TITLE}\nThe caption kind reads the prompt only through {{PROMPT}} "
         "in its instructions, so no things are listed from it.")
-    for text, title in ((result.listed, "tags_listed: "), (result.verified, "tags_verified: "),
-                        (result.final, "tags_final: ")):
-        assert text.startswith(title)
-        assert text.split("\n")[1] == (
-            "The caption kind has no tag stages, and connecting tile_tags_instruction in place "
-            "of tile_caption_instruction runs them.")
-        assert len(text.split("\n")) == 2
+    for text, title in ((result.listed, testing.LISTED_TITLE), (result.verified, testing.VERIFIED_TITLE),
+                        (result.final, testing.FINAL_TITLE)):
+        assert text == (
+            f"{title}\nThe caption kind has no tag stages, and connecting `tile_tags_instruction` "
+            "in place of `tile_caption_instruction` runs them.")
 
 
 # --- the tags kind ---------------------------------------------------------------------
@@ -716,9 +714,9 @@ def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
     assert result.written.captions == (("red apple, moon",),) * 2
     assert result.written.style == ("Oil painting.",)
     assert result.tile_texts.startswith(
-        "tile_texts: tags kind, 2 tiles\n"
+        "## tile_texts\nTags kind, 2 tiles.\n"
         f"{TILE_TEXTS_SENTENCE}\n\n"
-        "=== style caption (placed on top of every tile's text) ===\n  Oil painting.\n\n")
+        "### Style caption\n\nPlaced on top of every tile's text.\n\n> Oil painting.\n\n")
     # The style caption is asked with global_style_max_tokens.
     style_calls = calls_of(clip, "style")
     assert [(call["text"], call["max_length"]) for call in style_calls] == [("name the medium", 64)]
@@ -757,17 +755,16 @@ def test_the_prompt_tags_output_prints_the_question_the_reply_and_each_tag_with_
 
     assert result.prompt_tags == (
         f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n"
-        "=== question sent to the VL model once per picture ===\n"
-        "  <|im_start|>user\n"
-        f"  List the things this prompt names: {TAG_PROMPT}<|im_end|>\n"
-        "  <|im_start|>assistant\n"
-        "  \n\n"
-        "=== VL model reply, verbatim ===\n"
-        f"  {TAG_PROMPT_TAGS}\n\n"
-        "=== each listed tag with its p(other) ===\n"
-        "  kept     0.10  moon\n"
-        "  kept     0.10  lantern\n"
-        "  dropped  0.97  oil painting")
+        "### Question sent to the VL model once per picture\n\n"
+        f"> List the things this prompt names: {TAG_PROMPT}\n\n"
+        "### VL model reply\n\n"
+        f"> {TAG_PROMPT_TAGS}\n\n"
+        "### Listed tags\n\n"
+        "| Result | p(other) | Tag |\n"
+        "|---|---|---|\n"
+        "| kept | 0.10 | moon |\n"
+        "| kept | 0.10 | lantern |\n"
+        "| dropped | 0.97 | oil painting |")
 
 
 @pytest.mark.parametrize("prompt", [None, "  "])
@@ -775,10 +772,10 @@ def test_the_prompt_tags_output_says_no_prompt_connected(tag_classifier, prompt)
     clip, result = _tag_run(prompt=prompt, global_style_instruction=None)
 
     assert result.prompt_tags == (
-        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n=== prompt ===\n  no prompt connected")
+        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n### Prompt\n\nNo prompt is connected.")
     assert calls_of(clip, "prompt tags") == []
     assert result.written.style is None
-    assert "  off, global_style_instruction is not connected" in result.tile_texts
+    assert "Off, `global_style_instruction` is not connected." in result.tile_texts
 
 
 def test_an_unconnected_prompt_tags_instruction_lists_no_things_from_the_connected_prompt(tag_classifier):
@@ -786,70 +783,70 @@ def test_an_unconnected_prompt_tags_instruction_lists_no_things_from_the_connect
 
     assert result.prompt_tags == (
         f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n"
-        "=== prompt ===\n  prompt_tags_instruction is not connected")
+        "### Prompt\n\n`prompt_tags_instruction` is not connected.")
     assert calls_of(clip, "prompt tags") == []
     assert result.written.captions == (("red apple, moon",),) * 2
+
 
 def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its_tags(tag_classifier):
     _clip, result = _tag_run()
 
-    tile = ("  VL model reply, verbatim\n"
-            f"    {TAG_PROPOSAL}\n"
-            "  tags parsed from the reply (5)\n"
-            "    red apple, objects, the moon, wooden spoon, apple")
+    tile = ("**VL model reply**\n\n"
+            f"> {TAG_PROPOSAL}\n\n"
+            "**Tags parsed from the reply (5):** red apple, objects, the moon, wooden spoon, apple")
     assert result.listed == (
-        "tags_listed: the tags the VL model listed for each tile\n"
+        f"{testing.LISTED_TITLE}\n"
         "The VL model is asked the question below about each tile, its list is stopped after 25 "
         "tags, and its reply is split into tags.\n\n"
-        "=== question sent to the VL model for every tile ===\n"
-        f"  {PROPOSE}\n\n"
-        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
-        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+        "### Question sent to the VL model for every tile\n\n"
+        f"> {PROPOSE}\n\n"
+        f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
+        f"### Tile 1, row 0, column 1\n\n{tile}")
 
 
 def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left_out(tag_classifier):
     _clip, result = _tag_run()
 
-    tile = ("  from the prompt\n"
-            "    kept     0.95  moon, also listed by the VL model\n"
-            "    dropped  0.95  lantern\n"
-            "  from the VL model\n"
-            "    kept     0.95  red apple\n"
-            "    dropped  0.20  wooden spoon\n"
-            "    kept     0.95  apple\n"
-            "  left out before verification\n"
-            "    objects: category noun")
+    tile = ("| Source | Result | Score | Tag |\n"
+            "|---|---|---|---|\n"
+            "| prompt and VL model | kept | 0.95 | moon |\n"
+            "| prompt | dropped | 0.95 | lantern |\n"
+            "| VL model | kept | 0.95 | red apple |\n"
+            "| VL model | dropped | 0.20 | wooden spoon |\n"
+            "| VL model | kept | 0.95 | apple |\n\n"
+            "**Left out before verification**\n\n"
+            "- objects, category noun")
     assert result.verified == (
-        "tags_verified: each candidate tag scored on its tile\n"
-        "Each candidate is scored with tile_tags_verification_statement on its tile. A tag the VL "
-        "model listed is kept at 0.90 or above (tile_tags_verification_threshold), and a prompt "
-        "tag it did not list at 0.9999 or above (prompt_tags_verification_threshold).\n\n"
-        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
-        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+        f"{testing.VERIFIED_TITLE}\n"
+        "Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag the VL "
+        "model listed is kept at 0.90 or above (`tile_tags_verification_threshold`), and a prompt "
+        "tag it did not list at 0.9999 or above (`prompt_tags_verification_threshold`).\n\n"
+        f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
+        f"### Tile 1, row 0, column 1\n\n{tile}")
 
 
 def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_text(tag_classifier):
     _clip, result = _tag_run()
 
-    strips = ("      rows     top 0.95  center 0.95  bottom 0.95\n"
-              "      columns  left 0.95  center 0.95  right 0.95\n")
-    no_term = "kept with no term, no axis has exactly one strip holding it"
-    tile = ("  dropped as a subset of a longer kept tag\n"
-            "    apple\n"
-            "  positions of the kept tags. A strip holds a tag at 0.90 or above "
-            "(tile_tags_position_threshold)\n"
-            f"    red apple: {no_term}\n{strips}"
-            f"    moon: {no_term}\n{strips}"
-            "  tile text\n"
-            "    red apple, moon")
+    strips = "0.95 | 0.95 | 0.95 | 0.95 | 0.95 | 0.95"
+    tile = ("**Dropped as a subset of a longer kept tag:** apple\n\n"
+            "**Positions.** A strip holds a tag at 0.90 or above (`tile_tags_position_threshold`). "
+            "A tag gets a term on each axis where exactly one strip holds it.\n\n"
+            "| Tag | Result | Top row | Center row | Bottom row | Left column | Center column | "
+            "Right column |\n"
+            "|---|---|---|---|---|---|---|---|\n"
+            f"| red apple | kept with no term | {strips} |\n"
+            f"| moon | kept with no term | {strips} |\n\n"
+            "**Tile text**\n\n"
+            "> red apple, moon")
     assert result.final == (
-        "tags_final: the kept tags of each tile, their positions and the tile text\n"
+        f"{testing.FINAL_TITLE}\n"
         "A kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on "
         "six strips of the tile, three rows and three columns. A tag no strip holds is dropped. "
         "On each axis where exactly one strip holds a tag, that strip names the tag's position "
         "term. The tags with their terms make the tile text.\n\n"
-        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
-        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+        f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
+        f"### Tile 1, row 0, column 1\n\n{tile}")
 
 
 def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
@@ -859,11 +856,11 @@ def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
     _clip, loose_prompt = _tag_run(prompt_tags_verification_threshold=0.9)
 
     assert strict_verify.written.captions == (("",),) * 2
-    assert "    dropped  0.95  red apple" in strict_verify.verified
+    assert "| VL model | dropped | 0.95 | red apple |" in strict_verify.verified
     assert strict_strips.written.captions == (("",),) * 2
-    assert "    red apple: dropped, no strip holds it\n" in strict_strips.final
+    assert "| red apple | dropped, no strip holds it |" in strict_strips.final
     assert loose_prompt.written.captions == (("red apple, moon, lantern",),) * 2
-    assert "    kept     0.95  lantern" in loose_prompt.verified
+    assert "| prompt | kept | 0.95 | lantern |" in loose_prompt.verified
 
 
 @pytest.mark.parametrize(("name", "value"), [
@@ -885,8 +882,8 @@ def test_position_terms_off_makes_no_strip_request_and_says_so(tag_classifier):
 
     assert strip_requests(tag_classifier) == []
     assert result.written.captions == (("red apple, moon",),) * 2
-    assert ("  positions of the kept tags: off, position_terms is off\n"
-            "  tile text\n    red apple, moon") in result.final
+    assert ("**Positions:** off, `position_terms` is off\n\n"
+            "**Tile text**\n\n> red apple, moon") in result.final
 
 
 @pytest.mark.parametrize("value", [None, " "])
@@ -895,13 +892,29 @@ def test_verification_off_keeps_every_candidate_unchecked_and_says_so(tag_classi
 
     assert [request for request in tag_classifier.requests if request["kind"] == "noul"] == []
     assert result.written.captions == (("red apple, moon, wooden spoon, lantern",),) * 2
-    assert result.verified.split("\n")[1] == (
-        "tile_tags_verification_statement is not connected, so verification is off and no "
+    assert result.verified.split("\n")[2] == (
+        "`tile_tags_verification_statement` is not connected, so verification is off and no "
         "candidate was scored.")
-    assert ("=== tile 0 (row 0, column 0) ===\n"
-            "  every candidate was kept unchecked (5): red apple, moon, wooden spoon, apple, lantern") in result.verified
-    assert ("  positions of the kept tags: off, tile_tags_verification_statement is not "
+    assert ("### Tile 0, row 0, column 0\n\n"
+            "**Kept unchecked (5):** red apple, moon, wooden spoon, apple, lantern") in result.verified
+    assert ("**Positions:** off, `tile_tags_verification_statement` is not "
             "connected") in result.final
+
+
+def test_model_text_is_escaped_so_that_markdown_shows_it_as_written():
+    # The frontend's sanitizer removes an unescaped <think>, and a line opening with a list,
+    # heading or rule marker would change shape.
+    reply = "<think>no</think> a|b *c* _d_\n- e\n1. f\n# g\n\nh \\"
+
+    assert testing._quote(reply) == (
+        "> \\<think\\>no\\</think\\> a\\|b \\*c\\* \\_d\\_\\\n"
+        "> \\- e\\\n"
+        "> 1\\. f\\\n"
+        "> \\# g\n"
+        ">\n"
+        "> h \\\\")
+    assert testing._quote("") == "> *no text was written*"
+    assert testing._table(("Tag",), []) == "None."
 
 
 @pytest.mark.parametrize(("prompt", "asked"), [(TAG_PROMPT, 1), (None, 0), ("  ", 0)])
@@ -917,14 +930,14 @@ def test_the_debug_sections_follow_the_listing_order(tag_classifier):
     _clip, result = _tag_run(tiles="5", with_neighbors=True, layout=_grid_layout())
 
     def headers(text):
-        return [line for line in text.split("\n") if line.startswith("=== tile ")]
+        return [line for line in text.split("\n") if line.startswith("### Tile ")]
 
     assert headers(result.verified) == [
-        "=== tile 5 (row 1, column 1) ===", "=== tile 0 (row 0, column 0) ===",
-        "=== tile 1 (row 0, column 1) ===", "=== tile 2 (row 0, column 2) ===",
-        "=== tile 4 (row 1, column 0) ===", "=== tile 6 (row 1, column 2) ===",
-        "=== tile 8 (row 2, column 0) ===", "=== tile 9 (row 2, column 1) ===",
-        "=== tile 10 (row 2, column 2) ==="]
+        "### Tile 5, row 1, column 1", "### Tile 0, row 0, column 0",
+        "### Tile 1, row 0, column 1", "### Tile 2, row 0, column 2",
+        "### Tile 4, row 1, column 0", "### Tile 6, row 1, column 2",
+        "### Tile 8, row 2, column 0", "### Tile 9, row 2, column 1",
+        "### Tile 10, row 2, column 2"]
     for text in (result.tile_texts, result.listed, result.final):
         assert headers(text) == headers(result.verified)
 

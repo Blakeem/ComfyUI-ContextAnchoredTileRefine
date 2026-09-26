@@ -21,8 +21,9 @@ and off otherwise, so a stage is turned off by disconnecting it. tile_caption_in
 the caption kind through the engine's own `captions.generate_caption_set`, and
 tile_tags_instruction runs the tags kind through `tags.generate_tag_trace`, whose texts are
 the ones the engine writes. Its tile_texts output lists the style caption once above every
-tile's own text, and four debug outputs print the prompt fragment sort, the listed tags, the
-verification scores and the final tags per tile. Its inputs carry no seed, so the texts
+tile's own text, and four debug outputs print the prompt tags, the listed tags, the
+verification scores and the final tags per tile. Every text output is Markdown, for the Markdown
+mode of Preview as Text. Its inputs carry no seed, so the texts
 survive a seed re-roll further down the chain. Its tiles output feeds the Render node's tiles
 input, so one tile is captioned and rendered together.
 
@@ -40,6 +41,7 @@ comfy-touching path of upscale.py is reached only from inside a node method (the
 as sampling.py / vl.py, pinned by a subprocess test).
 """
 import math
+import re
 from dataclasses import dataclass, replace
 
 import torch
@@ -144,7 +146,7 @@ class TestCaptions:
     size. `preset` is the label they were written from and `kind` that preset's tile text
     kind, so a tags set holds each tile's tag text where a caption set holds its caption.
 
-    `str()` is the readable listing, which is what core's Preview as Text node shows for a
+    `str()` is the Markdown listing, which is what core's Preview as Text node shows for a
     value it cannot serialize as JSON, so the socket reads the same as the tile_texts output.
     """
 
@@ -164,17 +166,17 @@ class TestCaptions:
         bordering = tuple(index for index in captioned if index not in named)
         count = f"{len(captioned)} tiles" if len(captioned) == len(self.captions) else (
             f"{len(captioned)} of {len(self.captions)} tiles")
-        title = f"tile_texts: {self.kind} kind, {count}"
+        title = f"## tile_texts\n{self.kind.capitalize()} kind, {count}"
         if bordering:
             title += f", named tiles {', '.join(str(index) for index in named)} first and then their bordering tiles"
-        style = ["  off, global_style_instruction is not connected"]
+        style = "Off, `global_style_instruction` is not connected."
         if self.style is not None:
-            style = _indented(self.style[0])
-        sections = [_section("=== style caption (placed on top of every tile's text) ===", style)]
-        sections.extend(_section(_tile_header(index, columns), _indented(self.captions[index][0]))
+            style = _quote(self.style[0])
+        sections = [_section("### Style caption", ["Placed on top of every tile's text.", style])]
+        sections.extend(_section(_tile_header(index, columns), [_quote(self.captions[index][0])])
                         for index in (*named, *bordering))
-        return _debug_text(title, "Tile Test: Render conditions each tile on its own text below, "
-                           "with the style caption placed on top of it.", sections)
+        return _debug_text(f"{title}.", "Tile Test: Render conditions each tile on its own text "
+                           "below, with the style caption placed on top of it.", sections)
 
 
 def _preview_size(target_width, target_height):
@@ -567,33 +569,62 @@ def _tag_texts(run):
     return (style if any(style) else []), written
 
 
-# --- the Captions node's text outputs. Pure functions over the tags traces, one picture row.
+# --- the Captions node's text outputs, written as Markdown for Preview as Text's Markdown
+# mode. Pure functions over the tags traces, one picture row.
 
-PROMPT_TAGS_TITLE = "prompt_tags: the things the VL model listed from the connected prompt, which every tile checks"
-LISTED_TITLE = "tags_listed: the tags the VL model listed for each tile"
-VERIFIED_TITLE = "tags_verified: each candidate tag scored on its tile"
-FINAL_TITLE = "tags_final: the kept tags of each tile, their positions and the tile text"
-NO_TAG_STAGES = ("The caption kind has no tag stages, and connecting tile_tags_instruction in "
-                 "place of tile_caption_instruction runs them.")
-VERIFICATION_OFF = "off, tile_tags_verification_statement is not connected"
+PROMPT_TAGS_TITLE = ("## prompt_tags\nThe things the VL model listed from the connected prompt, "
+                     "which every tile checks.")
+LISTED_TITLE = "## tags_listed\nThe tags the VL model listed for each tile."
+VERIFIED_TITLE = "## tags_verified\nEach candidate tag scored on its tile."
+FINAL_TITLE = "## tags_final\nThe kept tags of each tile, their positions and the tile text."
+NO_TAG_STAGES = ("The caption kind has no tag stages, and connecting `tile_tags_instruction` in "
+                 "place of `tile_caption_instruction` runs them.")
+VERIFICATION_OFF = "off, `tile_tags_verification_statement` is not connected"
+ORIGIN_NAMES = {"prompt": "prompt", "both": "prompt and VL model", "model": "VL model"}
+
+# Model text is escaped so that it shows as written. A tag such as <think> would otherwise be
+# removed by the frontend's HTML sanitizer, and a line starting with "-" would become a list.
+_MARKDOWN_CHARACTERS = re.compile(r"([\\`*_\[\]<>|~])")
+_LINE_START_MARKER = re.compile(r"^(\s*)(?:([#+=-])|(\d+)([.)]))")
 
 
 def _p(value):
     return f"{value:.2f}"
 
 
-def _indented(text, depth=1):
-    pad = "  " * depth
-    return [pad + line for line in text.split("\n")] if text else [f"{pad}no text was written"]
+def _escaped(line):
+    line = _MARKDOWN_CHARACTERS.sub(r"\\\1", line)
+    return _LINE_START_MARKER.sub(lambda m: f"{m[1]}\\{m[2]}" if m[2] else f"{m[1]}{m[3]}\\{m[4]}", line)
 
 
-def _rows(lines, depth=1):
-    pad = "  " * depth
-    return [pad + line for line in lines] or [f"{pad}none"]
+def _quote(text):
+    # A blockquote wraps long lines where a code block scrolls. A trailing backslash is a hard
+    # line break, so the model's own line breaks survive.
+    if not text:
+        return "> *no text was written*"
+    lines = text.split("\n")
+    quoted = []
+    for position, line in enumerate(lines):
+        next_has_text = position + 1 < len(lines) and lines[position + 1].strip()
+        hard_break = "\\" if line.strip() and next_has_text else ""
+        quoted.append(f"> {_escaped(line)}{hard_break}".rstrip())
+    return "\n".join(quoted)
 
 
-def _section(header, lines):
-    return "\n".join([header, *lines])
+def _table(header, rows):
+    if not rows:
+        return "None."
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def _tag_list(items):
+    return ", ".join(_escaped(item) for item in items) or "none"
+
+
+def _section(header, blocks):
+    return "\n\n".join([header, *blocks])
 
 
 def _debug_text(title, sentence, sections):
@@ -602,7 +633,7 @@ def _debug_text(title, sentence, sections):
 
 def _tile_header(index, columns):
     # The overlay's own number, so a text is found by the label drawn on the tile.
-    return f"=== tile {index} (row {index // columns}, column {index % columns}) ==="
+    return f"### Tile {index}, row {index // columns}, column {index % columns}"
 
 
 def _prompt_tags_debug(preset, run):
@@ -610,100 +641,85 @@ def _prompt_tags_debug(preset, run):
                 "prompt lacks is dropped, and the thing check drops a tag at p(other) "
                 f"{_p(tags.THING_THRESHOLD)} or above. The kept tags join every tile's candidates.")
     if run.prompt is None:
-        reason = "no prompt connected" if not preset.prompt else "prompt_tags_instruction is not connected"
-        return _debug_text(PROMPT_TAGS_TITLE, sentence, [_section("=== prompt ===", _rows([reason]))])
+        reason = "No prompt is connected." if not preset.prompt else "`prompt_tags_instruction` is not connected."
+        return _debug_text(PROMPT_TAGS_TITLE, sentence, [_section("### Prompt", [reason])])
     pairs = zip(run.prompt.listed, run.prompt.p_other, strict=True)
-    lines = [f"{'kept' if tags.is_thing(p) else 'dropped':<7}  {_p(p)}  {tag}" for tag, p in pairs]
+    rows = [("kept" if tags.is_thing(p) else "dropped", _p(p), _escaped(tag)) for tag, p in pairs]
     return _debug_text(PROMPT_TAGS_TITLE, sentence, [
-        _section("=== question sent to the VL model once per picture ===",
-                 _indented(tags.prompt_tags_text(preset))),
-        _section("=== VL model reply, verbatim ===", _indented(run.prompt.reply)),
-        _section("=== each listed tag with its p(other) ===", _rows(lines))])
+        _section("### Question sent to the VL model once per picture", [_quote(tags.prompt_tags_question(preset))]),
+        _section("### VL model reply", [_quote(run.prompt.reply)]),
+        _section("### Listed tags", [_table(("Result", "p(other)", "Tag"), rows)])])
 
 
 def _listed_block(header, trace):
-    return _section(header, [
-        "  VL model reply, verbatim", *_indented(trace.reply, depth=2),
-        f"  tags parsed from the reply ({len(trace.proposed)})",
-        *_rows([", ".join(trace.proposed)] if trace.proposed else [], depth=2)])
+    return _section(header, ["**VL model reply**", _quote(trace.reply),
+                             f"**Tags parsed from the reply ({len(trace.proposed)}):** {_tag_list(trace.proposed)}"])
 
 
 def _listed_debug(preset, headers, traces):
-    sections = [_section("=== question sent to the VL model for every tile ===",
-                         _indented(preset.tile_tags_instruction))]
+    sections = [_section("### Question sent to the VL model for every tile", [_quote(preset.tile_tags_instruction)])]
     sections.extend(_listed_block(header, trace) for header, trace in zip(headers, traces, strict=True))
     return _debug_text(LISTED_TITLE, "The VL model is asked the question below about each tile, "
                        f"its list is stopped after {tags.MAX_PROPOSED_TAGS} tags, and its reply is "
                        "split into tags.", sections)
 
 
-def _score_row(item, p, threshold, suffix=""):
-    verdict = "kept" if p >= threshold else "dropped"
-    return f"{verdict:<7}  {_p(p)}  {item}{suffix}"
-
-
 def _verified_block(header, trace, threshold, prompt_threshold):
     rows = tuple(zip(trace.candidates, trace.scores, trace.origins, strict=True))
-    from_prompt = [_score_row(item, p, threshold, ", also listed by the VL model") if origin == "both"
-                   else _score_row(item, p, prompt_threshold)
-                   for item, p, origin in rows if origin != "model"]
-    from_model = [_score_row(item, p, threshold) for item, p, origin in rows if origin == "model"]
-    left_out = [f"{name}: {reason}" for name, reason in trace.dropped]
-    return _section(header, ["  from the prompt", *_rows(from_prompt, depth=2),
-                             "  from the VL model", *_rows(from_model, depth=2),
-                             "  left out before verification", *_rows(left_out, depth=2)])
+    # The prompt's rows come first, since a prompt tag is the one a wording change moves.
+    ordered = [row for row in rows if row[2] != "model"] + [row for row in rows if row[2] == "model"]
+    table = [(ORIGIN_NAMES[origin],
+              "kept" if p >= (prompt_threshold if origin == "prompt" else threshold) else "dropped",
+              _p(p), _escaped(item)) for item, p, origin in ordered]
+    left_out = [f"- {_escaped(name)}, {reason}" for name, reason in trace.dropped] or ["None."]
+    return _section(header, [_table(("Source", "Result", "Score", "Tag"), table),
+                             "**Left out before verification**", "\n".join(left_out)])
 
 
 def _unchecked_block(header, trace):
-    return _section(header, [f"  every candidate was kept unchecked ({len(trace.candidates)}): "
-                             f"{', '.join(trace.candidates) or 'none'}"])
+    return _section(header, [f"**Kept unchecked ({len(trace.candidates)}):** {_tag_list(trace.candidates)}"])
 
 
 def _verified_debug(preset, headers, traces):
     if not preset.tile_tags_verification_statement:
-        return _debug_text(VERIFIED_TITLE, "tile_tags_verification_statement is not connected, so "
+        return _debug_text(VERIFIED_TITLE, "`tile_tags_verification_statement` is not connected, so "
                            "verification is off and no candidate was scored.", [_unchecked_block(header, trace)
                                            for header, trace in zip(headers, traces, strict=True)])
     threshold = preset.tile_tags_verification_threshold
     prompt_threshold = preset.prompt_tags_verification_threshold
-    sentence = ("Each candidate is scored with tile_tags_verification_statement on its tile. A tag "
+    sentence = ("Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag "
                 f"the VL model listed is kept at {_p(threshold)} or above "
-                "(tile_tags_verification_threshold), and a prompt tag it did not list at "
-                f"{prompt_threshold} or above (prompt_tags_verification_threshold).")
+                "(`tile_tags_verification_threshold`), and a prompt tag it did not list at "
+                f"{prompt_threshold} or above (`prompt_tags_verification_threshold`).")
     return _debug_text(VERIFIED_TITLE, sentence, [_verified_block(header, trace, threshold, prompt_threshold)
                                                   for header, trace in zip(headers, traces, strict=True)])
 
 
-def _strip_scores(words, scores):
-    return "  ".join(f"{word} {_p(p)}" for word, p in zip(words, scores, strict=True))
-
-
 def _placement(item, term, unplaced):
     if item in unplaced:
-        return f"{item}: dropped, no strip holds it"
+        return "dropped, no strip holds it"
     if not term:
-        return f"{item}: kept with no term, no axis has exactly one strip holding it"
-    return f"{item}: kept at {term}"
+        return "kept with no term"
+    return f"kept at {term}"
 
 
-def _position_lines(trace, positions_off, threshold):
+def _positions(trace, positions_off, threshold):
     if positions_off:
-        return [f"  positions of the kept tags: {positions_off}"]
-    placed = []
-    for item, strips, term in zip(trace.kept, trace.strips, trace.terms, strict=True):
-        placed += [_placement(item, term, trace.unplaced),
-                   f"  rows     {_strip_scores(tags.ROW_WORDS, strips[:3])}",
-                   f"  columns  {_strip_scores(tags.COLUMN_WORDS, strips[3:])}"]
-    return [f"  positions of the kept tags. A strip holds a tag at {_p(threshold)} or above "
-            "(tile_tags_position_threshold)",
-            *_rows(placed, depth=2)]
+        return [f"**Positions:** {positions_off}"]
+    header = ("Tag", "Result", *(f"{word.capitalize()} row" for word in tags.ROW_WORDS),
+              *(f"{word.capitalize()} column" for word in tags.COLUMN_WORDS))
+    rows = [(_escaped(item), _placement(item, term, trace.unplaced), *(_p(p) for p in strips))
+            for item, strips, term in zip(trace.kept, trace.strips, trace.terms, strict=True)]
+    return [f"**Positions.** A strip holds a tag at {_p(threshold)} or above "
+            "(`tile_tags_position_threshold`). A tag gets a term on each axis where exactly one "
+            "strip holds it.", _table(header, rows)]
 
 
 def _final_block(header, trace, positions_off, threshold):
     subsets = [item for item in trace.verified if item not in trace.kept]
-    return _section(header, ["  dropped as a subset of a longer kept tag", *_rows(subsets, depth=2),
-                             *_position_lines(trace, positions_off, threshold),
-                             "  tile text", *_indented(trace.text, depth=2)])
+    return _section(header, [f"**Dropped as a subset of a longer kept tag:** {_tag_list(subsets)}",
+                             *_positions(trace, positions_off, threshold),
+                             "**Tile text**", _quote(trace.text)])
 
 
 def _final_debug(preset, headers, traces, locate):
@@ -711,7 +727,7 @@ def _final_debug(preset, headers, traces, locate):
     if not preset.tile_tags_verification_statement:
         positions_off = VERIFICATION_OFF
     elif not locate:
-        positions_off = "off, position_terms is off"
+        positions_off = "off, `position_terms` is off"
     sentence = ("A kept tag that is part of a longer kept tag is dropped. Each remaining tag is "
                 "scored on six strips of the tile, three rows and three columns. A tag no strip "
                 "holds is dropped. On each axis where exactly one strip holds a tag, that strip "

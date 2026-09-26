@@ -487,11 +487,15 @@ without that doc's temporal design.
   (socket `CATR_CAPTIONS`: one entry per tile in layout order with None for an uncaptioned
   tile, each the tile's OWN caption, the `style` caption apart (None when the run asked for
   none), the named `tiles`, the target size, the grid shape and every crop rect, so the Render
-  node rejects captions written for another grid; its `__str__` is the readable listing,
-  the style once under a `style caption` label above the tiles, the same for a file preset
+  node rejects captions written for another grid; its `__str__` is the Markdown listing,
+  the style once under a `Style caption` heading above the tiles, the same for a file preset
   and the custom option, because core's Preview as Text falls back to `str()`), that listing
   as `text`, and the
-  named tiles as a csv `tiles` STRING for the Render node's `tiles` input. The run is ONE
+  named tiles as a csv `tiles` STRING for the Render node's `tiles` input. EVERY text output
+  is Markdown for Preview as Text's Markdown mode (frontend `marked`, GFM, then DOMPurify):
+  model text goes through `_quote` (a blockquote, since a code block scrolls instead of
+  wrapping) or `_escaped`, because the sanitizer deletes an unescaped `<think>` and a line
+  opening with `-`, `#` or `1.` changes shape. The run is ONE
   progress bar through `progress.build_caption_ledger` (hidden `unique_id` for the status
   line). Its `IS_CHANGED` is the settings fingerprint and its `VALIDATE_INPUTS` re-checks the
   entire caption_megapixels rule, since naming a widget there disables core's own range check.
