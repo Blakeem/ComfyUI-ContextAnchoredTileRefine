@@ -4,7 +4,7 @@ description = "Seamless tiled refinement and upscaling. Refine an image tile by 
 version = "1.8.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["logit-classifier>=0.2.1"]
 classifiers = [
     "Operating System :: OS Independent",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",

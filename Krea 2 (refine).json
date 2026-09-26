@@ -2,7 +2,7 @@
   "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
   "revision": 0,
   "last_node_id": 389,
-  "last_link_id": 1054,
+  "last_link_id": 1055,
   "nodes": [
     {
       "id": 291,
@@ -542,8 +542,6 @@
         "cnr_id": "comfy-core",
         "ver": "0.3.19"
       },
-      "widgets_values": [],
-      "widgets_values_named": {},
       "color": "#432",
       "bgcolor": "#653"
     },
@@ -774,12 +772,12 @@
         "Node name for S&R": "CLIPLoader"
       },
       "widgets_values": [
-        "qwen3-vl-4b-heretic_int8.safetensors",
+        "qwen3vl_4b_fp8_scaled.safetensors",
         "krea2",
         "default"
       ],
       "widgets_values_named": {
-        "clip_name": "qwen3-vl-4b-heretic_int8.safetensors",
+        "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
         "type": "krea2",
         "device": "default"
       },
@@ -1560,10 +1558,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
+        "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
       ],
       "widgets_values_named": {
-        "value": "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
+        "value": "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -1613,7 +1611,7 @@
       ],
       "size": [
         330,
-        320
+        340
       ],
       "flags": {},
       "order": 35,
@@ -1659,6 +1657,12 @@
           "shape": 7,
           "type": "MASK",
           "link": null
+        },
+        {
+          "name": "prompt",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1055
         }
       ],
       "outputs": [
@@ -1794,7 +1798,8 @@
           "name": "STRING",
           "type": "STRING",
           "links": [
-            863
+            863,
+            1055
           ]
         }
       ],
@@ -2122,30 +2127,6 @@
       "NOISE"
     ],
     [
-      1031,
-      376,
-      0,
-      380,
-      0,
-      "IMAGE"
-    ],
-    [
-      1032,
-      378,
-      0,
-      380,
-      1,
-      "INT"
-    ],
-    [
-      1033,
-      379,
-      0,
-      380,
-      2,
-      "INT"
-    ],
-    [
       1042,
       306,
       0,
@@ -2224,6 +2205,38 @@
       374,
       0,
       "MODEL"
+    ],
+    [
+      1055,
+      344,
+      0,
+      371,
+      8,
+      "STRING"
+    ],
+    [
+      1031,
+      376,
+      0,
+      380,
+      0,
+      "IMAGE"
+    ],
+    [
+      1032,
+      378,
+      0,
+      380,
+      1,
+      "INT"
+    ],
+    [
+      1033,
+      379,
+      0,
+      380,
+      2,
+      "INT"
     ]
   ],
   "groups": [
@@ -2267,13 +2280,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9334480208135802,
+      "scale": 0.9334480208135804,
       "offset": [
-        -1938.2737925953668,
-        -25.797308837271228
+        -1989.116910560894,
+        -73.57377107385221
       ]
     },
-    "frontendVersion": "1.49.6"
+    "frontendVersion": "1.53.6"
   },
   "version": 0.4
 }

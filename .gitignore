@@ -21,3 +21,6 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# The owner's own to do list
+TODO.md

@@ -1,8 +1,8 @@
 {
   "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
   "revision": 0,
-  "last_node_id": 394,
-  "last_link_id": 1088,
+  "last_node_id": 407,
+  "last_link_id": 1106,
   "nodes": [
     {
       "id": 325,
@@ -91,8 +91,8 @@
       "id": 375,
       "type": "SaveImage",
       "pos": [
-        6300,
-        480
+        10420,
+        290
       ],
       "size": [
         230,
@@ -101,7 +101,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 20,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -134,15 +134,15 @@
       "id": 376,
       "type": "PlaySound|pysssss",
       "pos": [
-        6280,
-        750
+        10440,
+        910
       ],
       "size": [
         240,
         150
       ],
       "flags": {},
-      "order": 21,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
@@ -179,15 +179,15 @@
       "id": 373,
       "type": "PreviewImage",
       "pos": [
-        5740,
+        9660,
         290
       ],
       "size": [
-        520,
-        710
+        760,
+        850
       ],
       "flags": {},
-      "order": 19,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -242,11 +242,11 @@
         "Node name for S&R": "UNETLoader"
       },
       "widgets_values": [
-        "krea2SATDirtyrealism_krea2SAT.safetensors",
+        "ultra_v15_int8.safetensors",
         "default"
       ],
       "widgets_values_named": {
-        "unet_name": "krea2SATDirtyrealism_krea2SAT.safetensors",
+        "unet_name": "ultra_v15_int8.safetensors",
         "weight_dtype": "default"
       },
       "color": "#2a363b",
@@ -336,8 +336,8 @@
       "id": 382,
       "type": "ContextAnchoredTileTestLayout",
       "pos": [
-        4980,
-        300
+        3000,
+        890
       ],
       "size": [
         270,
@@ -380,14 +380,14 @@
         "Node name for S&R": "ContextAnchoredTileTestLayout"
       },
       "widgets_values": [
-        4,
+        2,
         2048,
         1728,
         32,
         256
       ],
       "widgets_values_named": {
-        "upscale_by": 4,
+        "upscale_by": 2,
         "max_tile_width": 2048,
         "max_tile_height": 1728,
         "context_anchor": 32,
@@ -395,115 +395,14 @@
       }
     },
     {
-      "id": 296,
-      "type": "Note",
-      "pos": [
-        4740,
-        300
-      ],
-      "size": [
-        230,
-        250
-      ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "Dimensions",
-      "properties": {
-        "text": ""
-      },
-      "widgets_values": [
-        "Near 1 megapixel and a multiple of 64\n\n1024 x 1024 (1:1 Square)\n1152 x 896 (9:7)\n896 x 1152 (7:9)\n1216 x 832 (19:13)\n832 x 1216 (13:19)\n1344 x 768 (7:4 Horizontal)\n768 x 1344 (4:7 Vertical)\n1536 x 640 (12:5 Horizontal)\n640 x 1536 (5:12 Vertical)\n\nOther:\n768 x 1024 (3:4)\n768 x 1152 (4:6)\n768 x 1280 (3:5)\n1024 × 576 (16:9 widescreen)\n768 x 1152 (2:3 Portrait)"
-      ],
-      "widgets_values_named": {
-        "text": "Near 1 megapixel and a multiple of 64\n\n1024 x 1024 (1:1 Square)\n1152 x 896 (9:7)\n896 x 1152 (7:9)\n1216 x 832 (19:13)\n832 x 1216 (13:19)\n1344 x 768 (7:4 Horizontal)\n768 x 1344 (4:7 Vertical)\n1536 x 640 (12:5 Horizontal)\n640 x 1536 (5:12 Vertical)\n\nOther:\n768 x 1024 (3:4)\n768 x 1152 (4:6)\n768 x 1280 (3:5)\n1024 × 576 (16:9 widescreen)\n768 x 1152 (2:3 Portrait)"
-      },
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
-      "id": 392,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        4330,
-        330
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            1083
-          ]
-        }
-      ],
-      "title": "VLM Tile Caption Prompt",
-      "properties": {
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
-      ],
-      "widgets_values_named": {
-        "value": "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
-      }
-    },
-    {
-      "id": 393,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        4330,
-        590
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            1084
-          ]
-        }
-      ],
-      "title": "VLM Overall Style Prompt",
-      "properties": {
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "Concise prose containing only the style of media used and the general style within that type of media."
-      ],
-      "widgets_values_named": {
-        "value": "Concise prose containing only the style of media used and the general style within that type of media."
-      }
-    },
-    {
       "id": 389,
       "type": "ContextAnchoredTileTestCaptions",
       "pos": [
-        4750,
-        590
+        5190,
+        350
       ],
       "size": [
-        400,
+        390,
         390
       ],
       "flags": {},
@@ -532,20 +431,74 @@
           "link": 1085
         },
         {
-          "name": "tile_instruction",
+          "name": "global_style_instruction",
+          "shape": 7,
           "type": "STRING",
-          "widget": {
-            "name": "tile_instruction"
-          },
-          "link": 1083
+          "link": 1093
         },
         {
-          "name": "style_instruction",
+          "name": "tile_caption_instruction",
+          "shape": 7,
           "type": "STRING",
+          "link": 1095
+        },
+        {
+          "name": "tile_tags_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1097
+        },
+        {
+          "name": "tile_tags_with_prompt_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1098
+        },
+        {
+          "name": "tile_tags_verification_statement",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1099
+        },
+        {
+          "name": "caption_megapixels",
+          "type": "FLOAT",
           "widget": {
-            "name": "style_instruction"
+            "name": "caption_megapixels"
           },
-          "link": 1084
+          "link": 1100
+        },
+        {
+          "name": "tile_caption_max_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "tile_caption_max_tokens"
+          },
+          "link": 1096
+        },
+        {
+          "name": "global_style_max_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "global_style_max_tokens"
+          },
+          "link": 1094
+        },
+        {
+          "name": "tile_tags_verification_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "tile_tags_verification_threshold"
+          },
+          "link": 1103
+        },
+        {
+          "name": "tile_tags_position_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "tile_tags_position_threshold"
+          },
+          "link": 1104
         }
       ],
       "outputs": [
@@ -558,7 +511,7 @@
           ]
         },
         {
-          "name": "text",
+          "name": "tile_texts",
           "type": "STRING",
           "links": []
         },
@@ -568,38 +521,66 @@
           "links": [
             1080
           ]
+        },
+        {
+          "name": "prompt_fragments",
+          "type": "STRING",
+          "links": [
+            1089
+          ]
+        },
+        {
+          "name": "tags_listed",
+          "type": "STRING",
+          "links": [
+            1090
+          ]
+        },
+        {
+          "name": "tags_verified",
+          "type": "STRING",
+          "links": [
+            1091
+          ]
+        },
+        {
+          "name": "tags_final",
+          "type": "STRING",
+          "links": [
+            1092
+          ]
         }
       ],
       "properties": {
         "Node name for S&R": "ContextAnchoredTileTestCaptions"
       },
       "widgets_values": [
-        "custom instructions",
-        "",
+        "0",
+        true,
         true,
         "",
-        768,
-        0.15,
         "",
-        false
+        0.15,
+        0.9,
+        0.9
       ],
       "widgets_values_named": {
-        "preset": "custom instructions",
-        "tile_instruction": "",
-        "style_caption": true,
-        "style_instruction": "",
-        "max_tokens": 768,
-        "caption_megapixels": 0.15,
-        "tiles": "",
-        "with_neighbors": false
+        "tiles": "0",
+        "with_neighbors": true,
+        "position_terms": true,
+        "caption_megapixels": "",
+        "tile_caption_max_tokens": "",
+        "global_style_max_tokens": 0.15,
+        "tile_tags_verification_threshold": 0.9,
+        "tile_tags_position_threshold": 0.9
       }
     },
     {
       "id": 383,
       "type": "ContextAnchoredTileTestUpscale",
       "pos": [
-        4390,
-        860
+        4850,
+        660
       ],
       "size": [
         240,
@@ -644,12 +625,12 @@
       "id": 390,
       "type": "PreviewAny",
       "pos": [
-        4330,
-        1070
+        8430,
+        290
       ],
       "size": [
-        560,
-        670
+        810,
+        830
       ],
       "flags": {},
       "order": 17,
@@ -668,6 +649,7 @@
           "links": null
         }
       ],
+      "title": "Captions",
       "properties": {
         "Node name for S&R": "PreviewAny"
       },
@@ -678,8 +660,8 @@
       "id": 391,
       "type": "LiebsPicker",
       "pos": [
-        4960,
-        1090
+        9330,
+        900
       ],
       "size": [
         270,
@@ -728,15 +710,15 @@
       "id": 385,
       "type": "ContextAnchoredTileTestRender",
       "pos": [
-        5420,
-        310
+        9330,
+        300
       ],
       "size": [
         270,
         470
       ],
       "flags": {},
-      "order": 18,
+      "order": 22,
       "mode": 0,
       "inputs": [
         {
@@ -775,6 +757,22 @@
           "shape": 7,
           "type": "CONDITIONING",
           "link": 1064
+        },
+        {
+          "name": "canvas_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "canvas_tokens"
+          },
+          "link": 1102
+        },
+        {
+          "name": "crop_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "crop_tokens"
+          },
+          "link": 1101
         },
         {
           "name": "tiles",
@@ -847,7 +845,7 @@
         160
       ],
       "flags": {},
-      "order": 7,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -876,7 +874,7 @@
       "id": 346,
       "type": "PrimitiveStringMultiline",
       "pos": [
-        2380,
+        2390,
         680
       ],
       "size": [
@@ -886,7 +884,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 8,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -903,10 +901,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "blurry, Bokeh, noise, jpeg compression, scribbles, AI generated, shredded cloth"
+        "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
       ],
       "widgets_values_named": {
-        "value": "blurry, Bokeh, noise, jpeg compression, scribbles, AI generated, shredded cloth"
+        "value": "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -919,11 +917,11 @@
         310
       ],
       "size": [
-        290,
-        320
+        370,
+        510
       ],
       "flags": {},
-      "order": 9,
+      "order": 6,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -945,11 +943,11 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "ComfyUI-2x_00815_.png",
+        "ComfyUI-2x_00849_.png",
         "image"
       ],
       "widgets_values_named": {
-        "image": "ComfyUI-2x_00815_.png",
+        "image": "ComfyUI-2x_00849_.png",
         "upload": "image"
       }
     },
@@ -957,12 +955,12 @@
       "id": 387,
       "type": "PreviewImage",
       "pos": [
-        3290,
-        320
+        3380,
+        290
       ],
       "size": [
-        840,
-        590
+        1400,
+        820
       ],
       "flags": {},
       "order": 14,
@@ -981,18 +979,17 @@
           "links": null
         }
       ],
+      "title": "Preview Tile Layout",
       "properties": {
         "Node name for S&R": "PreviewImage"
-      },
-      "widgets_values": [],
-      "widgets_values_named": {}
+      }
     },
     {
       "id": 318,
       "type": "CLIPTextEncode",
       "pos": [
-        2380,
-        890
+        2500,
+        920
       ],
       "size": [
         290,
@@ -1042,6 +1039,331 @@
       },
       "color": "#322",
       "bgcolor": "#533"
+    },
+    {
+      "id": 395,
+      "type": "ShowText|pysssss",
+      "pos": [
+        5650,
+        290
+      ],
+      "size": [
+        690,
+        830
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1089
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Prompt Fragments",
+      "properties": {
+        "Node name for S&R": "ShowText|pysssss"
+      },
+      "widgets_values": [
+        "prompt_fragments: the connected prompt, split into fragments and sorted into subject and style\nA subject fragment joins every tile's tag candidates, and a fragment at p(style) 0.90 or above is style and is dropped.\n\n=== each fragment with its p(style) and its sort ===\n  0.04  subject  photo\n  1.00  style    breathtaking vivid cinematic cyberpunk dark fantasy sci-fi photo of a cyberpunk city\n  0.13  subject  cyberpunk cityscape at night\n  0.50  subject  photograph\n  0.99  style    futuristic aerial city photography from a distance\n  1.00  style    isometric view\n  0.99  style    deep depth of field\n  0.99  style    sharp details\n  0.13  subject  storm clouds\n  1.00  style    low iso\n  1.00  style    mirrorless camera photo\n  0.00  subject  bay in the distance\n  0.00  subject  gotham city\n  0.00  subject  chongqing\n  0.79  subject  massive tall foreboding dark skyscrapers\n  0.92  style    futuristic metropolis\n  0.18  subject  futuristic city\n  0.00  subject  buildings in the distance"
+      ],
+      "widgets_values_named": {
+        "text_0": "prompt_fragments: the connected prompt, split into fragments and sorted into subject and style\nA subject fragment joins every tile's tag candidates, and a fragment at p(style) 0.90 or above is style and is dropped.\n\n=== each fragment with its p(style) and its sort ===\n  0.04  subject  photo\n  1.00  style    breathtaking vivid cinematic cyberpunk dark fantasy sci-fi photo of a cyberpunk city\n  0.13  subject  cyberpunk cityscape at night\n  0.50  subject  photograph\n  0.99  style    futuristic aerial city photography from a distance\n  1.00  style    isometric view\n  0.99  style    deep depth of field\n  0.99  style    sharp details\n  0.13  subject  storm clouds\n  1.00  style    low iso\n  1.00  style    mirrorless camera photo\n  0.00  subject  bay in the distance\n  0.00  subject  gotham city\n  0.00  subject  chongqing\n  0.79  subject  massive tall foreboding dark skyscrapers\n  0.92  style    futuristic metropolis\n  0.18  subject  futuristic city\n  0.00  subject  buildings in the distance"
+      }
+    },
+    {
+      "id": 396,
+      "type": "ShowText|pysssss",
+      "pos": [
+        6350,
+        290
+      ],
+      "size": [
+        960,
+        830
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1090
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Listed",
+      "properties": {
+        "Node name for S&R": "ShowText|pysssss"
+      },
+      "widgets_values": [
+        "tags_listed: the tags the VL model listed for each tile\nThe VL model is asked the question below about each tile, and its reply is split into tags.\n\n=== question sent to the VL model for every tile ===\n  This image was made from the prompt: photo, breathtaking vivid cinematic Cyberpunk dark fantasy sci-fi photo of a Cyberpunk city, Cyberpunk cityscape at night, photograph, futuristic aerial city photography from a distance, isometric view, deep depth of field, sharp details, storm clouds, low iso, mirrorless camera photo, bay in the distance, Gotham city, Chongqing, massive tall foreboding dark skyscrapers, futuristic metropolis, futuristic city, buildings in the distance.\n  Use the prompt's words for the things the image shows.\n  \n  Tag this image. List every distinct visible thing in it: objects, people, animals, clothing, materials, and the setting. Use short lowercase noun phrases separated by commas. List each thing once. Do not list moods, styles, or ideas. Output only the tags.\n\n=== tile 0 (row 0, column 0) ===\n  VL model reply, verbatim\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, distant bay, mountains, cityscape, skyscrapers, mirrorless camera, photograph, isometric view, deep depth of field, sharp details, low iso, futuristic metropolis, cyberpunk city, Gotham city, Chongqing, buildings, aerial view\n  tags parsed from the reply (22)\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, distant bay, mountains, cityscape, skyscrapers, mirrorless camera, photograph, isometric view, deep depth of field, sharp details, low iso, futuristic metropolis, cyberpunk city, gotham city, chongqing, buildings, aerial view\n\n=== tile 1 (row 0, column 1) ===\n  VL model reply, verbatim\n    storm clouds, lightning, skyscrapers, towers, antennas, windows, lights, mountains, bay, cityscape, buildings, cranes, camera, mirrorless, photograph, isometric view, depth of field, sharp details, low iso, futuristic, cyberpunk, dark fantasy, sci-fi, Gotham, Chongqing, people, clothing, materials, metal, concrete, glass, steel\n  tags parsed from the reply (32)\n    storm clouds, lightning, skyscrapers, towers, antennas, windows, lights, mountains, bay, cityscape, buildings, cranes, camera, mirrorless, photograph, isometric view, depth of field, sharp details, low iso, futuristic, cyberpunk, dark fantasy, sci-fi, gotham, chongqing, people, clothing, materials, metal, concrete, glass, steel\n\n=== tile 6 (row 1, column 0) ===\n  VL model reply, verbatim\n    storm clouds, bay, skyscrapers, buildings, ships, boats, towers, antennas, pipes, railings, lights, water, mountains, cityscape, urban landscape, industrial structures, metal, concrete, glass, distant lights, rooftop, camera lens, mirrorless camera, photograph, aerial view, isometric view, low iso, fog, reflections, dark sky, night scene, futuristic, cyberpunk, Gotham city, Chongqing, urban environment, city lights, illuminated buildings, distant hills, water surface, vessel, structure, platform, ladder, electrical wires, glowing signs, illuminated windows, urban architecture, skyline\n  tags parsed from the reply (48)\n    storm clouds, bay, skyscrapers, buildings, ships, boats, towers, antennas, pipes, railings, lights, water, mountains, cityscape, urban landscape, industrial structures, metal, concrete, glass, distant lights, rooftop, camera lens, mirrorless camera, photograph, aerial view, isometric view, low iso, fog, reflections, dark sky, night scene, futuristic, cyberpunk, gotham city, chongqing, urban environment, city lights, illuminated buildings, distant hills, water surface, vessel, structure, platform, ladder, electrical wires, glowing signs, illuminated windows, urban architecture\n\n=== tile 7 (row 1, column 1) ===\n  VL model reply, verbatim\n    storm clouds, bay, skyscrapers, buildings, lights, water, ships, cranes, pipes, metal structures, windows, distant mountains, urban landscape, cityscape, mirrorless camera photo, isometric view, low iso, photograph, futuristic metropolis, cyberpunk city, Gotham city, Chongqing\n  tags parsed from the reply (22)\n    storm clouds, bay, skyscrapers, buildings, lights, water, ships, cranes, pipes, metal structures, windows, distant mountains, urban landscape, cityscape, mirrorless camera photo, isometric view, low iso, photograph, futuristic metropolis, cyberpunk city, gotham city, chongqing"
+      ],
+      "widgets_values_named": {
+        "text_0": "tags_listed: the tags the VL model listed for each tile\nThe VL model is asked the question below about each tile, and its reply is split into tags.\n\n=== question sent to the VL model for every tile ===\n  This image was made from the prompt: photo, breathtaking vivid cinematic Cyberpunk dark fantasy sci-fi photo of a Cyberpunk city, Cyberpunk cityscape at night, photograph, futuristic aerial city photography from a distance, isometric view, deep depth of field, sharp details, storm clouds, low iso, mirrorless camera photo, bay in the distance, Gotham city, Chongqing, massive tall foreboding dark skyscrapers, futuristic metropolis, futuristic city, buildings in the distance.\n  Use the prompt's words for the things the image shows.\n  \n  Tag this image. List every distinct visible thing in it: objects, people, animals, clothing, materials, and the setting. Use short lowercase noun phrases separated by commas. List each thing once. Do not list moods, styles, or ideas. Output only the tags.\n\n=== tile 0 (row 0, column 0) ===\n  VL model reply, verbatim\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, distant bay, mountains, cityscape, skyscrapers, mirrorless camera, photograph, isometric view, deep depth of field, sharp details, low iso, futuristic metropolis, cyberpunk city, Gotham city, Chongqing, buildings, aerial view\n  tags parsed from the reply (22)\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, distant bay, mountains, cityscape, skyscrapers, mirrorless camera, photograph, isometric view, deep depth of field, sharp details, low iso, futuristic metropolis, cyberpunk city, gotham city, chongqing, buildings, aerial view\n\n=== tile 1 (row 0, column 1) ===\n  VL model reply, verbatim\n    storm clouds, lightning, skyscrapers, towers, antennas, windows, lights, mountains, bay, cityscape, buildings, cranes, camera, mirrorless, photograph, isometric view, depth of field, sharp details, low iso, futuristic, cyberpunk, dark fantasy, sci-fi, Gotham, Chongqing, people, clothing, materials, metal, concrete, glass, steel\n  tags parsed from the reply (32)\n    storm clouds, lightning, skyscrapers, towers, antennas, windows, lights, mountains, bay, cityscape, buildings, cranes, camera, mirrorless, photograph, isometric view, depth of field, sharp details, low iso, futuristic, cyberpunk, dark fantasy, sci-fi, gotham, chongqing, people, clothing, materials, metal, concrete, glass, steel\n\n=== tile 6 (row 1, column 0) ===\n  VL model reply, verbatim\n    storm clouds, bay, skyscrapers, buildings, ships, boats, towers, antennas, pipes, railings, lights, water, mountains, cityscape, urban landscape, industrial structures, metal, concrete, glass, distant lights, rooftop, camera lens, mirrorless camera, photograph, aerial view, isometric view, low iso, fog, reflections, dark sky, night scene, futuristic, cyberpunk, Gotham city, Chongqing, urban environment, city lights, illuminated buildings, distant hills, water surface, vessel, structure, platform, ladder, electrical wires, glowing signs, illuminated windows, urban architecture, skyline\n  tags parsed from the reply (48)\n    storm clouds, bay, skyscrapers, buildings, ships, boats, towers, antennas, pipes, railings, lights, water, mountains, cityscape, urban landscape, industrial structures, metal, concrete, glass, distant lights, rooftop, camera lens, mirrorless camera, photograph, aerial view, isometric view, low iso, fog, reflections, dark sky, night scene, futuristic, cyberpunk, gotham city, chongqing, urban environment, city lights, illuminated buildings, distant hills, water surface, vessel, structure, platform, ladder, electrical wires, glowing signs, illuminated windows, urban architecture\n\n=== tile 7 (row 1, column 1) ===\n  VL model reply, verbatim\n    storm clouds, bay, skyscrapers, buildings, lights, water, ships, cranes, pipes, metal structures, windows, distant mountains, urban landscape, cityscape, mirrorless camera photo, isometric view, low iso, photograph, futuristic metropolis, cyberpunk city, Gotham city, Chongqing\n  tags parsed from the reply (22)\n    storm clouds, bay, skyscrapers, buildings, lights, water, ships, cranes, pipes, metal structures, windows, distant mountains, urban landscape, cityscape, mirrorless camera photo, isometric view, low iso, photograph, futuristic metropolis, cyberpunk city, gotham city, chongqing"
+      }
+    },
+    {
+      "id": 397,
+      "type": "ShowText|pysssss",
+      "pos": [
+        7320,
+        290
+      ],
+      "size": [
+        450,
+        830
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1091
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Verified",
+      "properties": {
+        "Node name for S&R": "ShowText|pysssss"
+      },
+      "widgets_values": [
+        "tags_verified: each candidate tag scored on its tile\nEach candidate is scored with tile_tags_verification_statement on its tile, and a score of 0.90 or above (tile_tags_verification_threshold) keeps it.\n\n=== tile 0 (row 0, column 0) ===\n  from the prompt\n    dropped  0.00  photo\n    dropped  0.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.93  bay in the distance\n    dropped  0.00  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    dropped  0.00  massive tall foreboding dark skyscrapers\n    dropped  0.00  futuristic city\n    dropped  0.35  buildings in the distance\n  from the VL model\n    kept     1.00  lightning\n    kept     1.00  tall towers\n    kept     1.00  red lights\n    kept     1.00  metal structures\n    kept     1.00  railings\n    dropped  0.86  distant bay\n    kept     1.00  mountains\n    dropped  0.01  cityscape\n    dropped  0.00  skyscrapers\n    dropped  0.00  mirrorless camera\n    dropped  0.00  isometric view\n    dropped  0.35  deep depth of field\n    kept     0.98  sharp details\n    dropped  0.01  low iso\n    dropped  0.00  futuristic metropolis\n    dropped  0.00  cyberpunk city\n    dropped  0.03  buildings\n    dropped  0.00  aerial view\n  left out before verification\n    none\n\n=== tile 1 (row 0, column 1) ===\n  from the prompt\n    dropped  0.00  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    dropped  0.60  bay in the distance\n    kept     1.00  gotham city\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  lightning\n    kept     1.00  skyscrapers\n    kept     1.00  towers\n    kept     1.00  antennas\n    kept     1.00  windows\n    kept     1.00  lights\n    kept     1.00  mountains\n    dropped  0.02  bay\n    kept     1.00  cityscape\n    kept     1.00  buildings\n    kept     1.00  cranes\n    dropped  0.00  camera\n    dropped  0.00  mirrorless\n    dropped  0.00  isometric view\n    kept     0.99  depth of field\n    kept     0.99  sharp details\n    dropped  0.01  low iso\n    kept     1.00  futuristic\n    kept     1.00  cyberpunk\n    dropped  0.03  dark fantasy\n    kept     1.00  sci-fi\n    kept     0.99  gotham\n    kept     1.00  metal\n    kept     1.00  concrete\n    kept     1.00  glass\n    kept     1.00  steel\n  left out before verification\n    people: category noun\n    clothing: category noun\n    materials: category noun\n\n=== tile 6 (row 1, column 0) ===\n  from the prompt\n    dropped  0.00  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.96  bay in the distance\n    dropped  0.69  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  bay\n    kept     1.00  skyscrapers\n    kept     1.00  buildings\n    kept     1.00  ships\n    kept     1.00  boats\n    kept     1.00  towers\n    kept     1.00  antennas\n    kept     1.00  pipes\n    kept     1.00  railings\n    kept     1.00  lights\n    kept     1.00  water\n    kept     1.00  mountains\n    kept     1.00  cityscape\n    kept     1.00  urban landscape\n    kept     1.00  industrial structures\n    kept     1.00  metal\n    kept     1.00  concrete\n    kept     0.97  glass\n    kept     1.00  distant lights\n    kept     1.00  rooftop\n    dropped  0.00  camera lens\n    dropped  0.00  mirrorless camera\n    kept     1.00  aerial view\n    dropped  0.00  isometric view\n    dropped  0.08  low iso\n    kept     1.00  fog\n    kept     1.00  reflections\n    kept     1.00  dark sky\n    kept     1.00  night scene\n    kept     1.00  futuristic\n    kept     1.00  cyberpunk\n    kept     1.00  urban environment\n    kept     1.00  city lights\n    kept     1.00  illuminated buildings\n    kept     1.00  distant hills\n    kept     1.00  water surface\n    kept     1.00  vessel\n    kept     1.00  structure\n  left out before verification\n    platform: over the cap\n    ladder: over the cap\n    electrical wires: over the cap\n    glowing signs: over the cap\n    illuminated windows: over the cap\n    urban architecture: over the cap\n\n=== tile 7 (row 1, column 1) ===\n  from the prompt\n    dropped  0.01  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.97  bay in the distance\n    dropped  0.35  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  bay\n    kept     1.00  skyscrapers\n    kept     1.00  buildings\n    kept     1.00  lights\n    kept     1.00  water\n    kept     1.00  ships\n    kept     1.00  cranes\n    kept     1.00  pipes\n    kept     1.00  metal structures\n    kept     1.00  windows\n    kept     1.00  distant mountains\n    kept     1.00  urban landscape\n    kept     1.00  cityscape\n    dropped  0.00  mirrorless camera photo\n    dropped  0.00  isometric view\n    dropped  0.01  low iso\n    kept     1.00  futuristic metropolis\n    kept     1.00  cyberpunk city\n  left out before verification\n    none"
+      ],
+      "widgets_values_named": {
+        "text_0": "tags_verified: each candidate tag scored on its tile\nEach candidate is scored with tile_tags_verification_statement on its tile, and a score of 0.90 or above (tile_tags_verification_threshold) keeps it.\n\n=== tile 0 (row 0, column 0) ===\n  from the prompt\n    dropped  0.00  photo\n    dropped  0.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.93  bay in the distance\n    dropped  0.00  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    dropped  0.00  massive tall foreboding dark skyscrapers\n    dropped  0.00  futuristic city\n    dropped  0.35  buildings in the distance\n  from the VL model\n    kept     1.00  lightning\n    kept     1.00  tall towers\n    kept     1.00  red lights\n    kept     1.00  metal structures\n    kept     1.00  railings\n    dropped  0.86  distant bay\n    kept     1.00  mountains\n    dropped  0.01  cityscape\n    dropped  0.00  skyscrapers\n    dropped  0.00  mirrorless camera\n    dropped  0.00  isometric view\n    dropped  0.35  deep depth of field\n    kept     0.98  sharp details\n    dropped  0.01  low iso\n    dropped  0.00  futuristic metropolis\n    dropped  0.00  cyberpunk city\n    dropped  0.03  buildings\n    dropped  0.00  aerial view\n  left out before verification\n    none\n\n=== tile 1 (row 0, column 1) ===\n  from the prompt\n    dropped  0.00  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    dropped  0.60  bay in the distance\n    kept     1.00  gotham city\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  lightning\n    kept     1.00  skyscrapers\n    kept     1.00  towers\n    kept     1.00  antennas\n    kept     1.00  windows\n    kept     1.00  lights\n    kept     1.00  mountains\n    dropped  0.02  bay\n    kept     1.00  cityscape\n    kept     1.00  buildings\n    kept     1.00  cranes\n    dropped  0.00  camera\n    dropped  0.00  mirrorless\n    dropped  0.00  isometric view\n    kept     0.99  depth of field\n    kept     0.99  sharp details\n    dropped  0.01  low iso\n    kept     1.00  futuristic\n    kept     1.00  cyberpunk\n    dropped  0.03  dark fantasy\n    kept     1.00  sci-fi\n    kept     0.99  gotham\n    kept     1.00  metal\n    kept     1.00  concrete\n    kept     1.00  glass\n    kept     1.00  steel\n  left out before verification\n    people: category noun\n    clothing: category noun\n    materials: category noun\n\n=== tile 6 (row 1, column 0) ===\n  from the prompt\n    dropped  0.00  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.96  bay in the distance\n    dropped  0.69  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  bay\n    kept     1.00  skyscrapers\n    kept     1.00  buildings\n    kept     1.00  ships\n    kept     1.00  boats\n    kept     1.00  towers\n    kept     1.00  antennas\n    kept     1.00  pipes\n    kept     1.00  railings\n    kept     1.00  lights\n    kept     1.00  water\n    kept     1.00  mountains\n    kept     1.00  cityscape\n    kept     1.00  urban landscape\n    kept     1.00  industrial structures\n    kept     1.00  metal\n    kept     1.00  concrete\n    kept     0.97  glass\n    kept     1.00  distant lights\n    kept     1.00  rooftop\n    dropped  0.00  camera lens\n    dropped  0.00  mirrorless camera\n    kept     1.00  aerial view\n    dropped  0.00  isometric view\n    dropped  0.08  low iso\n    kept     1.00  fog\n    kept     1.00  reflections\n    kept     1.00  dark sky\n    kept     1.00  night scene\n    kept     1.00  futuristic\n    kept     1.00  cyberpunk\n    kept     1.00  urban environment\n    kept     1.00  city lights\n    kept     1.00  illuminated buildings\n    kept     1.00  distant hills\n    kept     1.00  water surface\n    kept     1.00  vessel\n    kept     1.00  structure\n  left out before verification\n    platform: over the cap\n    ladder: over the cap\n    electrical wires: over the cap\n    glowing signs: over the cap\n    illuminated windows: over the cap\n    urban architecture: over the cap\n\n=== tile 7 (row 1, column 1) ===\n  from the prompt\n    dropped  0.01  photo\n    kept     1.00  cyberpunk cityscape at night\n    dropped  0.00  photograph, also listed by the VL model\n    kept     1.00  storm clouds, also listed by the VL model\n    kept     0.97  bay in the distance\n    dropped  0.35  gotham city, also listed by the VL model\n    dropped  0.00  chongqing, also listed by the VL model\n    kept     1.00  massive tall foreboding dark skyscrapers\n    kept     1.00  futuristic city\n    kept     1.00  buildings in the distance\n  from the VL model\n    kept     1.00  bay\n    kept     1.00  skyscrapers\n    kept     1.00  buildings\n    kept     1.00  lights\n    kept     1.00  water\n    kept     1.00  ships\n    kept     1.00  cranes\n    kept     1.00  pipes\n    kept     1.00  metal structures\n    kept     1.00  windows\n    kept     1.00  distant mountains\n    kept     1.00  urban landscape\n    kept     1.00  cityscape\n    dropped  0.00  mirrorless camera photo\n    dropped  0.00  isometric view\n    dropped  0.01  low iso\n    kept     1.00  futuristic metropolis\n    kept     1.00  cyberpunk city\n  left out before verification\n    none"
+      }
+    },
+    {
+      "id": 398,
+      "type": "ShowText|pysssss",
+      "pos": [
+        7780,
+        290
+      ],
+      "size": [
+        620,
+        830
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1092
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Final",
+      "properties": {
+        "Node name for S&R": "ShowText|pysssss"
+      },
+      "widgets_values": [
+        "tags_final: the kept tags of each tile, their positions and the tile text\nA kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on six strips of the tile, three rows and three columns. A tag no strip holds is dropped. On each axis where exactly one strip holds a tag, that strip names the tag's position term. The tags with their terms make the tile text.\n\n=== tile 0 (row 0, column 0) ===\n  dropped as a subset of a longer kept tag\n    none\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    storm clouds: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: dropped, no strip holds it\n      rows     top 0.00  center 0.00  bottom 0.69\n      columns  left 0.12  center 0.77  right 0.83\n    lightning: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.99\n      columns  left 0.00  center 1.00  right 1.00\n    tall towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    red lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    metal structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    railings: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    mountains: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    sharp details: dropped, no strip holds it\n      rows     top 0.00  center 0.14  bottom 0.00\n      columns  left 0.01  center 0.01  right 0.17\n  tile text\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, mountains bottom\n\n=== tile 1 (row 0, column 1) ===\n  dropped as a subset of a longer kept tag\n    skyscrapers\n    cityscape\n    buildings\n    futuristic\n    cyberpunk\n    gotham\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept at bottom-right\n      rows     top 0.00  center 0.17  bottom 1.00\n      columns  left 0.00  center 0.50  right 1.00\n    storm clouds: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    gotham city: kept at bottom\n      rows     top 0.00  center 0.83  bottom 1.00\n      columns  left 0.00  center 0.20  right 0.40\n    massive tall foreboding dark skyscrapers: kept at right\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 0.03  right 1.00\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    buildings in the distance: kept at center\n      rows     top 0.08  center 0.97  bottom 1.00\n      columns  left 0.65  center 1.00  right 0.00\n    lightning: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    antennas: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    windows: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    mountains: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.94\n    cranes: kept at bottom\n      rows     top 0.31  center 0.01  bottom 1.00\n      columns  left 0.00  center 0.01  right 0.00\n    depth of field: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.90  center 0.99  bottom 1.00\n      columns  left 0.98  center 0.99  right 0.99\n    sharp details: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.12  center 0.31  bottom 0.06\n      columns  left 0.96  center 0.40  right 1.00\n    sci-fi: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.45  center 1.00  bottom 1.00\n      columns  left 0.07  center 0.99  right 1.00\n    metal: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    concrete: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.01  center 1.00  bottom 1.00\n      columns  left 0.99  center 0.14  right 1.00\n    glass: kept at right\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.01  center 0.77  right 1.00\n    steel: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 0.69  right 1.00\n  tile text\n    cyberpunk cityscape at night bottom-right, storm clouds, gotham city bottom, massive tall foreboding dark skyscrapers right, futuristic city, buildings in the distance center, lightning, towers, antennas, windows, lights, mountains bottom, cranes bottom, depth of field, sharp details, sci-fi, metal, concrete, glass right, steel\n\n=== tile 6 (row 1, column 0) ===\n  dropped as a subset of a longer kept tag\n    bay\n    skyscrapers\n    buildings\n    lights\n    water\n    cityscape\n    futuristic\n    cyberpunk\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.01  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    storm clouds: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: kept at center\n      rows     top 0.23  center 1.00  bottom 1.00\n      columns  left 0.77  center 1.00  right 0.45\n    massive tall foreboding dark skyscrapers: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.92\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    buildings in the distance: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.95  center 1.00  bottom 0.31\n      columns  left 1.00  center 1.00  right 0.99\n    ships: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.06  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    boats: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    antennas: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 0.99  bottom 1.00\n      columns  left 0.40  center 1.00  right 1.00\n    pipes: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    railings: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    mountains: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban landscape: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.65  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    industrial structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    metal: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    concrete: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.45  center 1.00  bottom 1.00\n      columns  left 0.88  center 1.00  right 1.00\n    glass: kept at center\n      rows     top 0.00  center 1.00  bottom 0.02\n      columns  left 1.00  center 1.00  right 0.02\n    distant lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    rooftop: kept at center\n      rows     top 0.07  center 0.98  bottom 1.00\n      columns  left 0.88  center 1.00  right 0.60\n    aerial view: kept at bottom-left\n      rows     top 0.00  center 0.88  bottom 1.00\n      columns  left 0.90  center 0.73  right 0.00\n    fog: kept at center\n      rows     top 0.40  center 1.00  bottom 0.01\n      columns  left 1.00  center 1.00  right 0.01\n    reflections: kept at bottom\n      rows     top 0.00  center 0.12  bottom 0.93\n      columns  left 1.00  center 1.00  right 0.23\n    dark sky: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    night scene: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban environment: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.93  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    city lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.97\n      columns  left 1.00  center 1.00  right 1.00\n    illuminated buildings: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.17  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    distant hills: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    water surface: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    vessel: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    structure: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n  tile text\n    cyberpunk cityscape at night, storm clouds top, bay in the distance center, massive tall foreboding dark skyscrapers, futuristic city, buildings in the distance, ships, boats, towers, antennas, pipes, railings, mountains top, urban landscape, industrial structures, metal, concrete, glass center, distant lights, rooftop center, aerial view bottom-left, fog center, reflections bottom, dark sky, night scene, urban environment, city lights, illuminated buildings, distant hills top, water surface, vessel, structure\n\n=== tile 7 (row 1, column 1) ===\n  dropped as a subset of a longer kept tag\n    bay\n    skyscrapers\n    buildings\n    cityscape\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    storm clouds: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: kept at bottom\n      rows     top 0.17  center 0.07  bottom 1.00\n      columns  left 0.77  center 0.97  right 0.98\n    massive tall foreboding dark skyscrapers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.99  center 1.00  right 1.00\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.99  center 1.00  right 1.00\n    buildings in the distance: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.96  center 1.00  right 1.00\n    lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    water: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 0.99  bottom 1.00\n      columns  left 0.45  center 1.00  right 1.00\n    ships: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 0.02\n    cranes: kept at top-left\n      rows     top 1.00  center 0.01  bottom 0.01\n      columns  left 1.00  center 0.00  right 0.00\n    pipes: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.93  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    metal structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    windows: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    distant mountains: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban landscape: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    futuristic metropolis: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.97  center 1.00  right 1.00\n    cyberpunk city: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n  tile text\n    cyberpunk cityscape at night, storm clouds top, bay in the distance bottom, massive tall foreboding dark skyscrapers, futuristic city, buildings in the distance, lights, water, ships bottom, cranes top-left, pipes, metal structures, windows, distant mountains top, urban landscape, futuristic metropolis, cyberpunk city"
+      ],
+      "widgets_values_named": {
+        "text_0": "tags_final: the kept tags of each tile, their positions and the tile text\nA kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on six strips of the tile, three rows and three columns. A tag no strip holds is dropped. On each axis where exactly one strip holds a tag, that strip names the tag's position term. The tags with their terms make the tile text.\n\n=== tile 0 (row 0, column 0) ===\n  dropped as a subset of a longer kept tag\n    none\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    storm clouds: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: dropped, no strip holds it\n      rows     top 0.00  center 0.00  bottom 0.69\n      columns  left 0.12  center 0.77  right 0.83\n    lightning: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.99\n      columns  left 0.00  center 1.00  right 1.00\n    tall towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    red lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    metal structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    railings: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    mountains: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    sharp details: dropped, no strip holds it\n      rows     top 0.00  center 0.14  bottom 0.00\n      columns  left 0.01  center 0.01  right 0.17\n  tile text\n    storm clouds, lightning, tall towers, red lights, metal structures, railings, mountains bottom\n\n=== tile 1 (row 0, column 1) ===\n  dropped as a subset of a longer kept tag\n    skyscrapers\n    cityscape\n    buildings\n    futuristic\n    cyberpunk\n    gotham\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept at bottom-right\n      rows     top 0.00  center 0.17  bottom 1.00\n      columns  left 0.00  center 0.50  right 1.00\n    storm clouds: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    gotham city: kept at bottom\n      rows     top 0.00  center 0.83  bottom 1.00\n      columns  left 0.00  center 0.20  right 0.40\n    massive tall foreboding dark skyscrapers: kept at right\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 0.03  right 1.00\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    buildings in the distance: kept at center\n      rows     top 0.08  center 0.97  bottom 1.00\n      columns  left 0.65  center 1.00  right 0.00\n    lightning: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    antennas: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    windows: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    mountains: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.94\n    cranes: kept at bottom\n      rows     top 0.31  center 0.01  bottom 1.00\n      columns  left 0.00  center 0.01  right 0.00\n    depth of field: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.90  center 0.99  bottom 1.00\n      columns  left 0.98  center 0.99  right 0.99\n    sharp details: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.12  center 0.31  bottom 0.06\n      columns  left 0.96  center 0.40  right 1.00\n    sci-fi: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.45  center 1.00  bottom 1.00\n      columns  left 0.07  center 0.99  right 1.00\n    metal: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    concrete: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.01  center 1.00  bottom 1.00\n      columns  left 0.99  center 0.14  right 1.00\n    glass: kept at right\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 0.01  center 0.77  right 1.00\n    steel: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 0.69  right 1.00\n  tile text\n    cyberpunk cityscape at night bottom-right, storm clouds, gotham city bottom, massive tall foreboding dark skyscrapers right, futuristic city, buildings in the distance center, lightning, towers, antennas, windows, lights, mountains bottom, cranes bottom, depth of field, sharp details, sci-fi, metal, concrete, glass right, steel\n\n=== tile 6 (row 1, column 0) ===\n  dropped as a subset of a longer kept tag\n    bay\n    skyscrapers\n    buildings\n    lights\n    water\n    cityscape\n    futuristic\n    cyberpunk\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.01  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    storm clouds: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: kept at center\n      rows     top 0.23  center 1.00  bottom 1.00\n      columns  left 0.77  center 1.00  right 0.45\n    massive tall foreboding dark skyscrapers: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.92\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    buildings in the distance: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.95  center 1.00  bottom 0.31\n      columns  left 1.00  center 1.00  right 0.99\n    ships: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.06  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    boats: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    towers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    antennas: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 0.99  bottom 1.00\n      columns  left 0.40  center 1.00  right 1.00\n    pipes: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    railings: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 1.00\n    mountains: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban landscape: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.65  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    industrial structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    metal: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    concrete: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.45  center 1.00  bottom 1.00\n      columns  left 0.88  center 1.00  right 1.00\n    glass: kept at center\n      rows     top 0.00  center 1.00  bottom 0.02\n      columns  left 1.00  center 1.00  right 0.02\n    distant lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    rooftop: kept at center\n      rows     top 0.07  center 0.98  bottom 1.00\n      columns  left 0.88  center 1.00  right 0.60\n    aerial view: kept at bottom-left\n      rows     top 0.00  center 0.88  bottom 1.00\n      columns  left 0.90  center 0.73  right 0.00\n    fog: kept at center\n      rows     top 0.40  center 1.00  bottom 0.01\n      columns  left 1.00  center 1.00  right 0.01\n    reflections: kept at bottom\n      rows     top 0.00  center 0.12  bottom 0.93\n      columns  left 1.00  center 1.00  right 0.23\n    dark sky: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    night scene: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban environment: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.93  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    city lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 0.97\n      columns  left 1.00  center 1.00  right 1.00\n    illuminated buildings: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.17  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    distant hills: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    water surface: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.00\n    vessel: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    structure: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n  tile text\n    cyberpunk cityscape at night, storm clouds top, bay in the distance center, massive tall foreboding dark skyscrapers, futuristic city, buildings in the distance, ships, boats, towers, antennas, pipes, railings, mountains top, urban landscape, industrial structures, metal, concrete, glass center, distant lights, rooftop center, aerial view bottom-left, fog center, reflections bottom, dark sky, night scene, urban environment, city lights, illuminated buildings, distant hills top, water surface, vessel, structure\n\n=== tile 7 (row 1, column 1) ===\n  dropped as a subset of a longer kept tag\n    bay\n    skyscrapers\n    buildings\n    cityscape\n  positions of the kept tags. A strip holds a tag at 0.90 or above (tile_tags_position_threshold)\n    cyberpunk cityscape at night: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    storm clouds: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    bay in the distance: kept at bottom\n      rows     top 0.17  center 0.07  bottom 1.00\n      columns  left 0.77  center 0.97  right 0.98\n    massive tall foreboding dark skyscrapers: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.99  center 1.00  right 1.00\n    futuristic city: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.99  center 1.00  right 1.00\n    buildings in the distance: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.96  center 1.00  right 1.00\n    lights: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    water: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 0.99  bottom 1.00\n      columns  left 0.45  center 1.00  right 1.00\n    ships: kept at bottom\n      rows     top 0.00  center 0.00  bottom 1.00\n      columns  left 0.00  center 1.00  right 0.02\n    cranes: kept at top-left\n      rows     top 1.00  center 0.01  bottom 0.01\n      columns  left 1.00  center 0.00  right 0.00\n    pipes: kept with no term, no axis has exactly one strip holding it\n      rows     top 0.93  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 0.98\n    metal structures: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    windows: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    distant mountains: kept at top\n      rows     top 1.00  center 0.00  bottom 0.00\n      columns  left 1.00  center 1.00  right 1.00\n    urban landscape: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n    futuristic metropolis: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 0.97  center 1.00  right 1.00\n    cyberpunk city: kept with no term, no axis has exactly one strip holding it\n      rows     top 1.00  center 1.00  bottom 1.00\n      columns  left 1.00  center 1.00  right 1.00\n  tile text\n    cyberpunk cityscape at night, storm clouds top, bay in the distance bottom, massive tall foreboding dark skyscrapers, futuristic city, buildings in the distance, lights, water, ships bottom, cranes top-left, pipes, metal structures, windows, distant mountains top, urban landscape, futuristic metropolis, cyberpunk city"
+      }
+    },
+    {
+      "id": 399,
+      "type": "ContextAnchoredTileTestSettings",
+      "pos": [
+        4830,
+        310
+      ],
+      "size": [
+        290,
+        280
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "global_style_instruction",
+          "type": "STRING",
+          "links": [
+            1093
+          ]
+        },
+        {
+          "name": "global_style_max_tokens",
+          "type": "INT",
+          "links": [
+            1094
+          ]
+        },
+        {
+          "name": "tile_caption_instruction",
+          "type": "STRING",
+          "links": [
+            1095
+          ]
+        },
+        {
+          "name": "tile_caption_max_tokens",
+          "type": "INT",
+          "links": [
+            1096
+          ]
+        },
+        {
+          "name": "tile_tags_instruction",
+          "type": "STRING",
+          "links": [
+            1097
+          ]
+        },
+        {
+          "name": "tile_tags_with_prompt_instruction",
+          "type": "STRING",
+          "links": [
+            1098
+          ]
+        },
+        {
+          "name": "tile_tags_verification_statement",
+          "type": "STRING",
+          "links": [
+            1099
+          ]
+        },
+        {
+          "name": "caption_megapixels",
+          "type": "FLOAT",
+          "links": [
+            1100
+          ]
+        },
+        {
+          "name": "canvas_tokens",
+          "type": "INT",
+          "links": [
+            1102
+          ]
+        },
+        {
+          "name": "crop_tokens",
+          "type": "INT",
+          "links": [
+            1101
+          ]
+        },
+        {
+          "name": "tile_tags_verification_threshold",
+          "type": "FLOAT",
+          "links": [
+            1103
+          ]
+        },
+        {
+          "name": "tile_tags_position_threshold",
+          "type": "FLOAT",
+          "links": [
+            1104
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestSettings"
+      },
+      "widgets_values": [
+        "tags"
+      ],
+      "widgets_values_named": {
+        "preset": "tags"
+      }
+    },
+    {
+      "id": 406,
+      "type": "MarkdownNote",
+      "pos": [
+        4820,
+        1510
+      ],
+      "size": [
+        780,
+        230
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note about Custom Input",
+      "properties": {},
+      "widgets_values": [
+        "### Tile Test: Settings\n\nThis node outputs every value of one preset. The presets come from `settings.user.toml` when it exists, or from `settings.toml` when it does not. The files are in `ComfyUI\\custom_nodes\\ComfyUI-ContextAnchoredTileRefine`.\n\n- Copy `settings.toml` to `settings.user.toml` to edit the presets. Your own copy survives a node update.\n- `settings.user.example.toml` holds more presets to copy from.\n- A new or renamed preset appears in the `preset` list after a ComfyUI restart. An edited wording applies on the next run.\n\n### Tile Test: Captions\n\nThis node takes each instruction as an input.\n\n- Wire each input from Tile Test: Settings, or from your own text node to test a wording without editing a file.\n- An input that is connected and holds text is on. Disconnect it to turn that step off.\n- Connect `tile_caption_instruction` or `tile_tags_instruction`, never both. This sets whether each tile gets a caption or tags.\n- The number widgets can be set by hand or wired from Tile Test: Settings."
+      ],
+      "widgets_values_named": {
+        "text": "### Tile Test: Settings\n\nThis node outputs every value of one preset. The presets come from `settings.user.toml` when it exists, or from `settings.toml` when it does not. The files are in `ComfyUI\\custom_nodes\\ComfyUI-ContextAnchoredTileRefine`.\n\n- Copy `settings.toml` to `settings.user.toml` to edit the presets. Your own copy survives a node update.\n- `settings.user.example.toml` holds more presets to copy from.\n- A new or renamed preset appears in the `preset` list after a ComfyUI restart. An edited wording applies on the next run.\n\n### Tile Test: Captions\n\nThis node takes each instruction as an input.\n\n- Wire each input from Tile Test: Settings, or from your own text node to test a wording without editing a file.\n- An input that is connected and holds text is on. Disconnect it to turn that step off.\n- Connect `tile_caption_instruction` or `tile_tags_instruction`, never both. This sets whether each tile gets a caption or tags.\n- The number widgets can be set by hand or wired from Tile Test: Settings."
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 407,
+      "type": "MarkdownNote",
+      "pos": [
+        1880,
+        890
+      ],
+      "size": [
+        590,
+        350
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note about this Workflow",
+      "properties": {},
+      "widgets_values": [
+        "## Tile Test Workflow\n\nThis workflow runs the same process as the VL upscale nodes, with each stage as its own node. Use it to find and fix a problem in one area of an image, or to run a full upscale.\n\n### Nodes\n\n1. **Tile Test: Layout** solves the tile grid and draws it over your image, with each tile's number, row and column.\n2. **Tile Test: Upscale** runs the upscale model. Skip it for an image that is already upscaled, with `upscale_by` at 1.0.\n3. **Tile Test: Settings** outputs the values of one preset from the settings file.\n4. **Tile Test: Captions** writes the text for each tile and shows each step the VL model took to write it.\n5. **Tile Test: Render** refines the tiles you name, or the entire image.\n\n### Fixing a problem area\n\n1. Find the tile number over the problem area in the Layout preview.\n2. Enter that number in `tiles` on the Captions node. Its `tiles` output passes the number to Render.\n3. Read the Captions outputs to see what the VL model wrote for that tile.\n4. Change a setting or a wording, then render the tile again to compare.\n\nTurn on `with_neighbors` on both nodes to render the tile together with its bordering tiles, which is closer to the full run. The seed is only on the Render node, so a new seed reuses the upscale and the captions from the cache.\n\n### Full upscale\n\nLeave `tiles` empty on the Captions node to caption every tile. Render then refines the entire image."
+      ],
+      "widgets_values_named": {
+        "text": "## Tile Test Workflow\n\nThis workflow runs the same process as the VL upscale nodes, with each stage as its own node. Use it to find and fix a problem in one area of an image, or to run a full upscale.\n\n### Nodes\n\n1. **Tile Test: Layout** solves the tile grid and draws it over your image, with each tile's number, row and column.\n2. **Tile Test: Upscale** runs the upscale model. Skip it for an image that is already upscaled, with `upscale_by` at 1.0.\n3. **Tile Test: Settings** outputs the values of one preset from the settings file.\n4. **Tile Test: Captions** writes the text for each tile and shows each step the VL model took to write it.\n5. **Tile Test: Render** refines the tiles you name, or the entire image.\n\n### Fixing a problem area\n\n1. Find the tile number over the problem area in the Layout preview.\n2. Enter that number in `tiles` on the Captions node. Its `tiles` output passes the number to Render.\n3. Read the Captions outputs to see what the VL model wrote for that tile.\n4. Change a setting or a wording, then render the tile again to compare.\n\nTurn on `with_neighbors` on both nodes to render the tile together with its bordering tiles, which is closer to the full run. The seed is only on the Render node, so a new seed reuses the upscale and the captions from the cache.\n\n### Full upscale\n\nLeave `tiles` empty on the Captions node to caption every tile. Render then refines the entire image."
+      },
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -1174,14 +1496,6 @@
       "IMAGE"
     ],
     [
-      1074,
-      382,
-      0,
-      389,
-      1,
-      "CATR_LAYOUT"
-    ],
-    [
       1076,
       389,
       0,
@@ -1190,36 +1504,12 @@
       "CATR_CAPTIONS"
     ],
     [
-      1077,
-      383,
-      0,
-      389,
-      0,
-      "IMAGE"
-    ],
-    [
-      1078,
-      294,
-      0,
-      389,
-      2,
-      "CLIP"
-    ],
-    [
       1079,
       389,
       0,
       390,
       0,
       "CATR_CAPTIONS"
-    ],
-    [
-      1080,
-      389,
-      2,
-      385,
-      7,
-      "STRING"
     ],
     [
       1081,
@@ -1238,20 +1528,60 @@
       "IMAGE"
     ],
     [
-      1083,
-      392,
-      0,
+      1089,
       389,
-      4,
+      3,
+      395,
+      0,
       "STRING"
     ],
     [
-      1084,
-      393,
+      1090,
+      389,
+      4,
+      396,
       0,
+      "STRING"
+    ],
+    [
+      1091,
       389,
       5,
+      397,
+      0,
       "STRING"
+    ],
+    [
+      1092,
+      389,
+      6,
+      398,
+      0,
+      "STRING"
+    ],
+    [
+      1077,
+      383,
+      0,
+      389,
+      0,
+      "IMAGE"
+    ],
+    [
+      1074,
+      382,
+      0,
+      389,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1078,
+      294,
+      0,
+      389,
+      2,
+      "CLIP"
     ],
     [
       1085,
@@ -1260,41 +1590,181 @@
       389,
       3,
       "STRING"
+    ],
+    [
+      1093,
+      399,
+      0,
+      389,
+      4,
+      "STRING"
+    ],
+    [
+      1095,
+      399,
+      2,
+      389,
+      5,
+      "STRING"
+    ],
+    [
+      1097,
+      399,
+      4,
+      389,
+      6,
+      "STRING"
+    ],
+    [
+      1098,
+      399,
+      5,
+      389,
+      7,
+      "STRING"
+    ],
+    [
+      1099,
+      399,
+      6,
+      389,
+      8,
+      "STRING"
+    ],
+    [
+      1100,
+      399,
+      7,
+      389,
+      9,
+      "FLOAT"
+    ],
+    [
+      1096,
+      399,
+      3,
+      389,
+      10,
+      "INT"
+    ],
+    [
+      1094,
+      399,
+      1,
+      389,
+      11,
+      "INT"
+    ],
+    [
+      1103,
+      399,
+      10,
+      389,
+      12,
+      "FLOAT"
+    ],
+    [
+      1104,
+      399,
+      11,
+      389,
+      13,
+      "FLOAT"
+    ],
+    [
+      1102,
+      399,
+      8,
+      385,
+      7,
+      "INT"
+    ],
+    [
+      1101,
+      399,
+      9,
+      385,
+      8,
+      "INT"
+    ],
+    [
+      1080,
+      389,
+      2,
+      385,
+      9,
+      "STRING"
     ]
   ],
   "groups": [
     {
       "id": 8,
-      "title": "Captions",
+      "title": "Caption Customization",
       "bounding": [
-        4170,
+        4810,
         210,
-        1180,
-        800
+        800,
+        600
       ],
       "color": "#3f789e",
       "flags": {}
     },
     {
       "id": 9,
-      "title": "Generate",
+      "title": "Configuration",
       "bounding": [
         1950,
         210,
-        2210,
-        800
+        1400,
+        940
       ],
       "color": "#3f789e",
       "flags": {}
     },
     {
       "id": 12,
-      "title": "Upscale",
+      "title": "Generate",
       "bounding": [
-        5360,
+        9280,
         210,
-        1180,
-        800
+        1450,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 13,
+      "title": "Caption Debug",
+      "bounding": [
+        5620,
+        210,
+        3650,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 14,
+      "title": "Tile Layout",
+      "bounding": [
+        3360,
+        210,
+        1440,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 15,
+      "title": "Custom Input",
+      "bounding": [
+        4810,
+        820,
+        800,
+        640
       ],
       "color": "#3f789e",
       "flags": {}
@@ -1303,13 +1773,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9229599817706672,
+      "scale": 1.635079908265601,
       "offset": [
-        -3570.6148403594498,
-        110.03778000309902
+        -2140.664793362575,
+        -199.38862232309577
       ]
     },
-    "frontendVersion": "1.52.7"
+    "frontendVersion": "1.53.6"
   },
   "version": 0.4
 }

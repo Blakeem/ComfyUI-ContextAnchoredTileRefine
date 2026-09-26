@@ -529,6 +529,11 @@ without that doc's temporal design.
 ## Tests / gates
 
 Venv python: `C:\Users\Blake\Documents\ComfyUI\.venv\Scripts\python.exe` (do not `pip install`).
+ComfyUI core source: `C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI`, a git checkout of
+`Comfy-Org/ComfyUI` on `master`. This is the core the app runs and the first root
+`tests/conftest.py` resolves. Read its version from `comfyui_version.py` or `git describe --tags`.
+`C:\Users\Blake\Documents\ComfyUI` holds only the venv, models and custom nodes, with no core
+code.
 - Default gate, must be green with **0 skips**: `<venv> -m pytest tests -m "not gpu"`
 - **Lint gate, required before any commit**: `uvx ruff@0.16.2 check .` must report zero
   findings. The version is pinned (ruff 0.16 changed the default rule set) and the config

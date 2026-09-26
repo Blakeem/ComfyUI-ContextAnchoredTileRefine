@@ -1,5 +1,9 @@
-"""The tile testing chain: the Layout node, the Upscale node, the Captions node and the
-Render node.
+"""The tile testing chain: the Settings node, the Layout node, the Upscale node, the Captions
+node and the Render node.
+
+`ContextAnchoredTileTestSettings` outputs every value of one settings file preset and the
+[vision] table, one socket per settings key, read when it runs. Wired into the Captions and
+Render nodes, any one value can be swapped for a text node without editing the file.
 
 `ContextAnchoredTileTestLayout` solves the production grid for the size the image will have
 AFTER upscaling and draws that grid over a preview, so the tile count and every tile's number
@@ -11,13 +15,16 @@ one `grid.build_layout` call, so what the overlay shows is what the engine will 
 is what buys the chain its caching: ComfyUI holds the upscaled canvas, and a downstream re-run
 at a new seed never pays for it again.
 
-`ContextAnchoredTileTestCaptions` writes one VLM caption per chosen tile through the same
-`captions.generate_caption_set` the engine runs, from a settings file preset or from its own
-instruction widgets, under one progress bar. The style caption is kept apart from the tile
-captions and listed once, labelled, at the top. Its inputs carry no seed, so the captions survive
-a seed re-roll further down the chain, and its IS_CHANGED re-runs it when the settings file
-changes. Its tiles output feeds the Render node's tiles input, so one tile is captioned and
-rendered together.
+`ContextAnchoredTileTestCaptions` writes one text per chosen tile under one progress bar, from
+its optional text sockets. A socket is on when it is connected and holds more than whitespace,
+and off otherwise, so a stage is turned off by disconnecting it. tile_caption_instruction runs
+the caption kind through the engine's own `captions.generate_caption_set`, and
+tile_tags_instruction runs the tags kind through `tags.generate_tag_trace`, whose texts are
+the ones the engine writes. Its tile_texts output lists the style caption once above every
+tile's own text, and four debug outputs print the prompt fragment sort, the listed tags, the
+verification scores and the final tags per tile. Its inputs carry no seed, so the texts
+survive a seed re-roll further down the chain. Its tiles output feeds the Render node's tiles
+input, so one tile is captioned and rendered together.
 
 `ContextAnchoredTileTestRender` runs the production VL engine over that canvas. Named tiles
 are rendered one at a time as region runs over the block the tile and its bordering tiles
@@ -37,15 +44,51 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from . import captions, grid, node, progress, sampling, upscale, vl
+from . import captions, grid, node, progress, sampling, tags, upscale, vl
 
-# The Captions node's preset option that reads the instruction widgets instead of a settings
-# file preset. A named preset ignores those widgets, so a trial wording can stay in them.
-CUSTOM_PRESET = "custom instructions"
+CAPTIONS_NODE = "Tile Test: Captions"
+
+# The Captions node's instruction sockets in input order, each with the tile text kind that
+# reads it, or None for a socket both kinds read.
+INSTRUCTION_SOCKETS = (
+    ("global_style_instruction", None),
+    ("tile_caption_instruction", captions.TILE_TEXT_CAPTION),
+    ("tile_tags_instruction", captions.TILE_TEXT_TAGS),
+    ("tile_tags_with_prompt_instruction", captions.TILE_TEXT_TAGS),
+    ("tile_tags_verification_statement", captions.TILE_TEXT_TAGS),
+)
 
 # The overlay preview's pixel budget. Large enough to read a label on an 8K canvas, small
 # enough that the picture stays a cheap preview.
 OVERLAY_MEGAPIXELS = 2.0
+
+# Every Tile Test: Settings output in order, as (settings key, socket type). The first seven
+# are preset keys and the last three the [vision] table's.
+SETTINGS_PRESET_OUTPUTS = (
+    ("global_style_instruction", "STRING"),
+    ("global_style_max_tokens", "INT"),
+    ("tile_caption_instruction", "STRING"),
+    ("tile_caption_max_tokens", "INT"),
+    ("tile_tags_instruction", "STRING"),
+    ("tile_tags_with_prompt_instruction", "STRING"),
+    ("tile_tags_verification_statement", "STRING"),
+)
+SETTINGS_VISION_OUTPUTS = (
+    ("caption_megapixels", "FLOAT"),
+    ("canvas_tokens", "INT"),
+    ("crop_tokens", "INT"),
+)
+# Preset keys added after the node was first wired. They come after the vision outputs because
+# a saved workflow links an output by its slot number, so an insert would move every later
+# link onto another value of the same type.
+SETTINGS_TAGS_THRESHOLD_OUTPUTS = (
+    ("tile_tags_verification_threshold", "FLOAT"),
+    ("tile_tags_position_threshold", "FLOAT"),
+)
+SETTINGS_OUTPUTS = (*SETTINGS_PRESET_OUTPUTS, *SETTINGS_VISION_OUTPUTS, *SETTINGS_TAGS_THRESHOLD_OUTPUTS)
+# What a preset key outputs when the preset's kind does not carry it, so an unused socket
+# holds an empty value rather than failing the run.
+SETTINGS_ABSENT_VALUES = {"STRING": "", "INT": 0, "FLOAT": 0.0}
 
 # One fixed colour per band, outward from the core, so a tile reads the same way in every
 # render. The bands are drawn band by band rather than tile by tile, so a later tile's rings
@@ -97,10 +140,11 @@ class TestCaptions:
     captioned. A caption belongs to a tile rect,
     so `target_size`, `grid` (columns, rows) and `rects` (every tile's `crop_rect` as (x0, y0,
     x1, y1), in order) let a consumer reject captions written for another grid at the same
-    size. `preset` is the label they were written from.
+    size. `preset` is the label they were written from and `kind` that preset's tile text
+    kind, so a tags set holds each tile's tag text where a caption set holds its caption.
 
     `str()` is the readable listing, which is what core's Preview as Text node shows for a
-    value it cannot serialize as JSON, so the socket reads the same as the text output.
+    value it cannot serialize as JSON, so the socket reads the same as the tile_texts output.
     """
 
     captions: tuple
@@ -110,6 +154,7 @@ class TestCaptions:
     grid: tuple
     rects: tuple
     preset: str
+    kind: str = captions.TILE_TEXT_CAPTION
 
     def __str__(self):
         columns = self.grid[0]
@@ -118,18 +163,17 @@ class TestCaptions:
         bordering = tuple(index for index in captioned if index not in named)
         count = f"{len(captioned)} tiles" if len(captioned) == len(self.captions) else (
             f"{len(captioned)} of {len(self.captions)} tiles")
-        blocks = [f"preset {self.preset}, {count} captioned"]
-        if self.style is not None:
-            blocks.append(f"style caption\n{self.style[0]}")
-        blocks.extend(self._block(index, columns) for index in named)
+        title = f"tile_texts: {self.kind} kind, {count}"
         if bordering:
-            blocks.append("bordering tiles")
-            blocks.extend(self._block(index, columns) for index in bordering)
-        return "\n\n".join(blocks)
-
-    def _block(self, index, columns):
-        # The overlay's own label, so a caption is found by the number drawn on the tile.
-        return f"tile {index} r{index // columns}c{index % columns}\n{self.captions[index][0]}"
+            title += f", named tiles {', '.join(str(index) for index in named)} first and then their bordering tiles"
+        style = ["  off, global_style_instruction is not connected"]
+        if self.style is not None:
+            style = _indented(self.style[0])
+        sections = [_section("=== style caption (placed on top of every tile's text) ===", style)]
+        sections.extend(_section(_tile_header(index, columns), _indented(self.captions[index][0]))
+                        for index in (*named, *bordering))
+        return _debug_text(title, "Tile Test: Render conditions each tile on its own text below, "
+                           "with the style caption placed on top of it.", sections)
 
 
 def _preview_size(target_width, target_height):
@@ -191,6 +235,59 @@ def draw_overlay(picture, test_layout):
     # on a non-writable buffer.
     drawn = torch.frombuffer(bytearray(preview.tobytes()), dtype=torch.uint8)
     return drawn.reshape(1, preview_height, preview_width, 3).to(torch.float32).div(255.0)
+
+
+class ContextAnchoredTileTestSettings:
+    """Output every value of one settings file preset and the [vision] table.
+
+    This is a testing node and not one of the production nodes. Each output is named as its
+    settings key and carries the file's value as written, with {PROMPT} and {TAG} left for
+    the node that reads it. Wire the outputs into Tile Test: Captions and Tile Test: Render,
+    and swap any one wire for a text node to try a wording without editing the file. A key
+    the preset's kind does not carry outputs an empty text or 0.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        labels = list(captions.preset_labels())
+        return {
+            "required": {
+                "preset": (labels, {"default": labels[0], "tooltip": "Which settings file preset the outputs are read from, of the caption or the tags kind. The list is built when ComfyUI starts, so a new or renamed preset needs a restart. An edited wording reaches the outputs on the next queued run."}),
+            },
+        }
+
+    RETURN_TYPES = tuple(kind for _, kind in SETTINGS_OUTPUTS)
+    RETURN_NAMES = tuple(key for key, _ in SETTINGS_OUTPUTS)
+    FUNCTION = "read_settings"
+    CATEGORY = "image/upscaling/tile testing"
+
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        # ComfyUI folds this value into the node's cache key, and the file is read at run
+        # time, so without it an edited wording never reaches the outputs.
+        return captions.settings_fingerprint()
+
+    def read_settings(self, preset):
+        # ---- inputs. load_settings runs the file's own validation before any value leaves.
+        settings = captions.load_settings()
+        if preset not in settings.presets:
+            raise RuntimeError(
+                f"Tile Test: Settings was set to preset {preset!r}, which "
+                f"{captions.settings_path()} does not define. It offers "
+                f"{list(settings.presets)}. Restart ComfyUI to rebuild the preset list, or pick "
+                "another preset.")
+        block = settings.presets[preset]
+        vision = settings.vision
+
+        # ---- process
+        preset_values = tuple(block.get(key, SETTINGS_ABSENT_VALUES[kind])
+                              for key, kind in SETTINGS_PRESET_OUTPUTS)
+        vision_values = tuple(getattr(vision, key) for key, _ in SETTINGS_VISION_OUTPUTS)
+        threshold_values = tuple(float(block.get(key, SETTINGS_ABSENT_VALUES[kind]))
+                                 for key, kind in SETTINGS_TAGS_THRESHOLD_OUTPUTS)
+
+        # ---- output
+        return (*preset_values, *vision_values, *threshold_values)
 
 
 class ContextAnchoredTileTestLayout:
@@ -327,49 +424,114 @@ def _parse_tile_numbers(text, tile_count, node_name):
     return tuple(numbers)
 
 
-def _preset_options():
-    labels = list(captions.preset_labels())
-    if CUSTOM_PRESET in labels:
+def _is_on(text):
+    return text is not None and bool(text.strip())
+
+
+def _text_kind(texts):
+    # The kind is read off which tile socket is on. A socket the other kind reads that is on
+    # is refused rather than ignored, so nothing connected changes nothing silently.
+    caption_on = bool(texts["tile_caption_instruction"])
+    tags_on = bool(texts["tile_tags_instruction"])
+    if caption_on and tags_on:
         raise ValueError(
-            f"{captions.settings_path()} defines a preset named {CUSTOM_PRESET!r}, which is the "
-            "Tile Test: Captions option for its own instruction widgets. Rename the preset.")
-    return [*labels, CUSTOM_PRESET]
+            f"{CAPTIONS_NODE} has tile_caption_instruction and tile_tags_instruction both "
+            "connected. Disconnect one of them: tile_caption_instruction writes a caption per "
+            "tile and tile_tags_instruction writes tags per tile.")
+    if not caption_on and not tags_on:
+        raise ValueError(
+            f"{CAPTIONS_NODE} has neither tile_caption_instruction nor tile_tags_instruction "
+            "connected with text. Connect one of them, for example from the matching output of "
+            "Tile Test: Settings.")
+    kind = captions.TILE_TEXT_CAPTION if caption_on else captions.TILE_TEXT_TAGS
+    for name, reader in INSTRUCTION_SOCKETS:
+        if texts[name] and reader not in (None, kind):
+            raise ValueError(
+                f"{CAPTIONS_NODE} runs the {kind} kind, and {name} is connected, which only the "
+                f"{reader} kind reads. Disconnect {name}, or connect tile_tags_instruction in "
+                "place of tile_caption_instruction.")
+    return kind
 
 
-def _caption_preset(preset, tile_instruction, style_caption, style_instruction, max_tokens,
-                    caption_megapixels, prompt):
-    # The block the captions are written from. A named preset is read from the settings file
-    # and the three instruction widgets are left alone, so a trial wording can stay in them
-    # while the file's own wording runs. The custom option reads those widgets instead. The
-    # prompt fills {PROMPT} in either, the same as on the production nodes.
-    if preset == CUSTOM_PRESET:
-        if not tile_instruction.strip():
+def _check_tags_texts(texts):
+    # The settings file's placeholder rules for a tags block, applied to the sockets, since a
+    # socket can carry any text node's wording.
+    for name in ("tile_tags_instruction", "tile_tags_verification_statement"):
+        if captions.PROMPT_PLACEHOLDER in texts[name]:
             raise ValueError(
-                f"Tile Test: Captions was set to {CUSTOM_PRESET!r} with an empty "
-                "tile_instruction. Write the question to ask about each tile, or pick a preset.")
-        if max_tokens <= 0:
-            raise ValueError(
-                f"Tile Test: Captions was set to {CUSTOM_PRESET!r} with max_tokens 0. The custom "
-                "option has no preset budget to fall back on, so max_tokens must be above 0.")
-        base = captions.Preset(
+                f"{CAPTIONS_NODE} was given {name} holding {captions.PROMPT_PLACEHOLDER}. Only "
+                "tile_tags_with_prompt_instruction carries the prompt, so move "
+                f"{captions.PROMPT_PLACEHOLDER} there.")
+    anchor = texts["tile_tags_with_prompt_instruction"]
+    if anchor and captions.PROMPT_PLACEHOLDER not in anchor:
+        raise ValueError(
+            f"{CAPTIONS_NODE} was given tile_tags_with_prompt_instruction without "
+            f"{captions.PROMPT_PLACEHOLDER}. Write {captions.PROMPT_PLACEHOLDER} where the prompt "
+            "goes, or disconnect it to send the tags question alone.")
+    statement = texts["tile_tags_verification_statement"]
+    if statement and captions.TAG_PLACEHOLDER not in statement:
+        raise ValueError(
+            f"{CAPTIONS_NODE} was given tile_tags_verification_statement without "
+            f"{captions.TAG_PLACEHOLDER}. Write {captions.TAG_PLACEHOLDER} where each candidate "
+            "tag goes, or disconnect it to keep every candidate unchecked.")
+
+
+def _check_budget(name, value):
+    # A linked value bypasses the widget's min, and a tags Tile Test: Settings node outputs 0
+    # for the caption budget it does not carry.
+    if value < 1:
+        raise ValueError(
+            f"{CAPTIONS_NODE} was given {name} {value}, and a caption needs a budget of 1 token "
+            f"or more. Set {name} to 1 or more, or link it from a Tile Test: Settings node whose "
+            "preset carries it.")
+
+
+def _check_score(name, value):
+    # A linked value bypasses the widget's min and max.
+    if not 0 <= value <= 1:
+        raise ValueError(
+            f"{CAPTIONS_NODE} was given {name} {value}, and it is a score between 0 and 1. Set it "
+            "between 0 and 1, or link it from a Tile Test: Settings node whose preset carries it.")
+
+
+def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_tokens,
+                   caption_megapixels, verification_threshold, position_threshold):
+    # One preset built from the sockets, checked in full before any model call, since the
+    # text encoder costs minutes to reach the same rejection.
+    kind = _text_kind(texts)
+    style = texts["global_style_instruction"]
+    vision = replace(captions.load_settings().vision, caption_megapixels=caption_megapixels)
+    if style:
+        _check_budget("global_style_max_tokens", global_style_max_tokens)
+    if kind == captions.TILE_TEXT_TAGS:
+        _check_tags_texts(texts)
+        _check_score("tile_tags_verification_threshold", verification_threshold)
+        _check_score("tile_tags_position_threshold", position_threshold)
+        preset = captions.Preset(
             surface=captions.VLM_METHOD_CAPTIONS,
-            label=CUSTOM_PRESET,
-            vision=captions.load_settings().vision,
-            tile_instruction=tile_instruction,
-            tile_max_tokens=max_tokens,
-            style_instruction=style_instruction if style_instruction.strip() else "",
-            style_max_tokens=max_tokens,
+            label=CAPTIONS_NODE,
+            vision=vision,
+            style_instruction=style,
+            style_max_tokens=global_style_max_tokens,
+            kind=captions.TILE_TEXT_TAGS,
+            tile_tags_instruction=texts["tile_tags_instruction"],
+            tile_tags_with_prompt_instruction=texts["tile_tags_with_prompt_instruction"],
+            tile_tags_verification_statement=texts["tile_tags_verification_statement"],
+            tile_tags_verification_threshold=verification_threshold,
+            tile_tags_position_threshold=position_threshold,
         )
     else:
-        # The labeled option, which resolves for every preset including the first one, whose
-        # options the selector offers unlabeled.
-        base = captions.resolve_method(f"{captions.VLM_METHOD_CAPTIONS} ({preset})")
-    chosen = replace(
-        base,
-        style_instruction=base.style_instruction if style_caption else "",
-        vision=replace(base.vision, caption_megapixels=caption_megapixels),
-    )
-    return captions.with_prompt(chosen, prompt)
+        _check_budget("tile_caption_max_tokens", tile_caption_max_tokens)
+        preset = captions.Preset(
+            surface=captions.VLM_METHOD_CAPTIONS,
+            label=CAPTIONS_NODE,
+            vision=vision,
+            tile_instruction=texts["tile_caption_instruction"],
+            tile_max_tokens=tile_caption_max_tokens,
+            style_instruction=style,
+            style_max_tokens=global_style_max_tokens,
+        )
+    return captions.with_prompt(preset, prompt)
 
 
 def _bordering_tiles(layout, index):
@@ -393,43 +555,222 @@ def _tiles_to_caption(layout, tiles, with_neighbors):
     return named, tuple(captioned)
 
 
-class ContextAnchoredTileTestCaptions:
-    """Write VLM captions for tiles of the layout, through the engine's own caption pass.
+def _tag_texts(run):
+    # (style, written) in generate_tag_set's shape and by its rule, so a style row that wrote
+    # no text reaches Tile Test: Render as no style at all.
+    style = list(run.style_texts)
+    written = [[trace.text for trace in rows] for rows in run.tiles]
+    return (style if any(style) else []), written
 
-    This is a testing node and not one of the production nodes. The preset comes from the
-    settings file, or from the instruction widgets when preset is set to custom instructions,
-    so a prompt can be tried without editing the file. An empty tiles list captions every tile.
-    A tile list captions those tiles, plus their bordering tiles when with_neighbors is on,
-    which is what Tile Test: Render needs to render one of them with its neighbours. There is
-    no seed here, so ComfyUI serves the captions from its cache while a seed is re-rolled
-    further down the chain. Feed the captions and the tiles to Tile Test: Render.
+
+# --- the Captions node's text outputs. Pure functions over the tags traces, one picture row.
+
+FRAGMENTS_TITLE = "prompt_fragments: the connected prompt, split into fragments and sorted into subject and style"
+LISTED_TITLE = "tags_listed: the tags the VL model listed for each tile"
+VERIFIED_TITLE = "tags_verified: each candidate tag scored on its tile"
+FINAL_TITLE = "tags_final: the kept tags of each tile, their positions and the tile text"
+NO_TAG_STAGES = ("The caption kind has no tag stages, and connecting tile_tags_instruction in "
+                 "place of tile_caption_instruction runs them.")
+VERIFICATION_OFF = "off, tile_tags_verification_statement is not connected"
+
+
+def _p(value):
+    return f"{value:.2f}"
+
+
+def _indented(text, depth=1):
+    pad = "  " * depth
+    return [pad + line for line in text.split("\n")] if text else [f"{pad}no text was written"]
+
+
+def _rows(lines, depth=1):
+    pad = "  " * depth
+    return [pad + line for line in lines] or [f"{pad}none"]
+
+
+def _section(header, lines):
+    return "\n".join([header, *lines])
+
+
+def _debug_text(title, sentence, sections):
+    return "\n\n".join([f"{title}\n{sentence}", *sections])
+
+
+def _tile_header(index, columns):
+    # The overlay's own number, so a text is found by the label drawn on the tile.
+    return f"=== tile {index} (row {index // columns}, column {index % columns}) ==="
+
+
+def _fragments_debug(run):
+    lines = ["no prompt connected"]
+    if run.prompt is not None:
+        pairs = zip(run.prompt.fragments, run.prompt.style_p, strict=True)
+        lines = [f"{_p(p)}  {'style' if p >= tags.STYLE_THRESHOLD else 'subject':<7}  {fragment}"
+                 for fragment, p in pairs] or ["the prompt holds no fragment"]
+    sentence = ("A subject fragment joins every tile's tag candidates, and a fragment at p(style) "
+                f"{_p(tags.STYLE_THRESHOLD)} or above is style and is dropped.")
+    return _debug_text(FRAGMENTS_TITLE, sentence,
+                       [_section("=== each fragment with its p(style) and its sort ===", _rows(lines))])
+
+
+def _listed_block(header, trace):
+    return _section(header, [
+        "  VL model reply, verbatim", *_indented(trace.reply, depth=2),
+        f"  tags parsed from the reply ({len(trace.proposed)})",
+        *_rows([", ".join(trace.proposed)] if trace.proposed else [], depth=2)])
+
+
+def _listed_debug(preset, headers, traces):
+    sections = [_section("=== question sent to the VL model for every tile ===",
+                         _indented(tags.tile_tags_question(preset)))]
+    sections.extend(_listed_block(header, trace) for header, trace in zip(headers, traces, strict=True))
+    return _debug_text(LISTED_TITLE, "The VL model is asked the question below about each tile, "
+                       "and its reply is split into tags.", sections)
+
+
+def _score_row(item, p, threshold, suffix=""):
+    verdict = "kept" if p >= threshold else "dropped"
+    return f"{verdict:<7}  {_p(p)}  {item}{suffix}"
+
+
+def _verified_block(header, trace, threshold):
+    rows = tuple(zip(trace.candidates, trace.scores, trace.origins, strict=True))
+    from_prompt = [_score_row(item, p, threshold, ", also listed by the VL model" if origin == "both" else "")
+                   for item, p, origin in rows if origin != "model"]
+    from_model = [_score_row(item, p, threshold) for item, p, origin in rows if origin == "model"]
+    left_out = [f"{name}: {reason}" for name, reason in trace.dropped]
+    return _section(header, ["  from the prompt", *_rows(from_prompt, depth=2),
+                             "  from the VL model", *_rows(from_model, depth=2),
+                             "  left out before verification", *_rows(left_out, depth=2)])
+
+
+def _unchecked_block(header, trace):
+    return _section(header, [f"  every candidate was kept unchecked ({len(trace.candidates)}): "
+                             f"{', '.join(trace.candidates) or 'none'}"])
+
+
+def _verified_debug(preset, headers, traces):
+    if not preset.tile_tags_verification_statement:
+        return _debug_text(VERIFIED_TITLE, "tile_tags_verification_statement is not connected, so "
+                           "verification is off and no candidate was scored.", [_unchecked_block(header, trace)
+                                           for header, trace in zip(headers, traces, strict=True)])
+    threshold = preset.tile_tags_verification_threshold
+    sentence = ("Each candidate is scored with tile_tags_verification_statement on its tile, and "
+                f"a score of {_p(threshold)} or above (tile_tags_verification_threshold) keeps it.")
+    return _debug_text(VERIFIED_TITLE, sentence, [_verified_block(header, trace, threshold)
+                                                  for header, trace in zip(headers, traces, strict=True)])
+
+
+def _strip_scores(words, scores):
+    return "  ".join(f"{word} {_p(p)}" for word, p in zip(words, scores, strict=True))
+
+
+def _placement(item, term, unplaced):
+    if item in unplaced:
+        return f"{item}: dropped, no strip holds it"
+    if not term:
+        return f"{item}: kept with no term, no axis has exactly one strip holding it"
+    return f"{item}: kept at {term}"
+
+
+def _position_lines(trace, positions_off, threshold):
+    if positions_off:
+        return [f"  positions of the kept tags: {positions_off}"]
+    placed = []
+    for item, strips, term in zip(trace.kept, trace.strips, trace.terms, strict=True):
+        placed += [_placement(item, term, trace.unplaced),
+                   f"  rows     {_strip_scores(tags.ROW_WORDS, strips[:3])}",
+                   f"  columns  {_strip_scores(tags.COLUMN_WORDS, strips[3:])}"]
+    return [f"  positions of the kept tags. A strip holds a tag at {_p(threshold)} or above "
+            "(tile_tags_position_threshold)",
+            *_rows(placed, depth=2)]
+
+
+def _final_block(header, trace, positions_off, threshold):
+    subsets = [item for item in trace.verified if item not in trace.kept]
+    return _section(header, ["  dropped as a subset of a longer kept tag", *_rows(subsets, depth=2),
+                             *_position_lines(trace, positions_off, threshold),
+                             "  tile text", *_indented(trace.text, depth=2)])
+
+
+def _final_debug(preset, headers, traces, locate):
+    positions_off = ""
+    if not preset.tile_tags_verification_statement:
+        positions_off = VERIFICATION_OFF
+    elif not locate:
+        positions_off = "off, position_terms is off"
+    sentence = ("A kept tag that is part of a longer kept tag is dropped. Each remaining tag is "
+                "scored on six strips of the tile, three rows and three columns. A tag no strip "
+                "holds is dropped. On each axis where exactly one strip holds a tag, that strip "
+                "names the tag's position term. The tags with their terms make the tile text.")
+    threshold = preset.tile_tags_position_threshold
+    return _debug_text(FINAL_TITLE, sentence, [_final_block(header, trace, positions_off, threshold)
+                                               for header, trace in zip(headers, traces, strict=True)])
+
+
+def _tags_debug(preset, headers, run, locate):
+    # (prompt_fragments, tags_listed, tags_verified, tags_final).
+    traces = [rows[0] for rows in run.tiles]
+    return (_fragments_debug(run), _listed_debug(preset, headers, traces),
+            _verified_debug(preset, headers, traces), _final_debug(preset, headers, traces, locate))
+
+
+def _caption_debug():
+    # The caption kind has no tag stages, so each tags output says so in one sentence.
+    fragments = _debug_text(FRAGMENTS_TITLE, "The caption kind reads the prompt only through "
+                            f"{captions.PROMPT_PLACEHOLDER} in its instructions, so no fragment "
+                            "is sorted.", [])
+    return (fragments, *(_debug_text(title, NO_TAG_STAGES, [])
+                         for title in (LISTED_TITLE, VERIFIED_TITLE, FINAL_TITLE)))
+
+
+class ContextAnchoredTileTestCaptions:
+    """Write tile texts for tiles of the layout, through the engine's own caption or tags pass.
+
+    This is a testing node and not one of the production nodes. Every instruction is an
+    optional text socket, which is on when it is connected and holds more than whitespace, so
+    a stage is turned off by disconnecting it and a wording is tried by wiring a text node in
+    its place. tile_caption_instruction runs the caption kind and tile_tags_instruction the
+    tags kind, and exactly one of the two must be on. Wire them from Tile Test: Settings.
+    tile_texts lists the texts Tile Test: Render conditions on, and prompt_fragments,
+    tags_listed, tags_verified and tags_final print every tags stage per tile. An empty tiles
+    list captions every tile. A tile list captions those tiles, plus their bordering tiles
+    when with_neighbors is on, which is what Tile Test: Render needs to render one of them
+    with its neighbours. There is no seed here, so ComfyUI serves the texts from its cache
+    while a seed is re-rolled further down the chain. Feed the captions and the tiles to Tile
+    Test: Render.
     """
 
     @classmethod
     def INPUT_TYPES(s):
-        options = _preset_options()
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "The canvas from Tile Test: Upscale, at the layout's target size."}),
                 "layout": ("CATR_LAYOUT", {"tooltip": "The layout from Tile Test: Layout. The tiles are captioned from it."}),
                 "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder with a text generator (Krea 2 family)."}),
-                "preset": (options, {"default": options[0], "tooltip": f"Which settings file preset the captions are written from. '{CUSTOM_PRESET}' writes them from the tile_instruction, style_instruction and max_tokens widgets instead, which a named preset ignores. The list is built when ComfyUI starts, so a new or renamed preset needs a restart."}),
-                "tile_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": f"What the VL model is asked about each tile. Read only when preset is '{CUSTOM_PRESET}'."}),
-                "style_caption": ("BOOLEAN", {"default": True, "tooltip": "Write one style caption of the entire image and place it on top of every tile caption. Off leaves every preset's style caption out."}),
-                "style_instruction": ("STRING", {"default": "", "multiline": True, "tooltip": f"What the VL model is asked about the entire image. Read only when preset is '{CUSTOM_PRESET}'. Empty writes no style caption."}),
-                "max_tokens": ("INT", {"default": 0, "min": 0, "max": captions.MAX_CAPTION_TOKENS, "tooltip": f"Generation budget for every caption. The budget also covers the model's hidden reasoning turn. Read only when preset is '{CUSTOM_PRESET}', where it must be above 0."}),
-                "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the tile the VL model reads. Use 0 for the crop's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels."}),
                 "tiles": ("STRING", {"default": "", "tooltip": "Comma separated tile numbers, as Tile Test: Layout labels them. Empty captions every tile. The same list comes out of the tiles output for Tile Test: Render."}),
                 "with_neighbors": ("BOOLEAN", {"default": True, "tooltip": "Caption the bordering tiles of every named tile as well, which Tile Test: Render needs when its with_neighbors is on. Off captions the named tiles only."}),
+                "position_terms": ("BOOLEAN", {"default": True, "tooltip": "Score each kept tag on six strips of its tile, drop a tag no strip holds, and write a position term such as top-left. Off writes each tag without a term, makes no strip requests and drops no tag for its strips. Read by the tags kind when tile_tags_verification_statement is connected, and ignored by the caption kind."}),
+                "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the picture the VL model reads for every caption this node writes, the tile captions and the style caption. Use 0 for the picture's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels. The tags kind reads it for the style caption only, since its tags questions read a fixed copy of about 1 megapixel. Can take the caption_megapixels output of Tile Test: Settings."}),
+                "tile_caption_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for each tile caption, which also covers the model's hidden reasoning turn. Read by the caption kind and ignored by the tags kind. Can take the tile_caption_max_tokens output of Tile Test: Settings."}),
+                "global_style_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for the style caption, which also covers the model's hidden reasoning turn. Read when global_style_instruction is connected. Can take the global_style_max_tokens output of Tile Test: Settings."}),
+                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the whole tile to keep a listed tag. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
             },
             "optional": {
                 "prompt": node._prompt(),
+                "global_style_instruction": ("STRING", {"forceInput": True, "tooltip": f"What the VL model is asked about the entire image, for one style caption placed on top of every tile's text, in either kind. {captions.PROMPT_PLACEHOLDER} is filled from prompt. Unconnected, or holding only whitespace, writes no style caption."}),
+                "tile_caption_instruction": ("STRING", {"forceInput": True, "tooltip": f"What the VL model is asked about each tile, which runs the caption kind. {captions.PROMPT_PLACEHOLDER} is filled from prompt. Connect this or tile_tags_instruction, never both. Unconnected leaves the caption kind off."}),
+                "tile_tags_instruction": ("STRING", {"forceInput": True, "tooltip": f"The question that asks the VL model to list the things in each tile as comma separated tags, which runs the tags kind. It cannot hold {captions.PROMPT_PLACEHOLDER}. Connect this or tile_caption_instruction, never both. Unconnected leaves the tags kind off."}),
+                "tile_tags_with_prompt_instruction": ("STRING", {"forceInput": True, "tooltip": f"Text placed before the tags question when prompt is connected. It must hold {captions.PROMPT_PLACEHOLDER}, where the prompt goes. Read by the tags kind only. Unconnected sends the tags question alone."}),
+                "tile_tags_verification_statement": ("STRING", {"forceInput": True, "tooltip": f"The statement each candidate tag is scored true or false against on its tile. It must hold {captions.TAG_PLACEHOLDER}, where the tag goes, and a tag is kept at tile_tags_verification_threshold. Read by the tags kind only. Unconnected keeps every candidate unchecked and writes no position terms."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("CATR_CAPTIONS", "STRING", "STRING")
-    RETURN_NAMES = ("captions", "text", "tiles")
+    RETURN_TYPES = ("CATR_CAPTIONS", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("captions", "tile_texts", "tiles", "prompt_fragments", "tags_listed",
+                    "tags_verified", "tags_final")
     FUNCTION = "caption_tiles"
     CATEGORY = "image/upscaling/tile testing"
 
@@ -449,14 +790,16 @@ class ContextAnchoredTileTestCaptions:
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
-        # ComfyUI folds this value into the node's cache key, and the preset is read at run
-        # time, so without it an edited preset never reaches a workflow nobody retuned.
+        # ComfyUI folds this value into the node's cache key, and the preset's [vision] table
+        # is read from the settings file at run time, so the key follows the file.
         return captions.settings_fingerprint()
 
-    def caption_tiles(self, image, layout, clip, preset, tile_instruction, style_caption,
-                      style_instruction, max_tokens, caption_megapixels, tiles, with_neighbors,
-                      prompt=None, unique_id=None):
-        # ---- inputs
+    def caption_tiles(self, image, layout, clip, tiles, with_neighbors, position_terms,
+                      caption_megapixels, tile_caption_max_tokens, global_style_max_tokens,
+                      tile_tags_verification_threshold, tile_tags_position_threshold, prompt=None, global_style_instruction=None, tile_caption_instruction=None,
+                      tile_tags_instruction=None, tile_tags_with_prompt_instruction=None,
+                      tile_tags_verification_statement=None, unique_id=None):
+        # ---- inputs. Every rejection here runs before the first model call.
         if image.shape[0] != 1:
             raise ValueError(
                 f"Tile Test: Captions writes captions for one picture at a time, got a batch of "
@@ -467,22 +810,40 @@ class ContextAnchoredTileTestCaptions:
                 f"Tile Test: Captions was given a {size[0]}x{size[1]} image, but the layout was "
                 f"solved for {layout.target_size[0]}x{layout.target_size[1]}. Feed it the canvas "
                 "Tile Test: Upscale returns.")
-        run_preset = _caption_preset(preset, tile_instruction, style_caption, style_instruction,
-                                     max_tokens, caption_megapixels, prompt)
+        sockets = {
+            "global_style_instruction": global_style_instruction,
+            "tile_caption_instruction": tile_caption_instruction,
+            "tile_tags_instruction": tile_tags_instruction,
+            "tile_tags_with_prompt_instruction": tile_tags_with_prompt_instruction,
+            "tile_tags_verification_statement": tile_tags_verification_statement,
+        }
+        texts = {name: value if _is_on(value) else "" for name, value in sockets.items()}
+        run_preset = _socket_preset(texts, prompt, tile_caption_max_tokens,
+                                    global_style_max_tokens, caption_megapixels,
+                                    tile_tags_verification_threshold, tile_tags_position_threshold)
+        is_tags = run_preset.kind == captions.TILE_TEXT_TAGS
         all_tiles = layout.layout.tiles
+        columns = layout.layout.sol_x.n
         named, captioned = _tiles_to_caption(layout.layout, tiles, with_neighbors)
         chosen = [all_tiles[index] for index in captioned]
+        headers = [_tile_header(index, columns) for index in captioned]
 
         # ---- process. The engine captions the PADDED canvas, so this pass must too, or a
         # tile's caption would describe a crop the run never reads. The ledger is what makes
         # the run ONE bar: core builds a per-token bar inside every clip.generate, and the
         # ledger's shim routes it into the caption's own chunk instead of resetting the display.
         padded, _ = sampling.pad_image_to_multiple(image)
-        n_captions = len(chosen) + (1 if run_preset.style_instruction else 0)
-        ledger = progress.build_caption_ledger(n_captions, unique_id=unique_id)
+        ledger = progress.build_caption_ledger(run_preset, len(chosen), unique_id=unique_id)
         with ledger:
-            style, written = captions.generate_caption_set(clip, padded, chosen, run_preset,
-                                                           progress=ledger)
+            if is_tags:
+                tag_run = tags.generate_tag_trace(
+                    clip, padded, chosen, run_preset, progress=ledger, locate=position_terms)
+                style, written = _tag_texts(tag_run)
+                debug = _tags_debug(run_preset, headers, tag_run, position_terms)
+            else:
+                style, written = captions.generate_caption_set(clip, padded, chosen, run_preset,
+                                                               progress=ledger)
+                debug = _caption_debug()
             ledger.finish()
 
         # ---- output
@@ -494,12 +855,13 @@ class ContextAnchoredTileTestCaptions:
             style=tuple(style) if style else None,
             tiles=named,
             target_size=layout.target_size,
-            grid=(layout.layout.sol_x.n, layout.layout.sol_y.n),
+            grid=(columns, layout.layout.sol_y.n),
             rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
                         for tile in all_tiles),
             preset=run_preset.label,
+            kind=run_preset.kind,
         )
-        return (result, str(result), ", ".join(str(index) for index in named))
+        return (result, str(result), ", ".join(str(index) for index in named), *debug)
 
 
 def _run_preset(surface, canvas_tokens, crop_tokens):

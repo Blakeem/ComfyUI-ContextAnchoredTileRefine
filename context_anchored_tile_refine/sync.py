@@ -61,18 +61,18 @@ from dataclasses import dataclass
 
 import torch
 
-from . import captions, conds, grid, sampling, vl
+from . import captions, conds, grid, sampling, tags, vl
 from .progress import (
     CANVAS_ENCODE,
     CAPTION_ENCODE,
     CAPTIONS,
     DECODE,
-    K_CAPTION,
     SAMPLING,
     VISION_ENCODE,
     W_DECODE_TILE,
     W_ENCODE_CAPTION_TEXT,
     W_ENCODE_TILE,
+    caption_segment,
     vision_encode_units,
 )
 
@@ -295,7 +295,8 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
     # small encode per tile (either skipped at 0 tokens in the [vision] table), "captions" is
     # one clip.generate plus one cheap text encode per tile, and "vision tokens and captions"
     # is those same vision encodes plus both per tile. A preset carrying a style instruction
-    # adds one whole-image clip.generate per row on both caption surfaces.
+    # adds one whole-image clip.generate per row on both caption surfaces. A tags preset writes
+    # each tile's text through tags.generate_tag_set in place of the captions.
     # captions.generate_tile_captions owns the interrupt check and the ProgressBar that
     # keep it cancellable.
     # vl_context (region path only) is (full_image, offset_x, offset_y): the VISION encode
@@ -322,12 +323,18 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
                                       offset_x=offset_x, offset_y=offset_y,
                                       budget_tiles=budget_tiles)
     if tile_captions is None:
-        n_captions = (n_tiles + (1 if preset.style_instruction else 0)) * rows
+        caption_units, n_captions = caption_segment(preset, n_tiles, rows)
         if progress is not None:
-            progress.open(CAPTIONS, n_captions * K_CAPTION, chunks=n_captions)
-        tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, preset,
-                                                        batch_size, batch_index, progress=progress,
-                                                        style_source=encode_source)
+            progress.open(CAPTIONS, caption_units, chunks=n_captions)
+        if preset.kind == captions.TILE_TEXT_TAGS:
+            style_texts, tag_texts = tags.generate_tag_set(vl_clip, source, tiles, preset,
+                                                           batch_size, batch_index, progress=progress,
+                                                           style_source=encode_source)
+            tile_captions = captions.join_style_captions(style_texts, tag_texts)
+        else:
+            tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, preset,
+                                                            batch_size, batch_index, progress=progress,
+                                                            style_source=encode_source)
     if preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
         # The vision encodes plus one caption TEXT encode per tile — the text half scales
         # with the grid, so it is budgeted rather than folded into the vision units.
@@ -447,6 +454,10 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
             f"{captions.method_surface(vlm_method)!r}. The progress ledger is sized from the "
             "vlm_method and the pre-pass branches on the preset, so the two must agree.")
     check_preconditions(guider.model_patcher, sigmas, anchor_source)
+    # The direct caller's guard, since the VL nodes run it themselves. Handed-in captions
+    # (the Tile Test: Render node) never tag, so a missing library cannot stop that run.
+    if preset.kind == captions.TILE_TEXT_TAGS and tile_captions is None:
+        tags.check_tags_ready(vl_clip)
 
     pixels = image[..., :3]
     padded, (height, width) = sampling.pad_image_to_multiple(pixels)
@@ -486,11 +497,10 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     # visibly dropping), the value itself monotone the whole time.
     if progress is not None and sampler is not None:
         total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
-        # The style caption count and the vision units both mirror build_tile_positives' own
+        # The caption segment and the vision units both mirror build_tile_positives' own
         # arithmetic, off the ONE preset resolved above and the SAME tiles, so every segment
         # the ledger sizes is the segment the pre-pass then opens.
-        style_rows = batch if preset.style_instruction else 0
-        progress.preset_picture(vlm_method, len(tiles), batch, total_evals, style_rows=style_rows,
+        progress.preset_picture(preset, len(tiles), batch, total_evals,
                                 vision_units=vision_encode_units(len(tiles), preset.vision))
 
     tile_positives = build_tile_positives(vl_clip, padded, tiles, preset, batch_size, batch_index,

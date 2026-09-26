@@ -1,8 +1,10 @@
 import inspect
+import sys
 
 import pytest
 import torch
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
+from test_tags import FakeTagClip
 
 from context_anchored_tile_refine import captions, sampling
 from context_anchored_tile_refine.node import (
@@ -42,7 +44,7 @@ def test_no_vl_selects_on_the_base_node():
 
 @pytest.mark.parametrize("choice", ["source image", "live canvas"])
 @pytest.mark.parametrize("method", ["vision tokens", "vision tokens and captions", "captions"])
-def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
+def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method, caption_settings):
     # The VL refine node's own refine() is driven nowhere else in the suite, so a parameter
     # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
     recorded = {}
@@ -87,7 +89,7 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
     assert len(comfy_stubs["progress_bars"]) == 1
 
 
-def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monkeypatch):
+def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monkeypatch, caption_settings):
     # The default preset asks for {PROMPT}. A blank prompt against it is named here, before
     # refine_image and so before any VAE or VL encode spends GPU time.
     def unreached(*args, **kwargs):
@@ -102,6 +104,61 @@ def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monk
             sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
             max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
             anchor_source="source image", vlm_method="captions", clip=object())
+
+
+def _refine_vl(clip, prompt="a fox in the centre", vlm_method="vision tokens and captions"):
+    return ContextAnchoredTileRefineVL().refine(
+        image=torch.rand(1, 96, 104, 3), guider=FakeGuider(), sampler=object(),
+        sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
+        max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
+        anchor_source="source image", vlm_method=vlm_method, clip=clip, prompt=prompt)
+
+
+@pytest.mark.parametrize("prompt", ["a fox in the centre", None])
+def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs, monkeypatch, prompt):
+    # The shipped default is the tags preset. The prompt is optional there: it rides on the
+    # preset to the engine's tags pass, and an unconnected socket stores "".
+    recorded = {}
+
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, *args, preset=None, **kwargs):
+        recorded["preset"] = preset
+        return image
+
+    monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+
+    _refine_vl(FakeTagClip(), prompt=prompt)
+
+    assert recorded["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["preset"].prompt == ("" if prompt is None else prompt)
+
+
+@pytest.mark.parametrize(("clip", "missing", "message"), [
+    (object(), False, "this CLIP cannot generate text"),
+    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+])
+def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
+                                                                             clip, missing, message):
+    # A CLIP without a text generator or a missing library is named here, before refine_image
+    # and so before any VAE or VL encode spends GPU time.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run when the tags preset cannot")
+
+    if missing:
+        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+
+    with pytest.raises(RuntimeError, match=message):
+        _refine_vl(clip)
+
+
+def test_vl_node_never_checks_the_tags_library_for_a_caption_preset(comfy_stubs, monkeypatch,
+                                                                    caption_settings):
+    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(sampling, "refine_image", lambda image, *args, **kwargs: image)
+
+    result = _refine_vl(object())
+
+    assert isinstance(result, tuple) and len(result) == 1
 
 
 def test_connected_mask_refines(comfy_stubs):

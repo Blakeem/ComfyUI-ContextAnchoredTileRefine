@@ -40,6 +40,7 @@ import re
 import tomllib
 import weakref
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -126,6 +127,9 @@ RICH_GROUPED_INSTRUCTION = f"{SETTLED_RICH_INSTRUCTION} {GROUP_CLAUSE}"
 SETTINGS_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_NAME = "settings.toml"
 USER_SETTINGS_NAME = "settings.user.toml"
+# A sample the package ships and never reads on its own. It carries the presets that no
+# longer ship in settings.toml, so a saved option naming one of them has a place to point to.
+EXAMPLE_SETTINGS_NAME = "settings.user.example.toml"
 
 # Every max_tokens budget must cover the reasoning turn as well (captions are always
 # generated with thinking=True), which is why the shipped values are 768 rather than a
@@ -138,6 +142,23 @@ MAX_CAPTION_TOKENS = 4096
 # about the crop, so the A/B finding that text conditioning re-admits phantom objects is
 # untouched. A literal replace rather than str.format, since a user's prompt can carry braces.
 PROMPT_PLACEHOLDER = "{PROMPT}"
+
+# Where a tags preset's tile_tags_verification_statement takes each candidate tag.
+TAG_PLACEHOLDER = "{TAG}"
+
+# A preset's `tile_text` kind: what each tile's text is written from. A block without the key
+# is the caption kind, so every settings.user.toml written before the key existed loads as it
+# did.
+TILE_TEXT_CAPTION = "caption"
+TILE_TEXT_TAGS = "tags"
+TILE_TEXT_KINDS = (TILE_TEXT_CAPTION, TILE_TEXT_TAGS)
+
+# The shipped tags thresholds, and the defaults of a tags Preset built in code. On the owner's
+# 8K storm sky tile (2026-09-24) every tag scoring 0.5 to 0.9 on the whole tile, or under 0.9
+# on every strip, was a bay or buildings the tile does not hold, and they grew a skyline in
+# the clouds. At 0.9 the tile rendered its clouds and masts only.
+SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.9
+SHIPPED_TAGS_POSITION_THRESHOLD = 0.9
 
 # Caption input budget (total pixels, aspect preserved) — AB27's prep, what resample_for_vl
 # falls back to, and the size every judged tests-AB arm was captioned at (ab_env.caption_preset
@@ -163,11 +184,42 @@ _VISION_KEYS = {
     "caption_megapixels": float,
 }
 
+# One key table per tile_text kind. `tile_text` itself is checked first and sits outside both.
 _PRESET_KEYS = {
-    "tile_caption_instruction": str,
-    "tile_caption_max_tokens": int,
-    "global_style_instruction": str,
-    "global_style_max_tokens": int,
+    TILE_TEXT_CAPTION: {
+        "tile_caption_instruction": str,
+        "tile_caption_max_tokens": int,
+        "global_style_instruction": str,
+        "global_style_max_tokens": int,
+    },
+    TILE_TEXT_TAGS: {
+        "tile_tags_instruction": str,
+        "tile_tags_with_prompt_instruction": str,
+        "tile_tags_verification_statement": str,
+        "tile_tags_verification_threshold": float,
+        "tile_tags_position_threshold": float,
+        "global_style_instruction": str,
+        "global_style_max_tokens": int,
+    },
+}
+
+# The placeholder each tags key must hold, since without it the prompt or the tag never
+# reaches the question.
+_TAGS_PLACEHOLDERS = {"tile_tags_with_prompt_instruction": PROMPT_PLACEHOLDER,
+                      "tile_tags_verification_statement": TAG_PLACEHOLDER}
+
+# The tags keys that never take the prompt. The tags pass fills {PROMPT} in
+# tile_tags_with_prompt_instruction only, so anywhere else it reaches the VL model literally.
+_TAGS_PROMPT_FREE_KEYS = ("tile_tags_instruction", "tile_tags_verification_statement")
+
+_TAGS_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "tile_tags_position_threshold")
+
+# The tags keys' names before the release, so a user's own copy that still carries one fails
+# with its new name rather than with a missing key.
+_RENAMED_TAGS_KEYS = {
+    "propose_instruction": "tile_tags_instruction",
+    "prompt_anchor": "tile_tags_with_prompt_instruction",
+    "verify_statement": "tile_tags_verification_statement",
 }
 
 # Per-preset keys this version no longer reads: the caption picture size moved to the
@@ -201,7 +253,16 @@ class Preset:
     """One vlm_method option, resolved: the conditioning surface it builds, the [vision]
     table every surface samples by, and, on the two caption surfaces, everything its settings
     block asks for. `label` is "" for the vision-only surface, which reads no preset, and
-    `style_instruction` is "" when this preset asks for no whole-image style caption."""
+    `style_instruction` is "" when this preset asks for no whole-image style caption.
+
+    `kind` is the block's tile_text. A tags preset carries the three tags fields in place of
+    the tile question and budget, and `prompt` is the node's prompt input, which `with_prompt`
+    stores on a tags preset because its tile_tags_with_prompt_instruction is placed before
+    the question only when the prompt is not empty. An empty
+    tile_tags_verification_statement, reachable only on a preset built in code, keeps every
+    candidate tag without verifying or locating it. The two thresholds are the scores that
+    statement must reach on the whole tile to keep a tag, and on a strip of the tile to place
+    it there."""
 
     surface: str
     label: str
@@ -210,6 +271,13 @@ class Preset:
     tile_max_tokens: int = 0
     style_instruction: str = ""
     style_max_tokens: int = 0
+    kind: str = TILE_TEXT_CAPTION
+    tile_tags_instruction: str = ""
+    tile_tags_with_prompt_instruction: str = ""
+    tile_tags_verification_statement: str = ""
+    tile_tags_verification_threshold: float = SHIPPED_TAGS_VERIFICATION_THRESHOLD
+    tile_tags_position_threshold: float = SHIPPED_TAGS_POSITION_THRESHOLD
+    prompt: str = ""
 
 
 def settings_path():
@@ -266,36 +334,75 @@ def _check_preset(path, label, block):
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} must be a "
             f"[presets.{label}] table, got {type(block).__name__}.")
-    missing = sorted(set(_PRESET_KEYS) - set(block))
+    kind = block.get("tile_text", TILE_TEXT_CAPTION)
+    if not isinstance(kind, str):
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} key tile_text in {path} must be "
+            f"of type str, got {type(kind).__name__}.")
+    if kind not in TILE_TEXT_KINDS:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} sets tile_text to "
+            f"{kind!r}. Set it to one of {list(TILE_TEXT_KINDS)}, or leave it out for "
+            f"{TILE_TEXT_CAPTION!r}.")
+    keys = _PRESET_KEYS[kind]
+    given = set(block) - {"tile_text"}
+    renamed = [old for old in _RENAMED_TAGS_KEYS if old in given] if kind == TILE_TEXT_TAGS else []
+    if renamed:
+        names = ", ".join(f"{old} is now {_RENAMED_TAGS_KEYS[old]}" for old in renamed)
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries a tags key "
+            f"under its old name ({names}). Rename the key in {path.name} and keep its value.")
+    missing = sorted(set(keys) - given)
     if missing:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} is missing {missing}.")
-    removed = sorted(set(block) & set(_REMOVED_PRESET_KEYS))
+    removed = sorted(given & set(_REMOVED_PRESET_KEYS))
     if removed:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries {removed}, "
             "which this version no longer reads. The caption picture size is now "
             "caption_megapixels in the [vision] table. Copy settings.toml to settings.user.toml "
             "again and move your own values over.")
-    unknown = sorted(set(block) - set(_PRESET_KEYS))
+    unknown = sorted(given - set(keys))
     if unknown:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries unknown keys "
-            f"{unknown}. A misspelled key would otherwise change nothing, silently.")
-    for key, expected in _PRESET_KEYS.items():
-        # A TOML int is a legal float value, so the float keys accept both; bool is an int
+            f"{unknown} for tile_text {kind!r}. A misspelled key would otherwise change nothing, "
+            "silently.")
+    for key, expected in keys.items():
+        # A TOML int is a legal float value, so the float keys accept both. A bool is an int
         # subclass and is never either.
         allowed = (int, float) if expected is float else expected
         if not isinstance(block[key], allowed) or isinstance(block[key], bool):
             raise RuntimeError(
                 f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} must be "
                 f"of type {expected.__name__}, got {type(block[key]).__name__}.")
-    if not block["tile_caption_instruction"].strip():
-        raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} has an empty "
-            "tile_caption_instruction. The caption vlm_methods need a question to ask about "
-            "each tile.")
-    for key in ("tile_caption_max_tokens", "global_style_max_tokens"):
+    if kind == TILE_TEXT_TAGS:
+        for key, placeholder in _TAGS_PLACEHOLDERS.items():
+            if placeholder not in block[key]:
+                raise RuntimeError(
+                    f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
+                    f"does not hold {placeholder}. Write {placeholder} where the text goes.")
+        for key in _TAGS_PROMPT_FREE_KEYS:
+            if PROMPT_PLACEHOLDER in block[key]:
+                raise RuntimeError(
+                    f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
+                    f"holds {PROMPT_PLACEHOLDER}, which only tile_tags_with_prompt_instruction "
+                    f"takes. Move {PROMPT_PLACEHOLDER} to tile_tags_with_prompt_instruction.")
+        for key in _TAGS_THRESHOLD_KEYS:
+            if not 0 <= block[key] <= 1:
+                raise RuntimeError(
+                    f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
+                    f"is a score and must be between 0 and 1, got {block[key]}.")
+        budget_keys = ("global_style_max_tokens",)
+    else:
+        if not block["tile_caption_instruction"].strip():
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} has an empty "
+                "tile_caption_instruction. The caption vlm_methods need a question to ask about "
+                "each tile.")
+        budget_keys = ("tile_caption_max_tokens", "global_style_max_tokens")
+    for key in budget_keys:
         if not 1 <= block[key] <= MAX_CAPTION_TOKENS:
             raise RuntimeError(
                 f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} must be "
@@ -383,20 +490,21 @@ def load_settings(path=None):
 
 def build_vlm_methods(presets):
     """The vlm_method selector's options: the vision-only surface, then both caption surfaces
-    of every preset, each named "<surface> (<label>)". Grouped by preset and in file order, so
-    a preset's two options sit together and the list is ordered by whoever wrote the settings
-    file. The FIRST preset is the DEFAULT.
+    of every preset. Grouped by preset and in file order, so a preset's two options sit
+    together and the list is ordered by whoever wrote the settings file. The FIRST preset is
+    the DEFAULT, and its two options carry no label, so the shipped selector is the three bare
+    surfaces. Every other preset's options read "<surface> (<label>)".
 
-    Every preset is labeled, the first included, so the selector names the preset a run asks
-    (until 2026-09-16 the first preset's options carried no label, which hid which preset the
-    default was). The bare surface strings ("vision tokens and captions", "captions") are what
-    a workflow saved before the presets existed holds. The selector no longer offers them, but
-    `method_surface` accepts them, `resolve_method` routes them to the first preset and the VL
-    nodes' VALIDATE_INPUTS bypasses core's combo-list check, so such a workflow keeps running.
+    The first preset's labeled form is what a workflow saved while every preset was labeled
+    holds. The selector does not offer it, but `resolve_method` still resolves it by its label
+    and the VL nodes' VALIDATE_INPUTS bypasses core's combo-list check.
     """
     options = [VLM_METHOD_VISION]
-    for label in presets:
-        options.extend(f"{surface} ({label})" for surface in CAPTION_SURFACES)
+    for index, label in enumerate(presets):
+        if index == 0:
+            options.extend(CAPTION_SURFACES)
+        else:
+            options.extend(f"{surface} ({label})" for surface in CAPTION_SURFACES)
     return options
 
 
@@ -413,7 +521,8 @@ def vlm_methods():
 
 @functools.lru_cache(maxsize=1)
 def preset_labels():
-    """The preset labels in file order, read ONCE per ComfyUI session.
+    """Every preset label in file order, caption and tags kind alike, read ONCE per ComfyUI
+    session.
 
     Same cadence and same reason as `vlm_methods`: this becomes a combo the frontend caches
     at startup. An uncached re-read would let the preset a selector offers differ from the
@@ -423,8 +532,9 @@ def preset_labels():
 
 
 def default_vlm_method():
-    # The first preset's slice+caption option (build_vlm_methods). The vision-only surface
-    # leads the list and is not it: the two halves together are what the campaign settled on.
+    # The first preset's slice+caption option, "vision tokens and captions" (build_vlm_methods).
+    # The vision-only surface leads the list and is not it: the two halves together are what
+    # the campaign settled on.
     return vlm_methods()[1]
 
 
@@ -460,8 +570,9 @@ def resolve_method(vlm_method):
 
     The settings file is read HERE, once per run, so an edit applies with no ComfyUI restart.
     "vision tokens" takes only the [vision] table. A caption option takes its preset as well,
-    and a bare one (no label, what a pre-preset workflow holds) takes the first preset, so the
-    default preset resolves under its labeled option and under the bare string alike.
+    and a bare one (no label, what the selector offers for the first preset) takes the first
+    preset, so the default preset resolves under the bare string and under its labeled form
+    alike.
     """
     surface = method_surface(vlm_method)
     settings = load_settings()
@@ -473,18 +584,35 @@ def resolve_method(vlm_method):
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): vlm_method {vlm_method!r} asks for preset "
             f"{label!r}, which {settings_path()} does not define. It offers {sorted(presets)}. "
-            "Restart ComfyUI after adding or renaming a preset.")
+            f"{EXAMPLE_SETTINGS_NAME} in the node's folder carries the presets that no longer "
+            f"ship. Copy that block into {USER_SETTINGS_NAME} and restart ComfyUI, or pick "
+            "another vlm_method option.")
     block = presets[label]
     style = block["global_style_instruction"]
+    # Whitespace-only is "off" too, so a user clearing the line by hand cannot leave a blank
+    # style caption riding on top of every tile.
+    style_instruction = style if style.strip() else ""
+    if block.get("tile_text", TILE_TEXT_CAPTION) == TILE_TEXT_TAGS:
+        return Preset(
+            surface=surface,
+            label=label,
+            vision=settings.vision,
+            style_instruction=style_instruction,
+            style_max_tokens=block["global_style_max_tokens"],
+            kind=TILE_TEXT_TAGS,
+            tile_tags_instruction=block["tile_tags_instruction"],
+            tile_tags_with_prompt_instruction=block["tile_tags_with_prompt_instruction"],
+            tile_tags_verification_statement=block["tile_tags_verification_statement"],
+            tile_tags_verification_threshold=float(block["tile_tags_verification_threshold"]),
+            tile_tags_position_threshold=float(block["tile_tags_position_threshold"]),
+        )
     return Preset(
         surface=surface,
         label=label,
         vision=settings.vision,
         tile_instruction=block["tile_caption_instruction"],
         tile_max_tokens=block["tile_caption_max_tokens"],
-        # Whitespace-only is "off" too, so a user clearing the line by hand cannot leave a
-        # blank style caption riding on top of every tile.
-        style_instruction=style if style.strip() else "",
+        style_instruction=style_instruction,
         style_max_tokens=block["global_style_max_tokens"],
     )
 
@@ -507,7 +635,19 @@ def with_prompt(preset, prompt):
     a multiline primitive's trailing newline never lands inside the instruction's quotes. A
     preset without the placeholder is handed back unchanged, so the prompt is a no-op on it
     and on the vision-only surface. A placeholder met by no prompt is a hard error here,
-    before any GPU time, rather than a question that quotes an empty prompt at every tile."""
+    before any GPU time, rather than a question that quotes an empty prompt at every tile.
+
+    A tags preset stores the stripped prompt, "" for none, and keeps
+    `tile_tags_with_prompt_instruction` as the template, since it is placed before the
+    question only when the prompt is not empty. Its style
+    question still follows the rule above, so it never asks with the literal placeholder."""
+    if preset.kind == TILE_TEXT_TAGS:
+        return replace(
+            preset,
+            style_instruction=_fill_prompt(preset.style_instruction, prompt, preset.label,
+                                           "global_style_instruction"),
+            prompt="" if prompt is None else prompt.strip(),
+        )
     return replace(
         preset,
         tile_instruction=_fill_prompt(preset.tile_instruction, prompt, preset.label,
@@ -515,6 +655,16 @@ def with_prompt(preset, prompt):
         style_instruction=_fill_prompt(preset.style_instruction, prompt, preset.label,
                                        "global_style_instruction"),
     )
+
+
+def style_row_count(preset, rows):
+    """How many style rows a picture of `rows` batch rows writes, known before any generate.
+    One per row when the preset asks a style question, for both kinds, since the style line
+    is the style caption alone. The caption pass, the tags pass and the progress ledger all
+    size from this one rule, so their counts cannot disagree."""
+    if preset.style_instruction:
+        return rows
+    return 0
 
 
 def _check_prompt_filled(preset):
@@ -527,6 +677,13 @@ def _check_prompt_filled(preset):
                 f"Context-Anchored Tile Refine (VL): preset {preset.label!r} still carries "
                 f"{PROMPT_PLACEHOLDER} in its {key}. Hand the preset through captions.with_prompt "
                 "before captioning.")
+    # with_prompt never fills these two, so the placeholder there would always reach the VL model.
+    for key in _TAGS_PROMPT_FREE_KEYS:
+        if PROMPT_PLACEHOLDER in getattr(preset, key):
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): preset {preset.label!r} carries "
+                f"{PROMPT_PLACEHOLDER} in its {key}, which only tile_tags_with_prompt_instruction "
+                f"takes. Move {PROMPT_PLACEHOLDER} to tile_tags_with_prompt_instruction.")
 
 
 def caption_budget_pixels(megapixels, source):
@@ -676,6 +833,27 @@ def _caption_cache_write(key, clip, text):
         _CAPTION_CACHE.popitem(last=False)
 
 
+@contextmanager
+def cuda_graphs_disabled():
+    """Core's CUDA graph decode off for the duration, the previous flag restored after.
+
+    Core's Qwen3 CUDA graph decode (PR #15623) raises a device side assert on the second image
+    generate in one process, Comfy-Org/ComfyUI issue #16441. Remove once core fixes it.
+    """
+    try:
+        import comfy.model_management as model_management
+    except ImportError:
+        yield
+        return
+
+    previous = model_management.args.disable_cuda_graphs
+    model_management.args.disable_cuda_graphs = True
+    try:
+        yield
+    finally:
+        model_management.args.disable_cuda_graphs = previous
+
+
 def generate_caption(clip, vl_input, instruction, max_length, thinking=True, scope=()):
     """One greedy caption of `vl_input`, then the settled fallback chain for a crop whose
     stop token fires immediately. `max_length` is per-instruction (the preset's max_tokens on
@@ -699,17 +877,18 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
         return stored
 
     tokens, _tail = _tokenize_images(clip, instruction, vl_input, thinking=thinking)
-    ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
-    text = strip_thinking(clip.decode(ids))
-    if not text:
-        ids = clip.generate(tokens, do_sample=True, max_length=max_length, temperature=0.7,
-                            top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
+    with cuda_graphs_disabled():
+        ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
         text = strip_thinking(clip.decode(ids))
-    if not text:
-        retokens, _tail = _tokenize_images(clip, "Write one short sentence describing this image.",
-                                           vl_input, thinking=False)
-        ids = clip.generate(retokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
-        text = strip_thinking(clip.decode(ids))
+        if not text:
+            ids = clip.generate(tokens, do_sample=True, max_length=max_length, temperature=0.7,
+                                top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
+            text = strip_thinking(clip.decode(ids))
+        if not text:
+            retokens, _tail = _tokenize_images(clip, "Write one short sentence describing this image.",
+                                               vl_input, thinking=False)
+            ids = clip.generate(retokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
+            text = strip_thinking(clip.decode(ids))
     if not text:
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): caption generation returned an empty answer "
@@ -758,10 +937,19 @@ def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=
     import comfy.model_management
     import comfy.utils
 
+    if preset.kind == TILE_TEXT_TAGS:
+        # A tags preset carries no tile question and a 0 budget, so the caption pass would ask
+        # every tile nothing.
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {preset.label!r} is the tags kind "
+            f"(tile_text = {TILE_TEXT_TAGS!r}), which runs through the tags module and never "
+            "through the caption pass. Pick a preset without tile_text, or one set to "
+            f"{TILE_TEXT_CAPTION!r}.")
     _check_prompt_filled(preset)
     batch = int(source.shape[0])
-    style_on = bool(preset.style_instruction)
-    per_picture = (len(tiles) + (1 if style_on else 0)) * batch
+    style_rows = style_row_count(preset, batch)
+    style_on = style_rows > 0
+    per_picture = len(tiles) * batch + style_rows
     total = per_picture * batch_size
     pbar = None if progress is not None else comfy.utils.ProgressBar(total)
     done = per_picture * batch_index

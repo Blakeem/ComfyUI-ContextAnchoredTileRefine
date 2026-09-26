@@ -179,57 +179,101 @@ def write_settings(tmp_path, body, monkeypatch=None):
 def test_settings_toml_ships_the_owner_tested_wording():
     # The live prompts, pinned character for character: the owner's testing found small
     # wording changes lose consistency, so an accidental edit fails here. A deliberate
-    # prompt change updates this pin alongside settings.toml.
+    # prompt change updates this pin alongside the settings files.
     settings = captions.load_settings()
-    presets = settings.presets
     # The [vision] table: the block A/B's settled point (TESTS.md test 10), and the caption
     # picture at the vision encode's old size, the three-scene A/B's winner.
     assert settings.vision == captions.VisionSettings(
         canvas_tokens=165, crop_tokens=110, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
     assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
-    # `prompted` is FIRST, which is what makes it the default preset the selector offers
-    # unlabeled: the owner's wording under test since 2026-09-16, which asks for the image's
-    # prompt and holds the caption to the crop. `standard` is the pre-settings-file constants
-    # character for character, so a workflow that spells its label out still asks what it
-    # asked then.
-    assert list(presets) == ["prompted", "standard", "artwork"]
-    assert presets["prompted"]["tile_caption_instruction"] == (
+
+    # The example file: the tags preset first, then every caption preset, copied from the
+    # owner's own settings.user.toml. The tags wording is the Logit Tagger's, placeholders
+    # renamed to this file's upper case.
+    example = captions.load_settings(captions.SETTINGS_DIR / captions.EXAMPLE_SETTINGS_NAME)
+    assert example.vision == settings.vision
+    examples = example.presets
+    assert list(examples) == ["tags", "prompted", "standard", "artwork", "grounded",
+                              "artwork grounded"]
+    assert examples["tags"] == {
+        "tile_text": "tags",
+        "tile_tags_instruction": (
+            "Tag this image. List every distinct visible thing in it: objects, people, animals, "
+            "clothing, materials, and the setting. Use short lowercase noun phrases separated by "
+            "commas. List each thing once. Do not list moods, styles, or ideas. Output only the "
+            "tags."),
+        "tile_tags_with_prompt_instruction": (
+            "This image was made from the prompt: {PROMPT}\n"
+            "Use the prompt's words for the things the image shows.\n\n"),
+        "tile_tags_verification_statement": "This image visibly contains {TAG}",
+        # The owner's 8K storm sky tile of 2026-09-24: at 0.5 a bay and buildings the tile
+        # lacks grew a skyline in the clouds, and at 0.9 on both they were dropped.
+        "tile_tags_verification_threshold": 0.9,
+        "tile_tags_position_threshold": 0.9,
+        "global_style_instruction": (
+            "Concise prose containing only the style of media used and the general style within "
+            "that type of media."),
+        "global_style_max_tokens": 768,
+    }
+    assert (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_TAGS_POSITION_THRESHOLD) == (0.9, 0.9)
+    # The shipped file is that one tags preset and nothing else, so it is the default.
+    assert settings.presets == {"tags": examples["tags"]}
+
+    # `prompted` asks for the image's prompt and holds the caption to the crop. `standard` is
+    # the pre-settings-file constants character for character, so a workflow that spells its
+    # label out still asks what it asked then.
+    assert examples["prompted"]["tile_caption_instruction"] == (
         "Concise prose containing object's relative and absolute positions within the "
         'foreground and background of the cropped image. Full prompt: "{PROMPT}". Keep it '
         "concise. Do not include anything not in the crop.")
-    assert presets["prompted"]["global_style_instruction"] == ""
-    assert presets["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
-    assert presets["standard"]["global_style_instruction"] == ""
-    artwork = presets["artwork"]
-    assert artwork["tile_caption_instruction"] == (
+    assert examples["prompted"]["global_style_instruction"] == (
+        "Concise prose containing only the style of media used and the general style within "
+        "that type of media.")
+    assert examples["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
+    assert examples["standard"]["global_style_instruction"] == ""
+    assert examples["artwork"]["tile_caption_instruction"] == (
         "succinct prose containing relative and absolute positions of specific things with "
         "object and character identifying demographics.")
-    assert artwork["global_style_instruction"] == (
+    assert examples["artwork"]["global_style_instruction"] == (
         "succinct flowing prose of only the overall style and artistic medium and physical "
         "medium. No objects or items in the scene.")
-    for preset in presets.values():
-        assert preset["tile_caption_max_tokens"] == 768
-        assert preset["global_style_max_tokens"] == 768
+    assert examples["grounded"]["tile_caption_instruction"] == (
+        f"{captions.RICH_GROUPED_INSTRUCTION} Name a thing only if you can identify it. Where "
+        "you cannot, write the part's colour and texture and then the words no identifiable "
+        "object.")
+    assert examples["grounded"]["global_style_instruction"] == ""
+    assert examples["artwork grounded"]["tile_caption_instruction"] == (
+        "succinct prose containing relative and absolute positions of specific things with "
+        "object and character identifying demographics. Name a thing only if you can identify "
+        "it, and otherwise give only its shape, colour and surface. Where nothing in the "
+        "picture can be identified, say so and stop.")
+    assert examples["artwork grounded"]["global_style_instruction"] == (
+        "Name the artistic medium, the physical medium, the brushwork, the palette and the "
+        "lighting of this image, in one succinct sentence. Describe no object, no place, no "
+        "setting and no genre.")
+    for label in ("prompted", "standard", "artwork", "grounded", "artwork grounded"):
+        assert examples[label]["tile_caption_max_tokens"] == 768, label
+        assert examples[label]["global_style_max_tokens"] == 768, label
 
 
-def test_every_preset_adds_one_option_per_caption_surface():
+def test_every_preset_adds_one_option_per_caption_surface(caption_settings):
     # A preset's own two options sit together and in file order, so the selector reads the way
     # the settings file was written. The vision-only surface leads and carries no label,
-    # because it asks the VLM nothing. Every preset's options carry its label, the first
-    # included, so the selector names the preset the default asks.
+    # because it asks the VLM nothing. The first preset is the default and its two options
+    # carry no label either, so the selector leads with the three bare surfaces.
     assert list(captions.vlm_methods()) == [
         "vision tokens",
-        "vision tokens and captions (prompted)", "captions (prompted)",
+        "vision tokens and captions", "captions",
         "vision tokens and captions (standard)", "captions (standard)",
         "vision tokens and captions (artwork)", "captions (artwork)",
     ]
-    assert captions.default_vlm_method() == "vision tokens and captions (prompted)"
+    assert captions.default_vlm_method() == "vision tokens and captions"
 
 
-def test_the_default_preset_answers_to_both_forms_of_its_name():
-    # The selector offers the default preset labeled, and a workflow saved before the presets
-    # existed holds the bare string. Both must reach the SAME block rather than a "no such
-    # preset" error.
+def test_the_default_preset_answers_to_both_forms_of_its_name(caption_settings):
+    # The selector offers the default preset bare, and a workflow saved while every preset
+    # was labeled holds its labeled form. Both must reach the SAME block rather than a "no
+    # such preset" error.
     unlabeled = captions.resolve_method("vision tokens and captions")
     labeled = captions.resolve_method("vision tokens and captions (prompted)")
     assert unlabeled == labeled
@@ -268,8 +312,8 @@ def test_with_prompt_keeps_braces_in_the_prompt_literal():
     assert filled.tile_instruction == 'Full prompt: "a {red} fox". Name it.'
 
 
-def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder():
-    # The shipped `standard` and `artwork` presets and the vision-only surface read no prompt,
+def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder(caption_settings):
+    # The `standard` and `artwork` presets and the vision-only surface read no prompt,
     # so a typed prompt changes nothing there, blank or not.
     for method in ("captions (standard)", "captions (artwork)", "vision tokens"):
         preset = captions.resolve_method(method)
@@ -306,7 +350,7 @@ def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
     # therefore NOT appear until a restart, which is what the cache buys — so the file is
     # rewritten here with no clear and the first answer has to stand.
     two_presets = GOOD_SETTINGS + PRESET.replace("[presets.demo]", "[presets.extra]")
-    first = ["vision tokens", "vision tokens and captions (demo)", "captions (demo)"]
+    first = ["vision tokens", "vision tokens and captions", "captions"]
     path = write_settings(tmp_path, two_presets, monkeypatch)
     assert list(captions.vlm_methods()) == [
         *first, "vision tokens and captions (extra)", "captions (extra)"]
@@ -343,7 +387,7 @@ def test_an_unlabeled_caption_method_takes_the_first_preset(tmp_path, monkeypatc
     assert legacy.tile_instruction == "ask about the tile"
 
 
-def test_each_caption_method_asks_its_own_presets_question():
+def test_each_caption_method_asks_its_own_presets_question(caption_settings):
     # Both caption surfaces ask the SAME tile question of a given preset, as they have since
     # 2026-08-16, and the wording comes from the settings file rather than a code constant.
     # The settled constants stay defined for tests-AB's judged arms, and nothing selects them.
@@ -384,11 +428,192 @@ def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeyp
 
 def test_a_method_naming_an_absent_preset_is_a_named_hard_error(tmp_path, monkeypatch):
     # The selector is built at startup while the wording is read per run, so a preset renamed
-    # mid-session leaves a stale option behind. It must name the preset, not fail obscurely.
-    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
+    # mid-session leaves a stale option behind, and a saved workflow can name a preset that no
+    # longer ships. It must name the option, the file in force and the example file that
+    # carries the presets that no longer ship.
+    path = write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
 
-    with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
+    with pytest.raises(RuntimeError) as error:
         captions.resolve_method("captions (gone)")
+
+    message = str(error.value)
+    assert "vlm_method 'captions (gone)' asks for preset 'gone'" in message
+    assert str(path) in message
+    assert captions.EXAMPLE_SETTINGS_NAME in message
+
+
+# --- the tile_text kinds ---------------------------------------------------------------
+
+TAGS_PRESET = (
+    '[presets.tagged]\n'
+    'tile_text = "tags"\n'
+    'tile_tags_instruction = "list the things"\n'
+    'tile_tags_with_prompt_instruction = "Made from: {PROMPT}\\n"\n'
+    'tile_tags_verification_statement = "It shows {TAG}"\n'
+    'tile_tags_verification_threshold = 0.8\n'
+    'tile_tags_position_threshold = 0.7\n'
+    'global_style_instruction = "the style"\n'
+    'global_style_max_tokens = 512\n')
+TAGS_SETTINGS = VISION + TAGS_PRESET
+
+
+def test_a_tags_preset_loads_and_resolves_to_its_tags_fields(tmp_path, monkeypatch):
+    write_settings(tmp_path, TAGS_SETTINGS + "\n" + PRESET, monkeypatch)
+
+    preset = captions.resolve_method("vision tokens and captions")
+
+    assert preset.label == "tagged"
+    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.tile_tags_instruction == "list the things"
+    assert preset.tile_tags_with_prompt_instruction == "Made from: {PROMPT}\n"
+    assert preset.tile_tags_verification_statement == "It shows {TAG}"
+    assert (preset.tile_tags_verification_threshold, preset.tile_tags_position_threshold) == (0.8, 0.7)
+    assert preset.style_instruction == "the style"
+    assert preset.style_max_tokens == 512
+    # A tags preset asks no tile question, and its prompt is empty until with_prompt runs.
+    assert (preset.tile_instruction, preset.tile_max_tokens, preset.prompt) == ("", 0, "")
+
+
+def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path, monkeypatch):
+    # A block without tile_text is every settings.user.toml written before the key existed.
+    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
+    implicit = captions.resolve_method("captions")
+    write_settings(tmp_path, GOOD_SETTINGS.replace(
+        "[presets.demo]\n", '[presets.demo]\ntile_text = "caption"\n'), monkeypatch)
+    explicit = captions.resolve_method("captions")
+
+    assert implicit == explicit
+    assert implicit.kind == captions.TILE_TEXT_CAPTION
+    assert implicit.tile_instruction == "ask about the tile"
+    assert (implicit.tile_tags_instruction, implicit.tile_tags_with_prompt_instruction,
+            implicit.tile_tags_verification_statement, implicit.prompt) == ("", "", "", "")
+
+
+@pytest.mark.parametrize(("content", "message"), [
+    (TAGS_SETTINGS.replace('tile_text = "tags"', 'tile_text = "words"'),
+     r"preset 'tagged' in .* sets tile_text to 'words'\. Set it to one of \['caption', 'tags'\]"),
+    (TAGS_SETTINGS.replace('tile_text = "tags"', "tile_text = 1"),
+     "preset 'tagged' key tile_text in .* must be of type str"),
+    (TAGS_SETTINGS.replace('tile_tags_verification_statement = "It shows {TAG}"\n', ''),
+     r"preset 'tagged' in .* is missing \['tile_tags_verification_statement'\]"),
+    # The caption keys are unknown on a tags preset, so a block cannot carry both kinds.
+    (TAGS_SETTINGS + 'tile_caption_instruction = "ask"\n',
+     r"preset 'tagged' in .* carries unknown keys \['tile_caption_instruction'\] for tile_text 'tags'"),
+    (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', "tile_tags_instruction = 3"),
+     "preset 'tagged' key tile_tags_instruction in .* must be of type str"),
+    (TAGS_SETTINGS.replace("global_style_max_tokens = 512", "global_style_max_tokens = 0"),
+     "preset 'tagged' key global_style_max_tokens in .* between 1 and 4096"),
+    (TAGS_SETTINGS.replace("{PROMPT}", "the prompt"),
+     r"preset 'tagged' key tile_tags_with_prompt_instruction in .* does not hold \{PROMPT\}"),
+    (TAGS_SETTINGS.replace("{TAG}", "a tag"),
+     r"preset 'tagged' key tile_tags_verification_statement in .* does not hold \{TAG\}"),
+    (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7\n", ""),
+     r"preset 'tagged' in .* is missing \['tile_tags_position_threshold'\]"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", 'tile_tags_verification_threshold = "high"'),
+     "preset 'tagged' key tile_tags_verification_threshold in .* must be of type float, got str"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 1.5"),
+     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be between 0 and 1, got 1.5"),
+    (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7", "tile_tags_position_threshold = -0.1"),
+     "preset 'tagged' key tile_tags_position_threshold in .* is a score and must be between 0 and 1, got -0.1"),
+    # {PROMPT} belongs in tile_tags_with_prompt_instruction only.
+    (TAGS_SETTINGS.replace('"list the things"', '"list the things in {PROMPT}"'),
+     r"preset 'tagged' key tile_tags_instruction in .* holds \{PROMPT\}, which only "
+     r"tile_tags_with_prompt_instruction takes"),
+    (TAGS_SETTINGS.replace('"It shows {TAG}"', '"It shows {TAG} from {PROMPT}"'),
+     r"preset 'tagged' key tile_tags_verification_statement in .* holds \{PROMPT\}, which only "
+     r"tile_tags_with_prompt_instruction takes"),
+    # The tags keys are unknown on a caption preset.
+    (GOOD_SETTINGS + 'tile_tags_verification_statement = "It shows {TAG}"\n',
+     r"preset 'demo' in .* carries unknown keys \['tile_tags_verification_statement'\] for tile_text 'caption'"),
+])
+def test_a_broken_tags_preset_is_a_named_hard_error(tmp_path, content, message):
+    path = tmp_path / "settings.toml"
+    path.write_text(content)
+
+    with pytest.raises(RuntimeError, match=message):
+        captions.load_settings(path)
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("propose_instruction", "tile_tags_instruction"),
+    ("prompt_anchor", "tile_tags_with_prompt_instruction"),
+    ("verify_statement", "tile_tags_verification_statement"),
+])
+def test_an_old_tags_key_name_fails_naming_its_new_name_and_the_file(tmp_path, old, new):
+    # The rename is checked before the missing-key check, so the message names the rename.
+    path = tmp_path / "settings.user.toml"
+    path.write_text(TAGS_SETTINGS.replace(f"{new} = ", f"{old} = "))
+
+    with pytest.raises(RuntimeError, match=rf"preset 'tagged' in .*settings\.user\.toml carries a tags "
+                                           rf"key under its old name \({old} is now {new}\)\. Rename the "
+                                           r"key in settings\.user\.toml"):
+        captions.load_settings(path)
+
+
+def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_with_prompt_template():
+    # The with-prompt text is placed first only when the prompt is not empty, so it stays a
+    # template here.
+    preset = captions.Preset(
+        surface=captions.VLM_METHOD_CAPTIONS, label="tagged",
+        vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
+        style_instruction="Style of {PROMPT}.", style_max_tokens=768,
+        kind=captions.TILE_TEXT_TAGS, tile_tags_instruction="list",
+        tile_tags_with_prompt_instruction="From: {PROMPT}\n", tile_tags_verification_statement="It shows {TAG}")
+
+    filled = captions.with_prompt(preset, "  a fox\n")
+
+    assert filled == dataclasses.replace(preset, prompt="a fox", style_instruction="Style of a fox.")
+    # No placeholder in the style question: None and a blank prompt both store "".
+    plain = dataclasses.replace(preset, style_instruction="the style")
+    for prompt in (None, "", "   \n"):
+        assert captions.with_prompt(plain, prompt) == plain, prompt
+    # The style question follows the caption rule, so it never asks with the literal placeholder.
+    with pytest.raises(RuntimeError, match=r"preset 'tagged' asks for \{PROMPT\} in its global_style_instruction"):
+        captions.with_prompt(preset, "")
+
+
+@pytest.mark.parametrize(("kind", "style", "prompt", "expected"), [
+    (captions.TILE_TEXT_CAPTION, "", "", 0),
+    (captions.TILE_TEXT_CAPTION, "the style", "", 3),
+    # A caption preset reads no stored prompt, so it adds no style row.
+    (captions.TILE_TEXT_CAPTION, "", "a fox", 0),
+    (captions.TILE_TEXT_TAGS, "", "", 0),
+    (captions.TILE_TEXT_TAGS, "the style", "", 3),
+    # The style line is the style caption alone, so a tags preset's prompt adds no style row.
+    (captions.TILE_TEXT_TAGS, "", "a fox", 0),
+    (captions.TILE_TEXT_TAGS, "the style", "a fox", 3),
+])
+def test_the_style_row_count_is_one_rule_for_both_kinds(kind, style, prompt, expected):
+    preset = dataclasses.replace(a_preset(style=style), kind=kind, prompt=prompt)
+
+    assert captions.style_row_count(preset, 3) == expected
+
+
+def test_the_caption_pass_refuses_a_tags_preset_before_any_generate(comfy_stubs):
+    # A tags preset carries an empty tile question and a 0 budget.
+    clip = FakeCaptionClip()
+    preset = dataclasses.replace(a_preset(tile="", tile_tokens=0), kind=captions.TILE_TEXT_TAGS)
+
+    with pytest.raises(RuntimeError, match=r"preset 'test' is the tags kind .* runs through the tags module"):
+        captions.generate_caption_set(clip, torch.rand(1, 64, 64, 3), [], preset)
+
+    assert clip.generate_calls == []
+
+
+def test_preset_labels_lists_every_preset_of_both_kinds_in_file_order(tmp_path, monkeypatch):
+    # The Tile Test: Captions node reads this list and runs a preset of either kind.
+    write_settings(tmp_path, TAGS_SETTINGS + "\n" + PRESET, monkeypatch)
+    captions.preset_labels.cache_clear()
+
+    assert captions.preset_labels() == ("tagged", "demo")
+    # The tags preset still leads the vlm_method selector, as the unlabeled default.
+    assert list(captions.vlm_methods()) == [
+        "vision tokens", "vision tokens and captions", "captions",
+        "vision tokens and captions (demo)", "captions (demo)"]
+
+
+def test_preset_labels_reads_the_shipped_tags_preset():
+    assert captions.preset_labels() == ("tags",)
 
 
 @pytest.mark.parametrize(("content", "message"), [
@@ -562,6 +787,9 @@ def test_the_settings_file_reaches_the_registry_archive():
 
     assert (captions.SETTINGS_DIR / captions.SETTINGS_NAME).is_file()
     assert captions.SETTINGS_NAME not in excluded
+    # The example file is what the missing-preset error points a user to.
+    assert (captions.SETTINGS_DIR / captions.EXAMPLE_SETTINGS_NAME).is_file()
+    assert captions.EXAMPLE_SETTINGS_NAME not in excluded
 
 
 # --- strip_thinking / clean_caption ---------------------------------------------------
@@ -657,6 +885,23 @@ def test_generate_caption_falls_back_through_sampling_then_a_simpler_question():
     assert clip.generate_calls[1]["seed"] == 42
     assert clip.tokenize_calls[-1]["text"] == "Write one short sentence describing this image."
     assert clip.tokenize_calls[-1]["thinking"] is False
+
+
+def test_generate_caption_turns_cuda_graphs_off_for_every_generate_and_restores_the_flag(comfy_stubs):
+    import comfy.model_management
+
+    answers = ["", "<think>x</think>a wall of tools"]
+    seen = []
+
+    def answer(image, instruction):
+        seen.append(comfy.model_management.args.disable_cuda_graphs)
+        return answers[min(len(answers) - 1, len(clip.generate_calls) - 1)]
+
+    clip = FakeCaptionClip(answer=answer)
+    captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
+
+    assert seen == [True, True]
+    assert comfy.model_management.args.disable_cuda_graphs is False
 
 
 def test_generate_caption_raises_when_every_fallback_is_empty():
@@ -1205,14 +1450,15 @@ PIPE_ROWS = (PIPE_ENC // vl.MERGED_CELL) ** 2
 
 
 @pytest.fixture
-def pipeline_clip(monkeypatch):
+def pipeline_clip(monkeypatch, caption_settings):
+    # On the caption presets, since these tests pin the caption surfaces end to end.
     monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, PIPE_ENC, PIPE_ENC))
     return FakeCaptionClip(n_rows=PIPE_ROWS)
 
 
 @pytest.fixture
 def style_off(monkeypatch):
-    # A preset may turn the whole-image style caption on, and the shipped (artwork) one does.
+    # A preset may turn the whole-image style caption on, and the (artwork) one does.
     # Tests that pin the caption surfaces' own per-tile shape run with it off whichever preset
     # they name, and the style tests below cover it on.
     resolve = captions.resolve_method
@@ -1225,7 +1471,7 @@ PIPE_PROMPT = "a fox in the centre"
 
 def _run(image, guider, clip, vlm_method, mask=None, ctx=0, prompt=PIPE_PROMPT):
     # What the VL nodes hand the engine: the resolved preset with the prompt written into it
-    # (node.py's own with_prompt call), since the shipped default asks for {PROMPT}. `prompt`
+    # (node.py's own with_prompt call), since the default caption preset asks for {PROMPT}. `prompt`
     # None leaves the resolve to the engine's dispatch, for the tests that pin its rejections.
     preset = None
     if prompt is not None:
@@ -1343,8 +1589,8 @@ def test_vision_and_captions_cats_the_shared_slice_and_a_text_only_caption(comfy
 
 def test_the_shipped_style_caption_rides_on_top_of_every_tile_caption(comfy_stubs, pipeline_clip):
     # What the DiT reads on a preset that asks for a style caption: every tile's caption is
-    # encoded with the one style caption on top, newline-joined. (artwork) is the shipped
-    # preset that turns it on, and the default (standard) leaves it off.
+    # encoded with the one style caption on top, newline-joined. (artwork) is a caption
+    # preset that turns it on, and (standard) leaves it off.
     method = "captions (artwork)"
     style_text = captions.resolve_method(method).style_instruction
     pipeline_clip.answer = lambda img, instruction: (

@@ -1,26 +1,31 @@
-"""The tile testing chain: what the Layout node solves and draws, what the Upscale node
-forwards, what the Captions node asks the VL model, and what the Render node hands the engine.
+"""The tile testing chain: what the Settings node reads, what the Layout node solves and
+draws, what the Upscale node forwards, what the Captions node asks the VL model, and what the
+Render node hands the engine.
 
 The grid math itself is covered by test_grid, the caption pipeline by test_captions and the
 engine by test_sync. What is pinned here is that the Layout node solves the PRODUCTION grid on
 the padded target size, that the overlay it draws stays a readable preview, that the Upscale
 node runs the production upscale stage with the multiplier the layout carries, that the
-Captions node captions the padded canvas from the preset the widgets ask for, and that the
+Captions node captions the padded canvas from the text sockets connected to it, and that the
 Render node reaches sampling.refine_image with the layout's own rects, captions and noise
 slice. The Render node's collaborators are all replaced by recorders, so what is pinned there
 is which value reaches which parameter and not any pixel math."""
+import sys
+import tomllib
 from types import SimpleNamespace
 
 import pytest
 import torch
 from test_captions import FakeCaptionClip
+from test_tags import ANCHOR, PROPOSE, VERIFY, FakeClassifier, FakeTagClip, strip_requests
 
-from context_anchored_tile_refine import captions, grid, progress, sampling, testing, upscale, vl
+from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine
 from context_anchored_tile_refine.testing import (
     ContextAnchoredTileTestCaptions,
     ContextAnchoredTileTestLayout,
     ContextAnchoredTileTestRender,
+    ContextAnchoredTileTestSettings,
     ContextAnchoredTileTestUpscale,
 )
 
@@ -200,33 +205,32 @@ def test_the_upscale_node_rejects_a_batch_above_one(monkeypatch):
 
 # --- the Captions node -----------------------------------------------------------------
 
-# The artwork preset is the shipped file's second block, the only one that asks for a style
-# caption, which is what makes the style half of every setting visible.
-ARTWORK_TILE = ("succinct prose containing relative and absolute positions of specific things "
-                "with object and character identifying demographics.")
-ARTWORK_STYLE = ("succinct flowing prose of only the overall style and artistic medium and "
-                 "physical medium. No objects or items in the scene.")
-
-CAPTION_WIDGETS = {
-    "preset": "standard",
-    "tile_instruction": "",
-    "style_caption": True,
-    "style_instruction": "",
-    "max_tokens": 0,
-    "caption_megapixels": captions.SHIPPED_CAPTION_MEGAPIXELS,
+# Every widget at its default, and the caption kind's tile socket connected, so a test changes
+# one input at a time. A socket passed as None is an unconnected one.
+CAPTION_INPUTS = {
     "tiles": "",
     "with_neighbors": True,
-    "prompt": "",
+    "position_terms": True,
+    "caption_megapixels": captions.SHIPPED_CAPTION_MEGAPIXELS,
+    "tile_caption_max_tokens": 768,
+    "global_style_max_tokens": 768,
+    "tile_tags_verification_threshold": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD,
+    "tile_tags_position_threshold": captions.SHIPPED_TAGS_POSITION_THRESHOLD,
+    "tile_caption_instruction": "name the objects",
 }
 
-# The custom option with every widget it reads filled in, so a test changes one at a time.
-CUSTOM_WIDGETS = {
-    "preset": testing.CUSTOM_PRESET,
-    "tile_instruction": "name the objects",
-    "style_instruction": "name the medium",
-    "max_tokens": 64,
-    "prompt": "",
+# The tags kind's sockets, worded as test_tags words its own preset.
+TAGS_SOCKETS = {
+    "tile_caption_instruction": None,
+    "tile_tags_instruction": PROPOSE,
+    "tile_tags_with_prompt_instruction": ANCHOR,
+    "tile_tags_verification_statement": VERIFY,
+    "global_style_instruction": "name the medium",
+    "global_style_max_tokens": 64,
 }
+
+TEXT_SOCKETS = ("global_style_instruction", "tile_caption_instruction", "tile_tags_instruction",
+                "tile_tags_with_prompt_instruction", "tile_tags_verification_statement")
 
 
 def _caption_layout():
@@ -243,16 +247,20 @@ def _grid_layout():
 
 
 def _caption(clip, layout=None, image=None, **overrides):
-    """Run the Captions node. Returns its three outputs named."""
-    widgets = dict(CAPTION_WIDGETS)
-    widgets.update(overrides)
+    """Run the Captions node. Returns its seven outputs named. A None input is left out, the
+    way ComfyUI calls a node whose optional socket is unconnected."""
+    inputs = dict(CAPTION_INPUTS)
+    inputs.update(overrides)
+    connected = {name: value for name, value in inputs.items() if value is not None}
     test_layout = _caption_layout() if layout is None else layout
     if image is None:
         width, height = test_layout.target_size
         image = torch.rand(1, height, width, 3)
-    written, text, tiles = ContextAnchoredTileTestCaptions().caption_tiles(
-        image=image, layout=test_layout, clip=clip, **widgets)
-    return SimpleNamespace(written=written, text=text, tiles=tiles)
+    written, tile_texts, tiles, fragments, listed, verified, final = (
+        ContextAnchoredTileTestCaptions().caption_tiles(image=image, layout=test_layout, clip=clip,
+                                                        **connected))
+    return SimpleNamespace(written=written, tile_texts=tile_texts, tiles=tiles, fragments=fragments,
+                           listed=listed, verified=verified, final=final)
 
 
 def _asking_clip():
@@ -264,26 +272,55 @@ def _counting_clip():
     return clip
 
 
-def test_the_preset_widget_offers_the_settings_files_own_presets_then_the_custom_option():
-    # preset_labels is read once per session for the reason vlm_methods is, so the widget the
-    # frontend cached at startup cannot offer a preset the run then fails to resolve.
-    preset = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"]["preset"]
+def test_the_inputs_are_the_widgets_then_the_text_sockets():
+    inputs = ContextAnchoredTileTestCaptions.INPUT_TYPES()
 
-    assert captions.preset_labels() == ("prompted", "standard", "artwork")
-    assert preset[0] == ["prompted", "standard", "artwork", "custom instructions"]
-    assert preset[1]["default"] == "prompted"
+    assert list(inputs["required"]) == [
+        "image", "layout", "clip", "tiles", "with_neighbors", "position_terms",
+        "caption_megapixels", "tile_caption_max_tokens", "global_style_max_tokens",
+        "tile_tags_verification_threshold", "tile_tags_position_threshold"]
+    assert list(inputs["optional"]) == ["prompt", *TEXT_SOCKETS]
 
 
-def test_a_settings_preset_named_like_the_custom_option_is_refused(monkeypatch):
-    # The two would be one combo entry routed two ways, so the file is told to rename it. The
-    # label list is read through the cached preset_labels, which the autouse fixture clears.
-    shipped = captions.load_settings()
-    presets = {**shipped.presets, testing.CUSTOM_PRESET: shipped.presets["standard"]}
-    monkeypatch.setattr(captions, "load_settings",
-                        lambda path=None: captions.Settings(vision=shipped.vision, presets=presets))
+def test_every_instruction_is_an_optional_text_socket_that_says_what_unconnected_does():
+    optional = ContextAnchoredTileTestCaptions.INPUT_TYPES()["optional"]
 
-    with pytest.raises(ValueError, match="defines a preset named 'custom instructions'"):
-        ContextAnchoredTileTestCaptions.INPUT_TYPES()
+    for name in TEXT_SOCKETS:
+        kind, options = optional[name]
+        assert kind == "STRING", name
+        assert options["forceInput"] is True, name
+        assert "Unconnected" in options["tooltip"], name
+
+
+def test_the_prompt_socket_is_the_vl_nodes_own():
+    # One definition (node._prompt) on every node that fills {PROMPT}, so the wording and the
+    # default cannot drift between the production nodes and the test chain.
+    from context_anchored_tile_refine import node
+
+    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["optional"]["prompt"] == node._prompt()
+
+
+@pytest.mark.parametrize("name", ["tile_caption_max_tokens", "global_style_max_tokens"])
+def test_the_budget_widgets_start_at_768_and_take_one_token_or_more(name):
+    widget = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"][name]
+
+    assert widget[0] == "INT"
+    assert (widget[1]["default"], widget[1]["min"], widget[1]["max"]) == (768, 1, captions.MAX_CAPTION_TOKENS)
+
+
+@pytest.mark.parametrize("name", ["caption_megapixels", "tile_caption_max_tokens", "global_style_max_tokens"])
+def test_the_numeric_widget_tooltips_name_the_matching_settings_output(name):
+    tooltip = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"][name][1]["tooltip"]
+
+    assert f"Can take the {name} output of Tile Test: Settings" in tooltip
+
+
+def test_the_widgets_that_stay_are_as_before():
+    required = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"]
+
+    assert required["tiles"][0] == "STRING" and required["tiles"][1]["default"] == ""
+    assert required["with_neighbors"][0] == "BOOLEAN" and required["with_neighbors"][1]["default"] is True
+    assert required["position_terms"][0] == "BOOLEAN" and required["position_terms"][1]["default"] is True
 
 
 def test_the_caption_size_widget_defaults_to_the_settings_files_own_value():
@@ -294,8 +331,22 @@ def test_the_caption_size_widget_defaults_to_the_settings_files_own_value():
 
 
 def test_every_caption_input_has_a_tooltip():
-    for name, definition in ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"].items():
+    inputs = ContextAnchoredTileTestCaptions.INPUT_TYPES()
+    for name, definition in {**inputs["required"], **inputs["optional"]}.items():
         assert "tooltip" in definition[1], name
+
+
+def test_the_captions_node_offers_no_preset_and_never_reads_the_preset_list():
+    # The Settings node is the one reader of the preset list, and the sockets replace the
+    # combo and its two custom options. The autouse fixture cleared the cache before this test.
+    inputs = ContextAnchoredTileTestCaptions.INPUT_TYPES()
+
+    info = captions.preset_labels.cache_info()
+    assert info.hits + info.misses == 0
+
+    assert "preset" not in inputs["required"]
+    for name in ("CUSTOM_TAGS", "CUSTOM_CAPTIONS", "CUSTOM_OPTIONS", "_preset_options", "_caption_preset"):
+        assert not hasattr(testing, name), name
 
 
 def test_the_captions_node_asks_for_its_node_id():
@@ -304,155 +355,137 @@ def test_the_captions_node_asks_for_its_node_id():
     assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["hidden"] == {"unique_id": "UNIQUE_ID"}
 
 
-def test_the_captions_node_returns_the_captions_the_listing_and_the_tiles():
-    assert ContextAnchoredTileTestCaptions.RETURN_TYPES == ("CATR_CAPTIONS", "STRING", "STRING")
-    assert ContextAnchoredTileTestCaptions.RETURN_NAMES == ("captions", "text", "tiles")
+def test_the_captions_node_returns_the_captions_the_tile_texts_the_tiles_and_four_debug_texts():
+    assert ContextAnchoredTileTestCaptions.RETURN_TYPES == ("CATR_CAPTIONS",) + ("STRING",) * 6
+    assert ContextAnchoredTileTestCaptions.RETURN_NAMES == (
+        "captions", "tile_texts", "tiles", "prompt_fragments", "tags_listed", "tags_verified",
+        "tags_final")
 
 
-def test_the_prompt_widget_is_the_vl_nodes_own(comfy_stubs):
-    # One definition (node._prompt) on every node that fills {PROMPT}, so the wording and the
-    # default cannot drift between the production nodes and the test chain.
-    from context_anchored_tile_refine import node
+# --- which sockets are on
 
-    assert ContextAnchoredTileTestCaptions.INPUT_TYPES()["optional"]["prompt"] == node._prompt()
-
-
-def test_the_prompt_is_written_into_the_default_preset(comfy_stubs):
-    # The shipped default asks for {PROMPT}, and the node fills it from its own widget, the
-    # same captions.with_prompt the production nodes run.
-    clip = _asking_clip()
-    shipped = captions.load_settings().presets["prompted"]["tile_caption_instruction"]
-
-    result = _caption(clip, preset="prompted", prompt="a fox in the centre\n")
-
-    expected = shipped.replace("{PROMPT}", "a fox in the centre")
-    assert "a fox in the centre" in expected
-    assert [call["text"] for call in clip.generate_calls] == [expected] * 2
-    assert result.written.preset == "prompted"
-
-
-def test_the_prompt_is_written_into_a_custom_instruction(comfy_stubs):
+@pytest.mark.parametrize("value", [None, "", " \n "])
+def test_no_tile_socket_on_is_refused_naming_both_and_the_settings_node(comfy_stubs, value):
     clip = _asking_clip()
 
-    _caption(clip, **{**CUSTOM_WIDGETS, "tile_instruction": 'Full prompt: "{PROMPT}". Name it.',
-                      "style_instruction": "Style of {PROMPT}.", "prompt": "a fox"})
+    with pytest.raises(ValueError, match=r"neither tile_caption_instruction nor tile_tags_instruction.*Tile Test: Settings"):
+        _caption(clip, tile_caption_instruction=value)
+    assert clip.generate_calls == []
+
+
+def test_both_tile_sockets_on_is_refused_naming_both(comfy_stubs):
+    clip = _asking_clip()
+
+    with pytest.raises(ValueError, match=r"tile_caption_instruction and tile_tags_instruction both connected"):
+        _caption(clip, tile_tags_instruction=PROPOSE)
+    assert clip.generate_calls == []
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("tile_tags_with_prompt_instruction", ANCHOR),
+    ("tile_tags_verification_statement", VERIFY),
+])
+def test_a_tags_socket_on_in_the_caption_kind_is_refused_naming_it(comfy_stubs, name, value):
+    clip = _asking_clip()
+
+    with pytest.raises(ValueError, match=rf"runs the caption kind, and {name} is connected, which only the tags kind reads"):
+        _caption(clip, **{name: value})
+    assert clip.generate_calls == []
+
+
+def test_a_whitespace_tags_socket_is_off_in_the_caption_kind(comfy_stubs):
+    clip = _asking_clip()
+
+    result = _caption(clip, tile_tags_with_prompt_instruction="  ", tile_tags_verification_statement="\n")
+
+    assert result.written.kind == captions.TILE_TEXT_CAPTION
+    assert len(clip.generate_calls) == 2
+
+
+@pytest.mark.parametrize("name", ["tile_caption_max_tokens", "global_style_max_tokens"])
+def test_a_linked_budget_below_one_is_refused_naming_it(comfy_stubs, name):
+    # A linked value bypasses the widget's min, and a tags Settings node outputs 0 for the
+    # caption budget.
+    clip = _asking_clip()
+
+    with pytest.raises(ValueError, match=rf"was given {name} 0.*budget of 1 token or more"):
+        _caption(clip, global_style_instruction="name the medium", **{name: 0})
+    assert clip.generate_calls == []
+
+
+def test_a_budget_the_run_does_not_use_is_not_checked(comfy_stubs):
+    clip = _asking_clip()
+
+    _caption(clip, global_style_max_tokens=0)
+
+    assert len(clip.generate_calls) == 2
+
+
+# --- the caption kind
+
+def test_the_caption_kind_writes_from_the_sockets_and_the_budget_widgets(comfy_stubs):
+    clip = _asking_clip()
+
+    result = _caption(clip, global_style_instruction="name the medium",
+                      tile_caption_max_tokens=64, global_style_max_tokens=32)
+
+    assert [call["text"] for call in clip.generate_calls] == [
+        "name the medium", "name the objects", "name the objects"]
+    assert [call["max_length"] for call in clip.generate_calls] == [32, 64, 64]
+    # The style caption is kept apart from the tile captions. The Render node joins them.
+    assert result.written.style == ("asked name the medium",)
+    assert result.written.captions == (("asked name the objects",),) * 2
+    assert result.written.preset == "Tile Test: Captions"
+    assert result.written.kind == captions.TILE_TEXT_CAPTION
+
+
+@pytest.mark.parametrize("value", [None, "  "])
+def test_an_unconnected_style_socket_writes_no_style_caption(comfy_stubs, value):
+    clip = _asking_clip()
+
+    result = _caption(clip, global_style_instruction=value)
+
+    assert [call["text"] for call in clip.generate_calls] == ["name the objects"] * 2
+    assert result.written.style is None
+
+
+def test_the_prompt_is_written_into_both_caption_instructions(comfy_stubs):
+    clip = _asking_clip()
+
+    _caption(clip, tile_caption_instruction='Full prompt: "{PROMPT}". Name it.',
+             global_style_instruction="Style of {PROMPT}.", prompt="a fox\n")
 
     assert [call["text"] for call in clip.generate_calls] == [
         "Style of a fox.", 'Full prompt: "a fox". Name it.', 'Full prompt: "a fox". Name it.']
 
 
-def test_a_blank_prompt_against_a_preset_that_asks_for_one_is_refused_before_any_caption(comfy_stubs):
+@pytest.mark.parametrize("prompt", [None, " "])
+def test_a_placeholder_with_no_prompt_is_refused_before_any_caption(comfy_stubs, prompt):
     clip = _asking_clip()
 
-    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
-        _caption(clip, preset="prompted", prompt=None)
-
+    with pytest.raises(RuntimeError, match=r"preset 'Tile Test: Captions' asks for \{PROMPT\} in its tile_caption_instruction.*not connected or is empty"):
+        _caption(clip, tile_caption_instruction="Name {PROMPT}.", prompt=prompt)
     assert clip.generate_calls == []
 
 
 def test_every_caption_is_asked_with_the_reasoning_turn_on(comfy_stubs):
-    # The test chain runs the engine's own caption pass, so every question carries
-    # thinking=True and strip_thinking then cuts the reasoning off the answer.
     clip = _asking_clip()
 
-    _caption(clip, preset="artwork")
+    _caption(clip, global_style_instruction="name the medium")
 
     assert len(clip.generate_calls) == 3
     assert all(call["thinking"] is True for call in clip.tokenize_calls)
 
 
-def test_the_preset_is_read_from_the_file_when_named(comfy_stubs):
-    # The default preset is the FIRST block and the node asks for it by label, so the wording
-    # and the budget both come from the file rather than from a constant here.
-    clip = _asking_clip()
-
-    result = _caption(clip, preset="standard")
-
-    assert [call["text"] for call in clip.generate_calls] == [captions.RICH_GROUPED_INSTRUCTION] * 2
-    assert [call["max_length"] for call in clip.generate_calls] == [768, 768]
-    assert result.written.preset == "standard"
-
-
-def test_a_named_preset_ignores_the_instruction_and_budget_widgets(comfy_stubs):
-    # A trial wording stays in the widgets while a preset runs, so switching between the two
-    # never means clearing the fields.
-    clip = _asking_clip()
-
-    result = _caption(clip, preset="artwork", tile_instruction="name the objects",
-                      style_instruction="name the medium", max_tokens=64)
-
-    assert [call["text"] for call in clip.generate_calls] == [
-        ARTWORK_STYLE, ARTWORK_TILE, ARTWORK_TILE]
-    assert [call["max_length"] for call in clip.generate_calls] == [768, 768, 768]
-    assert result.written.preset == "artwork"
-
-
-def test_the_custom_option_writes_from_the_three_widgets(comfy_stubs):
-    clip = _asking_clip()
-
-    result = _caption(clip, **CUSTOM_WIDGETS)
-
-    assert [call["text"] for call in clip.generate_calls] == [
-        "name the medium", "name the objects", "name the objects"]
-    assert [call["max_length"] for call in clip.generate_calls] == [64, 64, 64]
-    # The style caption is kept apart from the tile captions. The Render node joins them.
-    assert result.written.style == ("asked name the medium",)
-    assert result.written.captions == (("asked name the objects",),) * 2
-    assert result.written.preset == "custom instructions"
-
-
-def test_the_custom_option_still_reads_the_caption_size_widget(comfy_stubs, monkeypatch):
-    seen = []
-    monkeypatch.setattr(captions, "resample_for_vl",
-                        lambda pixels, budget=None: seen.append(budget) or pixels)
-
-    _caption(_asking_clip(), caption_megapixels=0.25, **CUSTOM_WIDGETS)
-
-    assert seen == [250_000] * 3
-
-
-def test_an_empty_custom_style_instruction_writes_no_style_caption(comfy_stubs):
-    clip = _asking_clip()
-
-    result = _caption(clip, **dict(CUSTOM_WIDGETS, style_instruction="  "))
-
-    assert [call["text"] for call in clip.generate_calls] == ["name the objects"] * 2
-    assert result.written.style is None
-    assert result.written.captions == (("asked name the objects",),) * 2
-
-
-def test_the_custom_option_rejects_an_empty_tile_instruction(comfy_stubs):
-    with pytest.raises(ValueError, match="with an empty tile_instruction"):
-        _caption(_asking_clip(), **dict(CUSTOM_WIDGETS, tile_instruction=" "))
-
-
-def test_the_custom_option_rejects_a_zero_budget(comfy_stubs):
-    with pytest.raises(ValueError, match="with max_tokens 0"):
-        _caption(_asking_clip(), **dict(CUSTOM_WIDGETS, max_tokens=0))
-
-
-def test_the_caption_size_widget_sets_the_picture_the_vl_model_reads(comfy_stubs):
+def test_the_caption_size_widget_sets_every_picture_the_vl_model_reads(comfy_stubs):
     # resample_for_vl asks comfy.utils.common_upscale for the budget with the aspect kept, so
     # the recorded sizes are what the VL model was handed.
-    _caption(_asking_clip(), preset="artwork", caption_megapixels=0.25)
+    _caption(_asking_clip(), global_style_instruction="name the medium", caption_megapixels=0.25)
 
     assert len(comfy_stubs["common_upscale_calls"]) == 3
     for _shape, width, height, method, _crop in comfy_stubs["common_upscale_calls"]:
         assert method == "area"
         assert width * height == pytest.approx(250_000, rel=0.02)
-
-
-@pytest.mark.parametrize("widgets", [{"preset": "artwork"}, CUSTOM_WIDGETS])
-def test_style_caption_off_removes_the_style_caption(comfy_stubs, widgets):
-    # artwork asks for a style caption and the custom widgets carry one, so switching the
-    # boolean off has to be what removes it on both.
-    clip = _asking_clip()
-
-    result = _caption(clip, style_caption=False, **widgets)
-
-    assert len(clip.generate_calls) == 2
-    assert result.written.style is None
-    assert all("\n" not in rows[0] for rows in result.written.captions)
 
 
 def test_every_tile_is_captioned_from_the_padded_canvas(comfy_stubs, monkeypatch):
@@ -484,32 +517,33 @@ def test_the_captions_object_carries_the_grid_it_was_written_for(comfy_stubs):
     assert result.written.tiles == ()
 
 
-def test_the_text_output_lists_every_tile_by_its_overlay_number(comfy_stubs):
+TILE_TEXTS_SENTENCE = ("Tile Test: Render conditions each tile on its own text below, with the "
+                       "style caption placed on top of it.")
+
+
+def test_tile_texts_lists_every_tile_under_its_own_header(comfy_stubs):
     result = _caption(_counting_clip())
 
-    assert result.text == ("preset standard, 2 tiles captioned\n\n"
-                           "tile 0 r0c0\ncaption 1\n\n"
-                           "tile 1 r0c1\ncaption 2")
+    assert result.tile_texts == (
+        f"tile_texts: caption kind, 2 tiles\n{TILE_TEXTS_SENTENCE}\n\n"
+        "=== style caption (placed on top of every tile's text) ===\n"
+        "  off, global_style_instruction is not connected\n\n"
+        "=== tile 0 (row 0, column 0) ===\n  caption 1\n\n"
+        "=== tile 1 (row 0, column 1) ===\n  caption 2")
     # Core's Preview as Text node falls back to str() for a value it cannot serialize, so the
-    # captions socket reads the same as the text output.
-    assert str(result.written) == result.text
+    # captions socket reads the same as the tile_texts output.
+    assert str(result.written) == result.tile_texts
     assert result.tiles == ""
 
 
-@pytest.mark.parametrize("widgets", [{"preset": "artwork"}, CUSTOM_WIDGETS])
-def test_the_text_output_lists_the_style_caption_once_at_the_top(comfy_stubs, widgets):
-    # The style caption is generated once and read once, so it is listed once, labelled, above
-    # the tiles, and the listing reads the same whether a file preset or the custom option
-    # wrote it.
-    clip = _counting_clip()
+def test_tile_texts_lists_the_style_caption_once_at_the_top(comfy_stubs):
+    result = _caption(_counting_clip(), global_style_instruction="name the medium")
 
-    result = _caption(clip, **widgets)
-
-    assert result.text == (f"preset {widgets['preset']}, 2 tiles captioned\n\n"
-                           "style caption\ncaption 1\n\n"
-                           "tile 0 r0c0\ncaption 2\n\n"
-                           "tile 1 r0c1\ncaption 3")
-    assert str(result.written) == result.text
+    assert result.tile_texts == (
+        f"tile_texts: caption kind, 2 tiles\n{TILE_TEXTS_SENTENCE}\n\n"
+        "=== style caption (placed on top of every tile's text) ===\n  caption 1\n\n"
+        "=== tile 0 (row 0, column 0) ===\n  caption 2\n\n"
+        "=== tile 1 (row 0, column 1) ===\n  caption 3")
 
 
 def test_named_tiles_alone_are_captioned_with_neighbors_off(comfy_stubs):
@@ -522,7 +556,8 @@ def test_named_tiles_alone_are_captioned_with_neighbors_off(comfy_stubs):
     assert result.written.captions == tuple(("caption 1",) if index == 5 else None for index in range(16))
     assert result.written.tiles == (5,)
     assert result.tiles == "5"
-    assert result.text == "preset standard, 1 of 16 tiles captioned\n\ntile 5 r1c1\ncaption 1"
+    assert result.tile_texts.startswith("tile_texts: caption kind, 1 of 16 tiles\n")
+    assert result.tile_texts.endswith("=== tile 5 (row 1, column 1) ===\n  caption 1")
 
 
 def test_named_tiles_bring_their_bordering_tiles_with_neighbors_on(comfy_stubs):
@@ -540,19 +575,23 @@ def test_named_tiles_bring_their_bordering_tiles_with_neighbors_on(comfy_stubs):
     assert result.written.captions[1] == ("caption 3",)
     assert result.written.tiles == (5, 0)
     assert result.tiles == "5, 0"
-    assert result.text.startswith("preset standard, 9 of 16 tiles captioned\n\n"
-                                  "tile 5 r1c1\ncaption 1\n\ntile 0 r0c0\ncaption 2\n\n"
-                                  "bordering tiles\n\ntile 1 r0c1\ncaption 3\n\n")
+    assert result.tile_texts.startswith(
+        "tile_texts: caption kind, 9 of 16 tiles, named tiles 5, 0 first and then their "
+        "bordering tiles\n")
+    headers = [line for line in result.tile_texts.split("\n") if line.startswith("=== tile ")]
+    assert headers[:3] == ["=== tile 5 (row 1, column 1) ===", "=== tile 0 (row 0, column 0) ===",
+                           "=== tile 1 (row 0, column 1) ==="]
 
 
 def test_the_style_caption_is_written_once_for_a_tile_list(comfy_stubs):
     clip = _asking_clip()
 
-    result = _caption(clip, layout=_grid_layout(), preset="artwork", tiles="5", with_neighbors=False)
+    result = _caption(clip, layout=_grid_layout(), global_style_instruction="name the medium",
+                      tiles="5", with_neighbors=False)
 
-    assert [call["text"] for call in clip.generate_calls] == [ARTWORK_STYLE, ARTWORK_TILE]
-    assert result.written.style == (f"asked {ARTWORK_STYLE}",)
-    assert result.written.captions[5] == (f"asked {ARTWORK_TILE}",)
+    assert [call["text"] for call in clip.generate_calls] == ["name the medium", "name the objects"]
+    assert result.written.style == ("asked name the medium",)
+    assert result.written.captions[5] == ("asked name the objects",)
 
 
 @pytest.mark.parametrize("text", ["two", "5,x"])
@@ -572,7 +611,7 @@ def test_the_run_is_one_progress_bar_that_ends_full(comfy_stubs):
     # The ledger's shim routes the inner bars into one bar over the whole run.
     clip = _asking_clip()
 
-    _caption(clip, layout=_grid_layout(), preset="artwork", tiles="5")
+    _caption(clip, layout=_grid_layout(), global_style_instruction="name the medium", tiles="5")
 
     assert len(comfy_stubs["progress_bars"]) == 1
     bar = comfy_stubs["progress_bars"][0]
@@ -581,7 +620,7 @@ def test_the_run_is_one_progress_bar_that_ends_full(comfy_stubs):
     values = [value for value, _total, _preview in bar.updates]
     assert values == sorted(values)
     assert bar.updates[-1][:2] == (total, total)
-    assert clip.generate_calls[0]["text"] == ARTWORK_STYLE
+    assert clip.generate_calls[0]["text"] == "name the medium"
 
 
 def test_the_progress_shim_is_restored_after_the_run(comfy_stubs):
@@ -619,11 +658,311 @@ def test_validate_inputs_accepts_zero_and_a_size_inside_the_range(value):
 
 def test_the_captions_node_reports_the_settings_file_in_its_cache_key():
     # ComfyUI folds IS_CHANGED into the cache key, and core calls it as f(**inputs), so every
-    # widget on the node arrives as a keyword.
+    # input on the node arrives as a keyword.
     expected = captions.settings_fingerprint()
 
     assert ContextAnchoredTileTestCaptions.IS_CHANGED() == expected
-    assert ContextAnchoredTileTestCaptions.IS_CHANGED(image=None, preset="artwork") == expected
+    assert ContextAnchoredTileTestCaptions.IS_CHANGED(image=None, tile_caption_instruction="x") == expected
+
+
+def test_a_caption_run_fills_the_four_debug_outputs_with_a_title_and_one_sentence(comfy_stubs):
+    result = _caption(_asking_clip())
+
+    assert result.fragments == (
+        f"{testing.FRAGMENTS_TITLE}\nThe caption kind reads the prompt only through {{PROMPT}} "
+        "in its instructions, so no fragment is sorted.")
+    for text, title in ((result.listed, "tags_listed: "), (result.verified, "tags_verified: "),
+                        (result.final, "tags_final: ")):
+        assert text.startswith(title)
+        assert text.split("\n")[1] == (
+            "The caption kind has no tag stages, and connecting tile_tags_instruction in place "
+            "of tile_caption_instruction runs them.")
+        assert len(text.split("\n")) == 2
+
+
+# --- the tags kind ---------------------------------------------------------------------
+
+# One scene every tags stage acts on: "objects" is a category noun, "the moon" is a prompt
+# subject the model also lists, "wooden spoon" fails verification and "apple" is a subset of
+# "red apple". The prompt's "oil painting" is a style fragment.
+TAG_PROPOSAL = "red apple, objects, the moon, wooden spoon, apple"
+TAG_PROMPT = "the moon, oil painting"
+
+
+@pytest.fixture
+def tag_classifier(comfy_stubs, monkeypatch):
+    fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.95,
+                          style=lambda fragment: 0.97 if fragment == "oil painting" else 0.1)
+    monkeypatch.setattr(tags, "build_classifier", lambda clip: fake)
+    return fake
+
+
+def _tag_run(**overrides):
+    inputs = dict(TAGS_SOCKETS, prompt=TAG_PROMPT)
+    inputs.update(overrides)
+    clip = FakeTagClip(proposal=TAG_PROPOSAL)
+    return clip, _caption(clip, **inputs)
+
+
+def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
+    clip, result = _tag_run()
+
+    assert result.written.preset == "Tile Test: Captions"
+    assert result.written.kind == captions.TILE_TEXT_TAGS
+    assert result.written.captions == (("moon, red apple",),) * 2
+    assert result.written.style == ("Oil painting.",)
+    assert result.tile_texts.startswith(
+        "tile_texts: tags kind, 2 tiles\n"
+        f"{TILE_TEXTS_SENTENCE}\n\n"
+        "=== style caption (placed on top of every tile's text) ===\n  Oil painting.\n\n")
+    # The style caption is asked with global_style_max_tokens.
+    style_calls = [call for call in clip.generate_calls if not call["propose"]]
+    assert [(call["text"], call["max_length"]) for call in style_calls] == [("name the medium", 64)]
+    propose = [call for call in clip.generate_calls if call["propose"]]
+    assert propose[0]["text"] == tags.PROPOSE_TEMPLATE.format(
+        instruction=ANCHOR.replace("{PROMPT}", TAG_PROMPT) + PROPOSE)
+
+
+def test_the_tags_kind_ignores_the_caption_budget_a_tags_settings_node_outputs(tag_classifier):
+    _clip, result = _tag_run(tile_caption_max_tokens=0)
+
+    assert result.written.captions == (("moon, red apple",),) * 2
+
+
+def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_classifier, monkeypatch):
+    seen = []
+    resample = captions.resample_for_vl
+    monkeypatch.setattr(captions, "resample_for_vl",
+                        lambda pixels, budget=None: seen.append(budget) or resample(pixels, budget))
+
+    _tag_run(prompt=None, caption_megapixels=0.25)
+
+    assert 250_000 in seen
+    assert set(seen) <= {250_000, tags.VL_MAX_PIXELS, round(tags.STRIP_MEGAPIXELS * 1_000_000)}
+
+
+def test_the_prompt_fragments_output_prints_each_fragment_with_its_sort(tag_classifier):
+    _clip, result = _tag_run()
+
+    assert result.fragments == (
+        f"{testing.FRAGMENTS_TITLE}\n"
+        "A subject fragment joins every tile's tag candidates, and a fragment at p(style) 0.90 "
+        "or above is style and is dropped.\n\n"
+        "=== each fragment with its p(style) and its sort ===\n"
+        "  0.10  subject  the moon\n"
+        "  0.97  style    oil painting")
+
+
+@pytest.mark.parametrize("prompt", [None, "  "])
+def test_the_prompt_fragments_output_says_no_prompt_connected(tag_classifier, prompt):
+    _clip, result = _tag_run(prompt=prompt, global_style_instruction=None)
+
+    assert result.fragments.endswith("=== each fragment with its p(style) and its sort ===\n"
+                                     "  no prompt connected")
+    assert result.written.style is None
+    assert "  off, global_style_instruction is not connected" in result.tile_texts
+
+
+def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its_tags(tag_classifier):
+    _clip, result = _tag_run()
+
+    tile = ("  VL model reply, verbatim\n"
+            f"    {TAG_PROPOSAL}\n"
+            "  tags parsed from the reply (5)\n"
+            "    red apple, objects, the moon, wooden spoon, apple")
+    assert result.listed == (
+        "tags_listed: the tags the VL model listed for each tile\n"
+        "The VL model is asked the question below about each tile, and its reply is split into "
+        "tags.\n\n"
+        "=== question sent to the VL model for every tile ===\n"
+        f"  This image was made from the prompt: {TAG_PROMPT}\n"
+        f"  {PROPOSE}\n\n"
+        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
+        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+
+
+def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left_out(tag_classifier):
+    _clip, result = _tag_run()
+
+    tile = ("  from the prompt\n"
+            "    kept     0.95  moon, also listed by the VL model\n"
+            "  from the VL model\n"
+            "    kept     0.95  red apple\n"
+            "    dropped  0.20  wooden spoon\n"
+            "    kept     0.95  apple\n"
+            "  left out before verification\n"
+            "    objects: category noun")
+    assert result.verified == (
+        "tags_verified: each candidate tag scored on its tile\n"
+        "Each candidate is scored with tile_tags_verification_statement on its tile, and a score "
+        "of 0.90 or above (tile_tags_verification_threshold) keeps it.\n\n"
+        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
+        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+
+
+def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_text(tag_classifier):
+    _clip, result = _tag_run()
+
+    strips = ("      rows     top 0.95  center 0.95  bottom 0.95\n"
+              "      columns  left 0.95  center 0.95  right 0.95\n")
+    no_term = "kept with no term, no axis has exactly one strip holding it"
+    tile = ("  dropped as a subset of a longer kept tag\n"
+            "    apple\n"
+            "  positions of the kept tags. A strip holds a tag at 0.90 or above "
+            "(tile_tags_position_threshold)\n"
+            f"    moon: {no_term}\n{strips}"
+            f"    red apple: {no_term}\n{strips}"
+            "  tile text\n"
+            "    moon, red apple")
+    assert result.final == (
+        "tags_final: the kept tags of each tile, their positions and the tile text\n"
+        "A kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on "
+        "six strips of the tile, three rows and three columns. A tag no strip holds is dropped. "
+        "On each axis where exactly one strip holds a tag, that strip names the tag's position "
+        "term. The tags with their terms make the tile text.\n\n"
+        f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
+        f"=== tile 1 (row 0, column 1) ===\n{tile}")
+
+
+def test_the_two_threshold_widgets_reach_the_tags_pass(tag_classifier):
+    # Every kept tag scores 0.95 on its tile and on every strip.
+    _clip, strict_verify = _tag_run(tile_tags_verification_threshold=0.96)
+    _clip, strict_strips = _tag_run(tile_tags_position_threshold=0.96)
+
+    assert strict_verify.written.captions == (("",),) * 2
+    assert "    dropped  0.95  red apple" in strict_verify.verified
+    assert strict_strips.written.captions == (("",),) * 2
+    assert "    red apple: dropped, no strip holds it\n" in strict_strips.final
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("tile_tags_verification_threshold", 1.5), ("tile_tags_position_threshold", -0.1)])
+def test_a_linked_threshold_outside_0_to_1_is_refused_before_any_request(tag_classifier, name, value):
+    with pytest.raises(ValueError, match=f"was given {name} {value}, and it is a score between 0 and 1"):
+        _tag_run(**{name: value})
+
+    assert tag_classifier.requests == []
+
+
+def test_position_terms_off_makes_no_strip_request_and_says_so(tag_classifier):
+    _tag_run()
+    assert len(strip_requests(tag_classifier)) == 2 * 6
+    tag_classifier.requests.clear()
+
+    _clip, result = _tag_run(position_terms=False)
+
+    assert strip_requests(tag_classifier) == []
+    assert result.written.captions == (("moon, red apple",),) * 2
+    assert ("  positions of the kept tags: off, position_terms is off\n"
+            "  tile text\n    moon, red apple") in result.final
+
+
+@pytest.mark.parametrize("value", [None, " "])
+def test_verification_off_keeps_every_candidate_unchecked_and_says_so(tag_classifier, value):
+    _clip, result = _tag_run(tile_tags_verification_statement=value)
+
+    assert [request for request in tag_classifier.requests if request["kind"] == "noul"] == []
+    assert result.written.captions == (("moon, red apple, wooden spoon",),) * 2
+    assert result.verified.split("\n")[1] == (
+        "tile_tags_verification_statement is not connected, so verification is off and no "
+        "candidate was scored.")
+    assert ("=== tile 0 (row 0, column 0) ===\n"
+            "  every candidate was kept unchecked (4): moon, red apple, wooden spoon, apple") in result.verified
+    assert ("  positions of the kept tags: off, tile_tags_verification_statement is not "
+            "connected") in result.final
+
+
+@pytest.mark.parametrize(("prompt", "anchor"), [(TAG_PROMPT, None), (None, ANCHOR), ("  ", ANCHOR)])
+def test_the_tags_question_goes_alone_without_a_prompt_or_without_the_prompt_socket(tag_classifier, prompt, anchor):
+    clip, _result = _tag_run(prompt=prompt, tile_tags_with_prompt_instruction=anchor)
+
+    propose = [call for call in clip.generate_calls if call["propose"]]
+    assert propose[0]["text"] == tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
+
+
+def test_the_debug_sections_follow_the_listing_order(tag_classifier):
+    _clip, result = _tag_run(tiles="5", with_neighbors=True, layout=_grid_layout())
+
+    def headers(text):
+        return [line for line in text.split("\n") if line.startswith("=== tile ")]
+
+    assert headers(result.verified) == [
+        "=== tile 5 (row 1, column 1) ===", "=== tile 0 (row 0, column 0) ===",
+        "=== tile 1 (row 0, column 1) ===", "=== tile 2 (row 0, column 2) ===",
+        "=== tile 4 (row 1, column 0) ===", "=== tile 6 (row 1, column 2) ===",
+        "=== tile 8 (row 2, column 0) ===", "=== tile 9 (row 2, column 1) ===",
+        "=== tile 10 (row 2, column 2) ==="]
+    for text in (result.tile_texts, result.listed, result.final):
+        assert headers(text) == headers(result.verified)
+
+
+@pytest.mark.parametrize(("inputs", "message"), [
+    ({"tile_tags_with_prompt_instruction": "Made from the prompt."},
+     r"tile_tags_with_prompt_instruction without \{PROMPT\}"),
+    ({"tile_tags_verification_statement": "It shows a tag"},
+     r"tile_tags_verification_statement without \{TAG\}"),
+    ({"tile_tags_instruction": "Tag {PROMPT}."},
+     r"tile_tags_instruction holding \{PROMPT\}\. Only tile_tags_with_prompt_instruction carries the prompt"),
+    ({"tile_tags_verification_statement": "{TAG} fits {PROMPT}"},
+     r"tile_tags_verification_statement holding \{PROMPT\}\. Only tile_tags_with_prompt_instruction carries the prompt"),
+    ({"global_style_instruction": "Style of {PROMPT}.", "prompt": None},
+     r"asks for \{PROMPT\} in its global_style_instruction"),
+    ({"global_style_max_tokens": 0}, "was given global_style_max_tokens 0"),
+])
+def test_the_tags_kind_refuses_a_socket_it_cannot_run_before_any_request(tag_classifier, inputs, message):
+    clip = FakeTagClip()
+
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        _caption(clip, **{**TAGS_SOCKETS, **inputs})
+
+    assert clip.generate_calls == []
+    assert tag_classifier.requests == []
+
+
+def test_the_tags_kind_needs_no_style_budget_with_the_style_socket_off(tag_classifier):
+    clip, result = _tag_run(global_style_max_tokens=0, global_style_instruction=None)
+
+    assert [call for call in clip.generate_calls if not call["propose"]] == []
+    # The prompt's style fragment is dropped, never written as a style line of its own.
+    assert result.written.style is None
+
+
+def test_a_tags_run_with_a_prompt_and_no_style_instruction_counts_no_style_row(tag_classifier, comfy_stubs):
+    # The style line is the style caption alone, so the bar holds the two tile chunks only and
+    # still ends full.
+    _tag_run(global_style_instruction=None)
+
+    bar = comfy_stubs["progress_bars"][0]
+    total = round(2 * progress.K_TAG_TILE * progress.EMIT_SCALE)
+    assert len(comfy_stubs["progress_bars"]) == 1
+    assert bar.total == total
+    assert bar.updates[-1][:2] == (total, total)
+
+
+def test_a_tags_set_renders_through_tile_test_render_with_no_leading_newline(tag_classifier, monkeypatch):
+    # An unconnected style socket writes no style line, which reaches Render as no style, so
+    # no lane starts with a newline.
+    layout = _render_layout()
+    _clip, result = _tag_run(layout=layout, prompt="the moon", global_style_instruction=None)
+    assert result.written.style is None
+
+    recorded, _ = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
+                          given_captions=result.written)
+
+    lanes = recorded["calls"][0]["tile_captions"]
+    assert lanes == result.written.captions
+    assert all(not rows[0].startswith("\n") for rows in lanes)
+
+
+def test_a_tags_set_with_a_style_caption_renders_it_on_top_of_every_lane(tag_classifier, monkeypatch):
+    layout = _render_layout()
+    _clip, result = _tag_run(layout=layout)
+
+    recorded, _ = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
+                          given_captions=result.written)
+
+    lanes = recorded["calls"][0]["tile_captions"]
+    assert lanes == tuple((f"Oil painting.\n{rows[0]}",) for rows in result.written.captions)
 
 
 # --- the Render node -------------------------------------------------------------------
@@ -814,6 +1153,22 @@ def test_the_preset_carries_the_two_token_widgets_over_the_settings_file(comfy_s
 
     assert (preset.vision.canvas_tokens, preset.vision.crop_tokens) == (7, 0)
     assert preset.vision.caption_megapixels == shipped.caption_megapixels
+
+
+def test_given_captions_run_on_the_shipped_tags_preset_without_the_tags_library(comfy_stubs, monkeypatch):
+    # The shipped file's one preset is the tags kind, and this node hands its captions in, so
+    # nothing on its route tags and a missing library cannot stop it (test_sync pins the
+    # engine's half of that).
+    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    layout = _render_layout()
+    given = _captions_for(layout)
+
+    recorded, result = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
+                               given_captions=given)
+
+    assert recorded["calls"][0]["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["calls"][0]["tile_captions"] == given.captions
+    assert len(result[0]) == 1
 
 
 def test_the_connected_captions_reach_the_engine_on_a_caption_surface(comfy_stubs, monkeypatch):
@@ -1152,3 +1507,132 @@ def test_the_render_node_returns_two_image_lists():
     assert ContextAnchoredTileTestRender.RETURN_TYPES == ("IMAGE", "IMAGE")
     assert ContextAnchoredTileTestRender.RETURN_NAMES == ("tiles", "blocks")
     assert ContextAnchoredTileTestRender.OUTPUT_IS_LIST == (True, True)
+
+
+# --- the Settings node -----------------------------------------------------------------
+
+def _settings(preset):
+    """Run the Settings node. Returns its outputs by name."""
+    values = ContextAnchoredTileTestSettings().read_settings(preset=preset)
+    return dict(zip(ContextAnchoredTileTestSettings.RETURN_NAMES, values, strict=True))
+
+
+def _file_in_force():
+    # Parsed here rather than through captions, so "as written" is pinned against the file.
+    with open(captions.settings_path(), "rb") as handle:
+        return tomllib.load(handle)
+
+
+def test_the_settings_preset_widget_offers_the_shipped_presets():
+    preset = ContextAnchoredTileTestSettings.INPUT_TYPES()["required"]["preset"]
+
+    assert preset[0] == ["tags"]
+    assert preset[1]["default"] == "tags"
+    assert "restart" in preset[1]["tooltip"]
+
+
+def test_the_settings_preset_widget_offers_a_files_presets_of_both_kinds_in_file_order(monkeypatch):
+    shipped = captions.load_settings()
+    presets = {"standard": {}, "tagged": shipped.presets["tags"], "artwork": {}}
+    monkeypatch.setattr(captions, "load_settings",
+                        lambda path=None: captions.Settings(vision=shipped.vision, presets=presets))
+
+    preset = ContextAnchoredTileTestSettings.INPUT_TYPES()["required"]["preset"]
+
+    assert preset[0] == ["standard", "tagged", "artwork"]
+    assert preset[1]["default"] == "standard"
+
+
+def test_the_settings_node_has_the_preset_widget_alone():
+    assert list(ContextAnchoredTileTestSettings.INPUT_TYPES()) == ["required"]
+    assert list(ContextAnchoredTileTestSettings.INPUT_TYPES()["required"]) == ["preset"]
+
+
+def test_the_settings_outputs_are_named_as_the_settings_keys_in_order():
+    assert ContextAnchoredTileTestSettings.RETURN_NAMES == (
+        "global_style_instruction", "global_style_max_tokens", "tile_caption_instruction",
+        "tile_caption_max_tokens", "tile_tags_instruction", "tile_tags_with_prompt_instruction",
+        "tile_tags_verification_statement", "caption_megapixels", "canvas_tokens", "crop_tokens",
+        "tile_tags_verification_threshold", "tile_tags_position_threshold")
+    assert ContextAnchoredTileTestSettings.RETURN_TYPES == (
+        "STRING", "INT", "STRING", "INT", "STRING", "STRING", "STRING", "FLOAT", "INT", "INT",
+        "FLOAT", "FLOAT")
+    assert ContextAnchoredTileTestSettings.CATEGORY == "image/upscaling/tile testing"
+
+
+def test_a_tags_preset_outputs_its_own_keys_and_empty_caption_keys():
+    written = _file_in_force()
+    block = written["presets"]["tags"]
+
+    result = _settings("tags")
+
+    assert result["global_style_instruction"] == block["global_style_instruction"]
+    assert result["global_style_max_tokens"] == block["global_style_max_tokens"]
+    assert result["tile_tags_instruction"] == block["tile_tags_instruction"]
+    assert result["tile_tags_with_prompt_instruction"] == block["tile_tags_with_prompt_instruction"]
+    assert result["tile_tags_verification_statement"] == block["tile_tags_verification_statement"]
+    assert result["tile_tags_verification_threshold"] == block["tile_tags_verification_threshold"]
+    assert result["tile_tags_position_threshold"] == block["tile_tags_position_threshold"]
+    assert result["tile_caption_instruction"] == ""
+    assert result["tile_caption_max_tokens"] == 0
+
+
+def test_a_caption_preset_outputs_its_own_keys_and_empty_tags_keys(caption_settings):
+    block = _file_in_force()["presets"]["artwork"]
+
+    result = _settings("artwork")
+
+    assert result["tile_caption_instruction"] == block["tile_caption_instruction"]
+    assert result["tile_caption_max_tokens"] == block["tile_caption_max_tokens"]
+    assert result["global_style_instruction"] == block["global_style_instruction"]
+    assert result["global_style_max_tokens"] == block["global_style_max_tokens"]
+    for name in ("tile_tags_instruction", "tile_tags_with_prompt_instruction",
+                 "tile_tags_verification_statement"):
+        assert result[name] == ""
+    assert (result["tile_tags_verification_threshold"], result["tile_tags_position_threshold"]) == (0.0, 0.0)
+
+
+def test_the_vision_outputs_are_the_files_vision_table(caption_settings):
+    vision = _file_in_force()["vision"]
+
+    result = _settings("standard")
+
+    assert result["caption_megapixels"] == vision["caption_megapixels"]
+    assert isinstance(result["caption_megapixels"], float)
+    assert result["canvas_tokens"] == vision["canvas_tokens"]
+    assert result["crop_tokens"] == vision["crop_tokens"]
+
+
+def test_the_placeholders_are_left_in_place(caption_settings):
+    # The Captions node fills {PROMPT} from its own prompt input, so a filled one here would
+    # write this node's prompt into every downstream run.
+    assert captions.PROMPT_PLACEHOLDER in _settings("prompted")["tile_caption_instruction"]
+
+
+def test_the_tags_placeholders_are_left_in_place():
+    result = _settings("tags")
+
+    assert captions.PROMPT_PLACEHOLDER in result["tile_tags_with_prompt_instruction"]
+    assert captions.TAG_PLACEHOLDER in result["tile_tags_verification_statement"]
+
+
+def test_an_edited_wording_reaches_the_outputs_with_no_restart(caption_settings):
+    first = _settings("standard")["tile_caption_instruction"]
+    text = caption_settings.read_text(encoding="utf-8")
+    caption_settings.write_text(text.replace(first, "name every object"), encoding="utf-8")
+
+    assert _settings("standard")["tile_caption_instruction"] == "name every object"
+
+
+def test_a_preset_missing_from_the_file_at_run_time_is_refused(caption_settings):
+    # The combo is built once per session, so a preset removed from the file after startup
+    # still reaches the run.
+    with pytest.raises(RuntimeError, match=r"Tile Test: Settings.*'tags'.*settings\.toml.*Restart ComfyUI"):
+        _settings("tags")
+
+
+def test_the_settings_node_reports_the_settings_file_in_its_cache_key():
+    expected = captions.settings_fingerprint()
+
+    assert ContextAnchoredTileTestSettings.IS_CHANGED() == expected
+    assert ContextAnchoredTileTestSettings.IS_CHANGED(preset="tags") == expected

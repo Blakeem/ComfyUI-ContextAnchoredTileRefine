@@ -3,8 +3,11 @@ custom-sampling inputs from widgets and hand them, plus the UPSCALED image, to t
 existing entry point. So every builder and sampling.refine_image itself is replaced by a
 recorder: what is pinned here is which value reaches which parameter, not any pixel math
 (that is covered by test_upscale / test_tiling / test_vl against the real functions)."""
+import sys
+
 import pytest
 import torch
+from test_tags import FakeTagClip
 
 from context_anchored_tile_refine import sampling, upscale
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
@@ -27,6 +30,13 @@ WIDGETS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def caption_presets(caption_settings):
+    # WIDGETS drive the bare default, which is the tags preset in the shipped file. The wiring
+    # is pinned on a caption preset, and the tags tests at the end write their own file.
+    return caption_settings
+
+
 class FakeGuider:
     def __init__(self, model, positive, negative, cfg):
         self.model = model
@@ -35,7 +45,7 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, **overrides):
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, clip=None, **overrides):
     """Run refine() with every collaborator faked; return (recorded, result).
 
     `recorded` may be passed in, so a test that expects a raise can still read how far the node
@@ -100,7 +110,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
 
     recorded["image"] = torch.rand(1, 32, 32, 3) if image is None else image
     recorded["model"] = object()
-    recorded["clip"] = object()
+    recorded["clip"] = object() if clip is None else clip
     recorded["vae"] = object()
 
     widgets = dict(WIDGETS)
@@ -313,3 +323,39 @@ def test_rejects_a_non_4d_image(comfy_stubs, monkeypatch):
 def test_rejects_a_sub_8_image(comfy_stubs, monkeypatch):
     with pytest.raises(ValueError, match="at least 8x8"):
         _drive(monkeypatch, image=torch.rand(1, 4, 104, 3))
+
+
+def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, monkeypatch, tmp_path):
+    from test_captions import TAGS_SETTINGS, write_settings
+
+    from context_anchored_tile_refine import captions
+
+    write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
+
+    recorded, _ = _drive(monkeypatch, clip=FakeTagClip())
+
+    preset = recorded["refine_image"]["preset"]
+    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.prompt == WIDGETS["prompt"]
+
+
+@pytest.mark.parametrize(("clip", "missing", "message"), [
+    (None, False, "this CLIP cannot generate text"),
+    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+])
+def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
+                                                                         clip, missing, message):
+    # This node runs the upscale-model pass and the text-encoder load before the engine's tags
+    # pass, so a CLIP without a text generator or a missing library is named first.
+    from test_captions import TAGS_SETTINGS, write_settings
+
+    write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
+    if missing:
+        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    recorded = {}
+
+    with pytest.raises(RuntimeError, match=message):
+        _drive(monkeypatch, recorded=recorded, clip=clip)
+
+    assert recorded["prepare_upscaled"] is None
+    assert recorded["encode_empty"] is None

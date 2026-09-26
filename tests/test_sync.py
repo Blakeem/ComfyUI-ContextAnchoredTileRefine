@@ -20,16 +20,18 @@ take no fixture at all. Nothing here needs the real `comfy_env` install.
 """
 import copy
 import itertools
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 from test_stepper import run_bounded
+from test_tags import FakeTagClip
 from test_tiling import GridNoise, GridVAE, _layout
 from test_vl import FakeVLClip, layout_tiles
 
 from conftest import BaseModel
-from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, vl
+from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, tags, vl
 
 # Strictly decreasing, ends at 0, starts below 1 — every unconditional precondition satisfied
 # and the live-canvas ring algebra defined.
@@ -562,7 +564,7 @@ def test_the_conditioning_pre_pass_slices_the_engines_own_tiles(comfy_stubs, vl_
     assert seen["source"] is run.padded
 
 
-def test_caption_surfaces_route_through_the_same_tiles(comfy_stubs, vl_clip, monkeypatch):
+def test_caption_surfaces_route_through_the_same_tiles(comfy_stubs, vl_clip, monkeypatch, caption_settings):
     # The other two vlm_methods build their positives from the same layout.tiles object.
     seen = {}
 
@@ -1624,7 +1626,7 @@ def test_the_ticks_own_the_sampling_fill_and_the_hook_carries_the_preview(comfy_
     (captions.VLM_METHOD_CAPTIONS, [progress.CAPTIONS, progress.CAPTION_ENCODE]),
 ])
 def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip, monkeypatch,
-                                                           vlm_method, expected):
+                                                           vlm_method, expected, caption_settings):
     # PHASE ORDER: build_tile_positives writes the captions FIRST, so the combined surface
     # reads [captions][vision encode] and never the reverse; the captions-only surface builds
     # no canvas encode at all. The builders are stubbed — what is pinned is the ORDER.
@@ -1653,7 +1655,7 @@ def test_the_pre_pass_segments_open_in_the_codes_own_order(comfy_stubs, vl_clip,
      progress.W_ENCODE + 3 * progress.W_ENCODE_CROP + 3 * progress.W_ENCODE_CAPTION_TEXT),
 ])
 def test_the_vision_segment_is_opened_with_the_vision_units(comfy_stubs, vl_clip,
-                                                            monkeypatch, vlm_method, expected):
+                                                            monkeypatch, vlm_method, expected, caption_settings):
     # A 1x3 strip under the shipped [vision] table is one canvas encode plus three crop
     # encodes. The caption text half still scales with the tile count. The builders are
     # stubbed on the combined surface: what is pinned is the SIZE.
@@ -1702,11 +1704,11 @@ def test_preset_picture_and_the_pre_pass_agree_on_the_vision_units(comfy_stubs, 
     assert all(before == after for _name, before, after in totals)
 
 
-def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stubs, vl_clip, monkeypatch):
+def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stubs, vl_clip, monkeypatch, caption_settings):
     # A preset that carries a style caption makes the caption segment (n_tiles + 1) chunks,
-    # and (artwork) is the shipped preset that does. preset_picture's style_rows and
-    # build_tile_positives' open() must carry the IDENTICAL count: the recorder pins that no
-    # open moves the total the preset settled.
+    # and (artwork) is the caption preset that does. preset_picture and build_tile_positives'
+    # open() size it from the one caption_segment: the recorder pins that no open moves the
+    # total the preset settled.
     monkeypatch.setattr(captions, "generate_tile_captions",
                         lambda clip, source, tiles, preset, batch_size=1,
                         batch_index=0, progress=None, **kwargs: [
@@ -1737,7 +1739,7 @@ def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stu
     assert all(before == after for _name, before, after in totals)
 
 
-def test_the_settings_file_is_read_once_per_picture(comfy_stubs, vl_clip, monkeypatch):
+def test_the_settings_file_is_read_once_per_picture(comfy_stubs, vl_clip, monkeypatch, caption_settings):
     # The ledger's caption count and the pre-pass's own must come from ONE read: with two,
     # a file edited between them would size a segment for a preset the captions never asked.
     # A "vision tokens" run reads the file once as well, for its [vision] table.
@@ -2074,3 +2076,168 @@ def test_a_non_callable_noise_fields_is_rejected(comfy_stubs, vl_clip):
     # run_lanes calls it once per lane, so anything else fails deep inside the lane build.
     with pytest.raises(TypeError, match="noise_fields override must be callable"):
         run_sync_with(vl_clip, noise_fields=object())
+
+
+# ---- the tags kind -----------------------------------------------------------
+#
+# A tags preset writes each tile's text through tags.generate_tag_set in place of the caption
+# pass, then takes the encode branch its surface already uses. The tags pass itself is pinned
+# in test_tags. What is pinned here is which canvas reaches it and where the guard sits.
+
+
+def a_tags_preset(surface=captions.VLM_METHOD_CAPTIONS, prompt="", style="the style"):
+    return captions.Preset(
+        surface=surface, label="tags",
+        vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0, caption_megapixels=0.1),
+        style_instruction=style, style_max_tokens=64, kind=captions.TILE_TEXT_TAGS,
+        tile_tags_instruction="list the things", tile_tags_with_prompt_instruction="From: {PROMPT}\n",
+        tile_tags_verification_statement="It shows {TAG}", prompt=prompt)
+
+
+def lane_positives(texts):
+    return [[{"cross_attn": torch.zeros(1, 1, 8)}] for _ in texts]
+
+
+@pytest.fixture
+def tag_pass(monkeypatch):
+    # The tags pass as a recorder that writes one style line and one text per tile row, with
+    # the caption pass made unreachable, so a test proves which of the two ran.
+    calls = []
+
+    def recording(clip, source, tiles, preset, batch_size=1, batch_index=0, progress=None,
+                  style_source=None):
+        calls.append({"clip": clip, "source": source, "tiles": tiles, "preset": preset,
+                      "batch_size": batch_size, "batch_index": batch_index,
+                      "progress": progress, "style_source": style_source})
+        return ["oil painting."], [[f"tag {index}"] for index in range(len(tiles))]
+
+    def uncaptioned(*args, **kwargs):
+        raise AssertionError("a tags preset must never reach the caption pass")
+
+    monkeypatch.setattr(tags, "generate_tag_set", recording)
+    monkeypatch.setattr(captions, "generate_tile_captions", uncaptioned)
+    return calls
+
+
+@pytest.mark.parametrize("surface", captions.CAPTION_SURFACES)
+def test_a_tags_preset_writes_each_tiles_text_through_the_tags_pass(comfy_stubs, vl_clip, monkeypatch,
+                                                                    tag_pass, surface):
+    # The same canvases and counters the caption pass is handed, and the style line joined on
+    # top of every tile text exactly as a style caption is.
+    encoded = []
+    monkeypatch.setattr(captions, "build_caption_conds",
+                        lambda clip, texts: (encoded.append(texts), "caption conds")[1])
+    monkeypatch.setattr(captions, "build_slice_caption_conds",
+                        lambda clip, source, tiles, texts, vision, offset_x=0, offset_y=0,
+                        budget_tiles=None: (encoded.append(texts), "slice conds")[1])
+    tiles = layout_tiles(3, 1, w=CANVAS, h=CANVAS, ctx=CTX, overlap=OVERLAP)
+    image = image_canvas()
+    preset = a_tags_preset(surface)
+
+    positives = sync.build_tile_positives(vl_clip, image, tiles, preset, batch_size=2,
+                                          batch_index=1)
+
+    assert len(tag_pass) == 1
+    call = tag_pass[0]
+    assert call["source"] is image and call["style_source"] is image
+    assert call["tiles"] is tiles and call["preset"] is preset
+    assert (call["batch_size"], call["batch_index"], call["progress"]) == (2, 1, None)
+    assert encoded == [[[f"oil painting.\ntag {index}"] for index in range(3)]]
+    expected = "caption conds" if surface == captions.VLM_METHOD_CAPTIONS else "slice conds"
+    assert positives == expected
+
+
+def test_the_region_path_tags_the_region_crop_and_styles_the_full_image(comfy_stubs, vl_clip,
+                                                                        monkeypatch, tag_pass):
+    # As the caption pass does: the tile texts describe the crop the lanes sample, and the
+    # style line reads the whole picture, so a masked refine's style stays global.
+    monkeypatch.setattr(tags, "check_tags_ready", lambda clip: None)
+    monkeypatch.setattr(captions, "build_caption_conds", lambda clip, texts: lane_positives(texts))
+    image = image_canvas()
+
+    run_bounded(lambda: sync.refine_sync(
+        image, RunGuider(), euler_sampler(), SIGMAS, GridVAE(), GridNoise(), RUN_CAP_W, RUN_CAP_H,
+        CTX, RUN_OVERLAP, vl_clip, mask=band_mask(), vlm_method=captions.VLM_METHOD_CAPTIONS,
+        preset=a_tags_preset()))
+
+    y0, y1, x0, x1 = REGION_CROP
+    call = tag_pass[0]
+    assert torch.equal(call["source"], image[:, y0:y1, x0:x1, :])
+    assert torch.equal(call["style_source"], image)
+
+
+@pytest.mark.parametrize(("clip", "missing", "message"), [
+    (FakeVLClip(seq_override=ENC_SEQ), False, "this CLIP cannot generate text"),
+    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+])
+def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs, monkeypatch, clip,
+                                                                     missing, message):
+    # The direct caller's guard: the VL nodes run check_tags_ready themselves, and a caller that
+    # hands the engine a tags preset must still fail before any VAE or VL encode.
+    def unreached(*args, **kwargs):
+        raise AssertionError("no encode may run before the tags guard")
+
+    if missing:
+        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(sync, "build_tile_positives", unreached)
+    monkeypatch.setattr(sync, "encode_canvas_latent", unreached)
+
+    with pytest.raises(RuntimeError, match=message):
+        prepare_with(clip, preset=a_tags_preset(), vlm_method=captions.VLM_METHOD_CAPTIONS)
+
+
+def test_captions_handed_in_with_a_tags_preset_never_reach_the_tags_guard(comfy_stubs, vl_clip,
+                                                                          monkeypatch):
+    # The Tile Test: Render node's route: its captions were written elsewhere, so a run on the
+    # shipped tags preset tags nothing and a missing library or a CLIP that cannot generate
+    # (this fake cannot) must not stop it.
+    def untagged(*args, **kwargs):
+        raise AssertionError("the tags pass must not run when the captions are handed in")
+
+    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(tags, "generate_tag_set", untagged)
+    monkeypatch.setattr(captions, "build_caption_conds", lambda clip, given: lane_positives(given))
+    handed = [[f"tile {index}"] for index in range(len(expected_layout().tiles))]
+
+    run = prepare_with(vl_clip, preset=a_tags_preset(), vlm_method=captions.VLM_METHOD_CAPTIONS,
+                       tile_captions=handed)
+
+    assert len(run.lanes) == len(handed)
+
+
+@pytest.mark.parametrize(("style", "style_rows"), [
+    ("the style", 1),
+    # The style line is the style caption alone, so a prompt with no style instruction writes
+    # no style row.
+    ("", 0),
+])
+def test_the_tag_segment_and_the_preset_agree_on_its_size(comfy_stubs, vl_clip, monkeypatch, tag_pass,
+                                                          style, style_rows):
+    # One chunk per tile at K_TAG_TILE plus the style line's chunk at K_CAPTION, sized by
+    # preset_picture and opened by build_tile_positives from the one caption_segment, so no
+    # open moves the total the preset settled and the tags pass reports into this ledger.
+    monkeypatch.setattr(tags, "check_tags_ready", lambda clip: None)
+    monkeypatch.setattr(captions, "build_caption_conds", lambda clip, texts: lane_positives(texts))
+    ledger = ledger_for(captions.VLM_METHOD_CAPTIONS)
+    totals = []
+    real_open = ledger.open
+
+    def recording_open(name, units=None, chunks=1):
+        before = ledger.total
+        real_open(name, units, chunks)
+        totals.append((name, before, ledger.total, chunks))
+
+    monkeypatch.setattr(ledger, "open", recording_open)
+
+    with ledger:
+        run = sync._prepare_run(image_canvas(), SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
+                                CAP, CAP, CTX, OVERLAP, vl_clip,
+                                vlm_method=captions.VLM_METHOD_CAPTIONS, progress=ledger,
+                                sampler=euler_sampler(), preset=a_tags_preset(prompt="a fox", style=style))
+
+    n_tiles = len(run.layout.tiles)
+    assert segment_units(ledger, progress.CAPTIONS) == [
+        n_tiles * progress.K_TAG_TILE + style_rows * progress.K_CAPTION]
+    assert (progress.CAPTIONS, n_tiles + style_rows) in [(name, chunks) for name, _b, _a, chunks in totals]
+    assert all(before == after for _name, before, after, _chunks in totals)
+    assert tag_pass[0]["progress"] is ledger

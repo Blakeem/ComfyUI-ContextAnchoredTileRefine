@@ -61,6 +61,8 @@ W_CLIP_LOAD = 4.0             # the upscale node's FIRST CLIP call: CLIP.load_mo
                               # text encoder's move onto the GPU, which no other bar covers
 K_CAPTION = 12.0              # one VLM caption: an autoregressive decode of up to the
                               # preset's max_tokens, the run's slowest per-tile step
+K_TAG_TILE = 4.0              # one tile's tag pass (propose, verify, locate): about 8 s per
+                              # tile at 8K (tests-AB/ab_tile_tags.py) against 19-39 s per caption
 W_ENCODE = 4.0                # ONE vision encode of the entire canvas (up to the 2 MP cap)
 W_ENCODE_CROP = 0.5           # one tile's own crop encode (crop_tokens x 1024 px, ~0.1 MP)
 W_ENCODE_CAPTION_TEXT = 0.5   # one per-tile caption TEXT encode (scales with tile count:
@@ -87,6 +89,19 @@ def vision_encode_units(n_tiles, vision):
     if vision.crop_tokens > 0:
         units += W_ENCODE_CROP * max(int(n_tiles), 1)
     return units
+
+
+def caption_segment(preset, n_tiles, rows):
+    # One picture's CAPTIONS segment as (units, chunks): one chunk per tile row plus one per
+    # style row. Shared by preset_picture and the engine's open(), so the ledger total and the
+    # caption_done calls the text pass makes can never disagree. Lazy import: this module's
+    # scope stays stdlib only.
+    from . import captions
+
+    tile_chunks = int(n_tiles) * int(rows)
+    style_chunks = captions.style_row_count(preset, int(rows))
+    tile_units = K_TAG_TILE if preset.kind == captions.TILE_TEXT_TAGS else K_CAPTION
+    return tile_chunks * tile_units + style_chunks * K_CAPTION, tile_chunks + style_chunks
 
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text
@@ -299,26 +314,26 @@ class Ledger:
                 entry[1] = float(units)
         self._emit()
 
-    def preset_picture(self, vlm_method, n_tiles, rows, eval_total, vision_units, style_rows=0):
+    def preset_picture(self, preset, n_tiles, rows, eval_total, vision_units):
         # One picture's whole block at true sizes, called at that picture's grid solve —
         # the mirror of build_plan's per-picture entries with the real multipliers, and
         # the same arithmetic the engine's open() calls carry (they re-set the identical
-        # numbers, so open never moves the total again). `style_rows` counts the
-        # whole-image style captions (one per row when the run's preset asks for one), and
-        # `vision_units` is the pre-pass's vision encode cost (vision_encode_units), required
-        # because a forgotten one would silently size the segment without the crop encodes.
+        # numbers, so open never moves the total again). `preset` is the run's resolved
+        # block, since its kind and its style rows size the caption segment
+        # (caption_segment), and `vision_units` is the pre-pass's vision encode cost
+        # (vision_encode_units), required because a forgotten one would silently size the
+        # segment without the crop encodes.
         from . import captions
 
-        surface = captions.method_surface(vlm_method)
         count = max(int(n_tiles), 1)
-        caption_count = count * max(int(rows), 1) + max(int(style_rows), 0)
-        if surface == captions.VLM_METHOD_VISION:
+        caption_units, _chunks = caption_segment(preset, count, max(int(rows), 1))
+        if preset.surface == captions.VLM_METHOD_VISION:
             self.preset(VISION_ENCODE, float(vision_units))
-        elif surface == captions.VLM_METHOD_VISION_CAPTIONS:
-            self.preset(CAPTIONS, caption_count * K_CAPTION)
+        elif preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
+            self.preset(CAPTIONS, caption_units)
             self.preset(VISION_ENCODE, float(vision_units) + count * W_ENCODE_CAPTION_TEXT)
         else:
-            self.preset(CAPTIONS, caption_count * K_CAPTION)
+            self.preset(CAPTIONS, caption_units)
             self.preset(CAPTION_ENCODE, count * W_ENCODE_CAPTION_TEXT)
         self.preset(CANVAS_ENCODE, count * W_ENCODE_TILE)
         self.preset(SAMPLING, float(eval_total) * count)
@@ -517,13 +532,13 @@ def build_ledger(vlm_method, steps, batch=1, upscale_model=False, clip_load=Fals
     return Ledger(build_plan(vlm_method, steps, batch, upscale_model, clip_load), unique_id=unique_id)
 
 
-def build_caption_ledger(n_captions, unique_id=None):
-    """The ledger for a run that writes captions and nothing else (the Captions test node):
-    one CAPTIONS segment with one chunk per caption, already open. Without it that node
-    emits from two bars per caption, core's per-token bar and the caption pass's own, and
-    the display resets at every caption."""
-    count = max(int(n_captions), 1)
-    units = count * K_CAPTION
+def build_caption_ledger(preset, n_tiles, unique_id=None):
+    """The ledger for a run that writes tile texts and nothing else (the Captions test node):
+    one CAPTIONS segment sized by `caption_segment` for one picture of `n_tiles` tiles,
+    already open, for either preset kind. Without it that node emits from two bars per
+    caption, core's per-token bar and the text pass's own, and the display resets at every
+    caption."""
+    units, chunks = caption_segment(preset, n_tiles, 1)
     ledger = Ledger(((CAPTIONS, units),), unique_id=unique_id)
-    ledger.open(CAPTIONS, units, chunks=count)
+    ledger.open(CAPTIONS, units, chunks=chunks)
     return ledger

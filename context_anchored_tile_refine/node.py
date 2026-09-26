@@ -25,17 +25,18 @@ def _vlm_method():
     # test).
     from . import captions
 
-    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on a caption of itself, on vision tokens of its own crop and its slice of the entire image, or on both. The name in parentheses is the caption preset it asks. Copy settings.toml to settings.user.toml to set the token counts and write your own tile prompts."})
+    return (list(captions.vlm_methods()), {"default": captions.default_vlm_method(), "tooltip": "Whether each tile is conditioned on its own text, on vision tokens of its own crop and its slice of the entire image, or on both. The default preset writes each tile's text as tags: the VL model lists what the tile holds and keeps what it confirms. The name in parentheses is the preset it asks. Copy settings.user.example.toml to settings.user.toml to get the caption presets, set the token counts and write your own tile prompts."})
 
 
 def _prompt():
     # The image's prompt, defined once so both VL nodes and the Captions test node offer the
-    # same input. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt)
-    # and reaches the VL model's question only, never the DiT, so the A/B rule that no text
-    # conditions a tile still holds. A SOCKET, never a widget (forceInput): the same text the
-    # positive prompt was encoded from is linked in, and a socket never enters widgets_values,
-    # so its place in the input list is free of the positional restore rule.
-    return ("STRING", {"forceInput": True, "tooltip": "The prompt the image was made from, as a text link. Connect the positive prompt's text. It fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it writes each tile's caption. A preset without {PROMPT} ignores it, and one with it needs it connected."})
+    # same input. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt),
+    # and on a tags preset it anchors the propose question and supplies the prompt fragments
+    # each tile is checked for. It reaches the VL model only, never the DiT. A SOCKET, never a
+    # widget (forceInput): the same text the positive prompt was encoded from is linked in, and
+    # a socket never enters widgets_values, so its place in the input list is free of the
+    # positional restore rule.
+    return ("STRING", {"forceInput": True, "tooltip": "Optional. The prompt the image was made from, as a text link. Connect the positive prompt's text. With the tags preset it anchors the words the VL model tags each tile with, and its phrases are checked against each tile and kept where they are seen. In a caption preset it fills {PROMPT} in the instructions, and a preset with {PROMPT} needs it connected. It reaches the VL model only, never the diffusion model."})
 
 
 def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
@@ -196,12 +197,14 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         _validate_image(image)
         if mask is not None:
             mask = _normalize_mask(mask, image)
-        from . import captions, progress, sampling
+        from . import captions, progress, sampling, tags
 
         # The settings file is read HERE and the block handed down, so the prompt input fills
         # the preset's {PROMPT} before the engine's pre-pass, and an unconnected prompt against
         # a preset that asks for one fails before any VAE or VL encode.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
+        if preset.kind == captions.TILE_TEXT_TAGS:
+            tags.check_tags_ready(clip)
 
         # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
         # run's shape is in hand, and one owner means the engine never has to decide whether
@@ -285,7 +288,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
-        from . import captions, progress, sampling, upscale
+        from . import captions, progress, sampling, tags, upscale
 
         empty_cond = None
         upscaled = None
@@ -300,6 +303,8 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # in the file, or an unconnected prompt against a preset that asks for one, would
         # otherwise cost minutes of GPU time to reach.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
+        if preset.kind == captions.TILE_TEXT_TAGS:
+            tags.check_tags_ready(clip)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
         # pass), and `with` scopes the comfy.utils.ProgressBar shim to the whole run.

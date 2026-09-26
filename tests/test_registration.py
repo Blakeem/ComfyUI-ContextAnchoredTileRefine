@@ -1,6 +1,7 @@
 import importlib.util
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
@@ -20,6 +21,7 @@ def test_loads_via_comfyui_directory_mechanism():
         node_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
         vl_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
         upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
+        test_settings_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestSettings"]
         test_layout_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestLayout"]
         test_upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestUpscale"]
         test_captions_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestCaptions"]
@@ -27,6 +29,7 @@ def test_loads_via_comfyui_directory_mechanism():
         assert isinstance(node_class, type)
         assert isinstance(vl_class, type)
         assert isinstance(upscale_class, type)
+        assert isinstance(test_settings_class, type)
         assert isinstance(test_layout_class, type)
         assert isinstance(test_upscale_class, type)
         assert isinstance(test_captions_class, type)
@@ -35,6 +38,7 @@ def test_loads_via_comfyui_directory_mechanism():
             "ContextAnchoredTileRefine": node_class,
             "ContextAnchoredTileRefineVL": vl_class,
             "ContextAnchoredTileUpscaleVL": upscale_class,
+            "ContextAnchoredTileTestSettings": test_settings_class,
             "ContextAnchoredTileTestLayout": test_layout_class,
             "ContextAnchoredTileTestUpscale": test_upscale_class,
             "ContextAnchoredTileTestCaptions": test_captions_class,
@@ -52,6 +56,10 @@ def test_loads_via_comfyui_directory_mechanism():
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
             == "Context-Anchored Tile Upscale (VL)"
+        )
+        assert (
+            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestSettings"]
+            == "Tile Test: Settings"
         )
         assert (
             module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestLayout"]
@@ -153,6 +161,25 @@ def test_captions_module_never_imports_comfy():
         "import context_anchored_tile_refine.captions\n"
         "assert 'comfy' not in sys.modules, 'captions.py imported comfy at module scope'\n"
         "assert 'latent_preview' not in sys.modules, 'captions.py imported latent_preview at module scope'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_tags_module_never_imports_comfy():
+    # tags.py holds the captions.py contract, and logit_classifier stays lazy too, so a
+    # missing library fails with its pip command instead of at package import.
+    code = (
+        "import sys\n"
+        "import context_anchored_tile_refine.tags\n"
+        "assert 'comfy' not in sys.modules, 'tags.py imported comfy at module scope'\n"
+        "assert 'latent_preview' not in sys.modules, 'tags.py imported latent_preview at module scope'\n"
+        "assert 'logit_classifier' not in sys.modules, 'tags.py imported logit_classifier at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -277,3 +304,13 @@ def test_grid_module_never_imports_comfy():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_requirements_txt_matches_pyproject_dependencies():
+    # ComfyUI-Manager and comfy-cli install from requirements.txt and never read pyproject.toml,
+    # so the two lists must name the same requirements.
+    with open(REPO_ROOT / "pyproject.toml", "rb") as handle:
+        declared = tomllib.load(handle)["project"]["dependencies"]
+    lines = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    required = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+    assert required == declared

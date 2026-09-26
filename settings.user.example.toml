@@ -1,11 +1,15 @@
-# Settings for the Context-Anchored Tile Refine VL nodes.
+# A sample settings file for the Context-Anchored Tile Refine VL nodes.
 #
 # YOUR OWN COPY
-# Copy this file to settings.user.toml and edit the copy. The nodes read settings.user.toml
-# whenever it exists and ignore this file. A node update replaces settings.toml, so an edit
-# made here is lost. Nothing ever writes settings.user.toml, so your own copy survives.
-# A mistake in this file is a hard error that names the file and the problem. It hides both
-# VL nodes from the menu until it is fixed, and ComfyUI prints the reason to its console.
+# The nodes never read this file. Copy it to settings.user.toml and edit the copy. The nodes
+# read settings.user.toml whenever it exists and ignore settings.toml. A node update replaces
+# settings.toml and this file, so an edit made to either is lost. Nothing ever writes
+# settings.user.toml, so your own copy survives.
+# This file carries every preset, including the ones settings.toml no longer ships. Copy a
+# single block into your own settings.user.toml to get one of them back.
+# A mistake in settings.user.toml is a hard error that names the file and the problem. It
+# hides both VL nodes from the menu until it is fixed, and ComfyUI prints the reason to its
+# console.
 #
 # VISION
 # The [vision] table sets how each tile's conditioning samples the image. It applies to every
@@ -43,14 +47,18 @@
 # The FIRST block is the default preset, and its two options carry no label: "vision tokens
 # and captions" and "captions". Every other block adds "vision tokens and captions (<label>)"
 # and "captions (<label>)". The selector follows the order of the blocks below, so a preset's
-# two options sit together. settings.user.example.toml carries more presets than this file
-# ships.
+# two options sit together.
 # Move a block to the top to make it the default. Add, rename or remove a block to change
 # what the selector offers.
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
 #
-# KEYS PER PRESET
+# TILE TEXT
+# tile_text sets what each tile's text is written from. "caption" asks the VL model one
+# question about the tile and uses its answer. "tags" lists the things in the tile and keeps
+# the ones the VL model confirms. A block without tile_text is "caption".
+#
+# KEYS PER CAPTION PRESET
 # tile_caption_instruction   What the VL model is asked about each tile's own crop. The
 #                            answer becomes that tile's conditioning text.
 # tile_caption_max_tokens    Generation budget for that answer. Default 768, max 4096. The
@@ -63,23 +71,28 @@
 #                            that all tiles follow one style description. Use "" to skip it.
 # global_style_max_tokens    Generation budget for the style answer. Same rules as
 #                            tile_caption_max_tokens.
-# tile_tags_instruction      In a tags preset, the question that asks the VL model to list
-#                            the things in a tile.
+#
+# KEYS PER TAGS PRESET
+# tile_text                  "tags".
+# tile_tags_instruction      The question that asks the VL model to list the things in a
+#                            tile.
 # tile_tags_with_prompt_instruction
-#                            In a tags preset, text placed before tile_tags_instruction when
-#                            the prompt input is not empty. It must hold {PROMPT}.
+#                            Text placed before tile_tags_instruction when the prompt input
+#                            is not empty. It must hold {PROMPT}, where the prompt is written.
 # tile_tags_verification_statement
-#                            In a tags preset, the statement scored true or false once per
-#                            listed tag. It must hold {TAG}.
+#                            The statement scored true or false once per listed tag. It must
+#                            hold {TAG}, where the tag is written.
 # tile_tags_verification_threshold
-#                            In a tags preset, the score the verification statement must reach
-#                            on the whole tile to keep a listed tag. Range 0 to 1.
+#                            The score the verification statement must reach on the
+#                            whole tile to keep a listed tag. Range 0 to 1.
 # tile_tags_position_threshold
-#                            In a tags preset, the score the verification statement must reach
-#                            on one of six strips of the tile, three rows and three columns,
-#                            for that strip to hold the tag. A tag no strip holds is dropped.
+#                            The score the verification statement must reach on one
+#                            of six strips of the tile, three rows and three columns, for
+#                            that strip to hold the tag. A tag no strip holds is dropped.
 #                            On an axis where exactly one strip holds the tag, that strip names
 #                            its position, such as top-left. Range 0 to 1.
+# global_style_instruction   Same as in a caption preset.
+# global_style_max_tokens    Same as in a caption preset.
 #
 # THE IMAGE'S PROMPT
 # An instruction may hold {PROMPT}. The VL nodes and the Tile Test: Captions node write their
@@ -106,4 +119,39 @@ tile_tags_verification_statement = "This image visibly contains {TAG}"
 tile_tags_verification_threshold = 0.9
 tile_tags_position_threshold = 0.9
 global_style_instruction = "Concise prose containing only the style of media used and the general style within that type of media."
+global_style_max_tokens = 768
+
+# Holds each tile's caption to the crop and quotes the image's prompt. It needs the prompt input filled.
+[presets.prompted]
+tile_caption_instruction = "Concise prose containing object's relative and absolute positions within the foreground and background of the cropped image. Full prompt: \"{PROMPT}\". Keep it concise. Do not include anything not in the crop."
+tile_caption_max_tokens = 768
+global_style_instruction = "Concise prose containing only the style of media used and the general style within that type of media."
+global_style_max_tokens = 768
+
+# What every caption option asked before the presets existed. EU spelling measured better than US in A/B testing.
+[presets.standard]
+tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry."
+tile_caption_max_tokens = 768
+global_style_instruction = ""
+global_style_max_tokens = 768
+
+# Placement and demographics per tile, and one medium for every tile. It tends to read an image as artwork.
+[presets.artwork]
+tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics."
+tile_caption_max_tokens = 768
+global_style_instruction = "succinct flowing prose of only the overall style and artistic medium and physical medium. No objects or items in the scene."
+global_style_max_tokens = 768
+
+# standard plus an escape hatch, so a tile of plain cloud or sky is not captioned with an invented object.
+[presets.grounded]
+tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry. Name a thing only if you can identify it. Where you cannot, write the part's colour and texture and then the words no identifiable object."
+tile_caption_max_tokens = 768
+global_style_instruction = ""
+global_style_max_tokens = 768
+
+# artwork plus the escape hatch, with a style question that cannot answer with the scene.
+[presets."artwork grounded"]
+tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics. Name a thing only if you can identify it, and otherwise give only its shape, colour and surface. Where nothing in the picture can be identified, say so and stop."
+tile_caption_max_tokens = 768
+global_style_instruction = "Name the artistic medium, the physical medium, the brushwork, the palette and the lighting of this image, in one succinct sentence. Describe no object, no place, no setting and no genre."
 global_style_max_tokens = 768

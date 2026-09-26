@@ -1,9 +1,11 @@
 # Root-resolution order (env var first), error-message style, and the comfy/utils.py
 # vs utils/ shadowing hazard are credited to ComfyUI_UltimateSDUpscaleGuider/test/conftest.py.
 import importlib.util
+import json
 import math
 import os
 import sys
+import tomllib
 import types
 import uuid
 from pathlib import Path
@@ -17,16 +19,9 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Comfy Desktop's bundled source tree, tried after the standard custom_nodes layout.
-# Ordered newest-install-first: ComfyUI-Installs holds the current source install (the
-# only H3-capable tree on this machine); the @comfyorgcomfyui-electron path is a
-# pre-rename desktop build (0.3.45, no z-image) that may not exist any more, so it is
-# only a last resort.
-DESKTOP_COMFYUI_ROOTS = (
-    Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI"),
-    Path(r"C:\Users\Blake\AppData\Local\Programs\ComfyUI\resources\ComfyUI"),
-    Path(r"C:\Users\Blake\AppData\Local\Programs\@comfyorgcomfyui-electron\resources\ComfyUI"),
-)
+# The Desktop app runs core from this source checkout, outside the custom_nodes tree, so the
+# standard layout below never finds it.
+SOURCE_COMFYUI_ROOT = Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI")
 
 
 def _resolve_comfyui_root():
@@ -48,24 +43,25 @@ def _resolve_comfyui_root():
         return standard_root, trace
     trace.append(f"standard layout {standard_root}: no 'comfy' directory")
 
-    for desktop_root in DESKTOP_COMFYUI_ROOTS:
-        if (desktop_root / "comfy").is_dir():
-            return desktop_root, trace
-        trace.append(f"Desktop install {desktop_root}: no 'comfy' directory")
+    if (SOURCE_COMFYUI_ROOT / "comfy").is_dir():
+        return SOURCE_COMFYUI_ROOT, trace
+    trace.append(f"source install {SOURCE_COMFYUI_ROOT}: no 'comfy' directory")
 
     return None, trace
 
 
 @pytest.fixture(autouse=True)
 def empty_caption_cache():
-    """Every test starts with an empty caption cache, so no test can serve another's text.
+    """Every test starts with an empty caption cache and tag cache, so no test can serve
+    another's text.
 
     The pure suite's stubbed resample hands every tile the same zero picture, so a cached
     entry would otherwise reach a later test that expects its own clip.generate to run.
     """
-    from context_anchored_tile_refine import captions
+    from context_anchored_tile_refine import captions, tags
 
     captions.clear_caption_cache()
+    tags.clear_tag_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +84,35 @@ def shipped_settings_file(monkeypatch):
     yield
     captions.vlm_methods.cache_clear()
     captions.preset_labels.cache_clear()
+
+
+# The caption presets settings.toml shipped before the tags preset replaced them, in their
+# old order, so `prompted` is the default of the file the fixture below writes.
+CAPTION_PRESET_LABELS = ("prompted", "standard", "artwork")
+
+
+@pytest.fixture()
+def caption_settings(tmp_path, monkeypatch):
+    """A caption-preset settings file in force, so a test of the caption pass does not depend
+    on which presets ship. The [vision] table and the blocks are read from
+    settings.user.example.toml, which carries the caption presets character for character."""
+    from context_anchored_tile_refine import captions
+
+    with open(REPO_ROOT / "settings.user.example.toml", "rb") as handle:
+        example = tomllib.load(handle)
+    # json.dumps writes a TOML basic string: the same quote and escape rules for this text.
+    lines = ["[vision]"]
+    lines.extend(f"{key} = {json.dumps(value)}" for key, value in example["vision"].items())
+    for label in CAPTION_PRESET_LABELS:
+        lines.append(f"[presets.{json.dumps(label)}]")
+        lines.extend(f"{key} = {json.dumps(value)}" for key, value in example["presets"][label].items())
+    settings_dir = tmp_path / "caption-settings"
+    settings_dir.mkdir()
+    (settings_dir / captions.SETTINGS_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(captions, "SETTINGS_DIR", settings_dir)
+    captions.vlm_methods.cache_clear()
+    captions.preset_labels.cache_clear()
+    return settings_dir / captions.SETTINGS_NAME
 
 
 @pytest.fixture(scope="session")
@@ -235,6 +260,7 @@ def comfy_stubs(monkeypatch):
     model_management_module.intermediate_device = lambda: torch.device("cpu")
     model_management_module.intermediate_dtype = lambda: torch.float32
     model_management_module.get_torch_device = lambda: torch.device("cpu")
+    model_management_module.args = types.SimpleNamespace(disable_cuda_graphs=False)
 
     def free_memory(memory_required, device):
         recorded["free_memory_calls"].append((memory_required, device))

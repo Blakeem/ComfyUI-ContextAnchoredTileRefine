@@ -581,11 +581,20 @@ def test_preset_seeds_every_pending_match_not_just_the_first(comfy_stubs):
     assert ledger.total == scaled(1.0 + 40.0 + 1.0 + 40.0)
 
 
+def a_preset(surface, kind=captions.TILE_TEXT_CAPTION, style="", prompt=""):
+    # A resolved settings block: preset_picture reads its surface, its kind and its style rows.
+    return captions.Preset(
+        surface=surface, label="unit test",
+        vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=100, caption_megapixels=0.5),
+        style_instruction=style, kind=kind, prompt=prompt)
+
+
 def test_preset_picture_settles_the_total_before_any_fill(comfy_stubs):
     # The grid-solve call: every per-tile budget at its true multiplier, in one burst,
     # while the value is still zero — from here to the end the total is a constant.
     ledger = progress.Ledger(progress.build_plan("vision tokens and captions", 4))
-    ledger.preset_picture("vision tokens and captions", 30, 1, 4, vision_units=progress.W_ENCODE)
+    ledger.preset_picture(a_preset("vision tokens and captions"), 30, 1, 4,
+                          vision_units=progress.W_ENCODE)
     settled = ledger.total
 
     assert ledger.value == 0
@@ -624,7 +633,7 @@ def test_preset_picture_sizes_the_vision_segment_by_the_vision_units(comfy_stubs
     # exists to settle.
     units = progress.W_ENCODE + 30 * progress.W_ENCODE_CROP
     ledger = progress.Ledger(progress.build_plan("vision tokens and captions", 4))
-    ledger.preset_picture("vision tokens and captions", 30, 1, 4, vision_units=units)
+    ledger.preset_picture(a_preset("vision tokens and captions"), 30, 1, 4, vision_units=units)
     settled = ledger.total
 
     assert settled == scaled(
@@ -647,7 +656,7 @@ def test_preset_picture_sizes_the_vision_segment_by_the_vision_units(comfy_stubs
 def test_preset_picture_sizes_the_vision_only_segment_by_the_vision_units(comfy_stubs):
     units = progress.W_ENCODE + 9 * progress.W_ENCODE_CROP
     ledger = progress.Ledger(progress.build_plan("vision tokens", 4))
-    ledger.preset_picture("vision tokens", 9, 1, 4, vision_units=units)
+    ledger.preset_picture(a_preset("vision tokens"), 9, 1, 4, vision_units=units)
     settled = ledger.total
 
     ledger.open(progress.VISION_ENCODE, units)
@@ -659,12 +668,16 @@ def test_preset_picture_sizes_the_vision_only_segment_by_the_vision_units(comfy_
 
 
 def test_preset_picture_counts_the_style_caption_like_the_engines_open(comfy_stubs):
-    # style_rows is the whole-image style caption count (one per row when the run's preset sets
-    # a style prompt). The preset and the engine's open must carry the identical caption
-    # count, or open would move the total the preset exists to settle.
+    # A preset with a style prompt writes one whole-image style caption per row. The preset
+    # and the engine's open must carry the identical caption count, or open would move the
+    # total the preset exists to settle.
     ledger = progress.Ledger(progress.build_plan("captions", 4))
-    ledger.preset_picture("captions", 30, 1, 4, vision_units=progress.W_ENCODE, style_rows=1)
+    ledger.preset_picture(a_preset("captions", style="the style"), 30, 1, 4,
+                          vision_units=progress.W_ENCODE)
     settled = ledger.total
+
+    assert progress.caption_segment(a_preset("captions", style="the style"), 30, 1) == (
+        31 * progress.K_CAPTION, 31)
 
     ledger.open(progress.CAPTIONS, 31 * progress.K_CAPTION, chunks=31)
     ledger.open(progress.CAPTION_ENCODE, 30 * progress.W_ENCODE_CAPTION_TEXT)
@@ -673,3 +686,59 @@ def test_preset_picture_counts_the_style_caption_like_the_engines_open(comfy_stu
     ledger.open(progress.DECODE, 30 * progress.W_DECODE_TILE)
     ledger.finish()
     assert ledger.total == settled and ledger.value == settled
+
+
+@pytest.mark.parametrize(("style", "prompt", "style_chunks"), [
+    ("the style", "", 2),
+    # The style line is the style caption alone, so a prompt adds no style chunk
+    # (captions.style_row_count).
+    ("", "a fox, oil painting", 0),
+    ("", "", 0),
+])
+def test_a_tags_preset_sizes_tile_chunks_at_the_tag_cost_and_style_chunks_at_a_caption(
+        comfy_stubs, style, prompt, style_chunks):
+    # One chunk per tile row at K_TAG_TILE and one per style row at K_CAPTION. The engine
+    # opens the segment with caption_segment's own pair, so the total preset_picture settled
+    # never moves and the tags pass's caption_done calls fill it chunk by chunk.
+    preset = a_preset("vision tokens and captions", kind=captions.TILE_TEXT_TAGS, style=style,
+                      prompt=prompt)
+    units = 30 * 2 * progress.K_TAG_TILE + style_chunks * progress.K_CAPTION
+    assert progress.caption_segment(preset, 30, 2) == (units, 30 * 2 + style_chunks)
+
+    ledger = progress.Ledger(progress.build_plan("vision tokens and captions", 4))
+    ledger.preset_picture(preset, 30, 2, 4, vision_units=progress.W_ENCODE)
+    settled = ledger.total
+
+    ledger.open(progress.CAPTIONS, *progress.caption_segment(preset, 30, 2))
+    assert ledger.total == settled
+    ledger.open(progress.VISION_ENCODE, progress.W_ENCODE + 30 * progress.W_ENCODE_CAPTION_TEXT)
+    ledger.open(progress.CANVAS_ENCODE, 30 * progress.W_ENCODE_TILE)
+    ledger.open(progress.SAMPLING, 4 * 30)
+    ledger.open(progress.DECODE, 30 * progress.W_DECODE_TILE)
+    ledger.finish()
+    assert ledger.total == settled and ledger.value == settled
+    assert settled == scaled(
+        units + progress.W_ENCODE + 30 * progress.W_ENCODE_CAPTION_TEXT
+        + 30 * progress.W_ENCODE_TILE + 4 * 30 + 30 * progress.W_DECODE_TILE)
+
+
+@pytest.mark.parametrize(("kind", "style", "prompt", "units", "chunks"), [
+    (captions.TILE_TEXT_CAPTION, "the style", "", 4 * progress.K_CAPTION, 4),
+    (captions.TILE_TEXT_CAPTION, "", "a fox", 3 * progress.K_CAPTION, 3),
+    # A tags preset with a prompt and no style instruction writes no style line, so no style
+    # row is counted.
+    (captions.TILE_TEXT_TAGS, "", "a fox, oil painting", 3 * progress.K_TAG_TILE, 3),
+    (captions.TILE_TEXT_TAGS, "", "", 3 * progress.K_TAG_TILE, 3),
+])
+def test_the_caption_ledger_is_one_open_segment_sized_by_caption_segment(
+        comfy_stubs, kind, style, prompt, units, chunks):
+    preset = a_preset("captions", kind=kind, style=style, prompt=prompt)
+    assert progress.caption_segment(preset, 3, 1) == (units, chunks)
+
+    ledger = progress.build_caption_ledger(preset, 3, unique_id=NODE_ID)
+    for index in range(1, chunks + 1):
+        ledger.caption_done(index, chunks)
+
+    assert ledger.total == scaled(units)
+    assert ledger.value == scaled(units)
+    assert ledger.unique_id == NODE_ID
