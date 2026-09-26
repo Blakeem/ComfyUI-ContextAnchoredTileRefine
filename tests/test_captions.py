@@ -8,6 +8,8 @@ fail-fast guard. A duck-typed clip stands in for the VL text encoder; no comfy i
 no model are needed.
 """
 import dataclasses
+import sys
+import types
 
 import pytest
 import torch
@@ -887,21 +889,24 @@ def test_generate_caption_falls_back_through_sampling_then_a_simpler_question():
     assert clip.tokenize_calls[-1]["thinking"] is False
 
 
-def test_generate_caption_turns_cuda_graphs_off_for_every_generate_and_restores_the_flag(comfy_stubs):
-    import comfy.model_management
-
+def test_generate_caption_drops_the_decode_graphs_after_every_generate(comfy_stubs, monkeypatch):
+    cleanups = []
+    prefetch = types.ModuleType("comfy.model_prefetch")
+    prefetch.cleanup_prefetch_queues = lambda: cleanups.append(len(clip.generate_calls))
+    monkeypatch.setitem(sys.modules, "comfy.model_prefetch", prefetch)
     answers = ["", "<think>x</think>a wall of tools"]
-    seen = []
+    clip = FakeCaptionClip(answer=lambda image, instruction: answers[len(clip.generate_calls) - 1])
 
-    def answer(image, instruction):
-        seen.append(comfy.model_management.args.disable_cuda_graphs)
-        return answers[min(len(answers) - 1, len(clip.generate_calls) - 1)]
-
-    clip = FakeCaptionClip(answer=answer)
     captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
 
-    assert seen == [True, True]
-    assert comfy.model_management.args.disable_cuda_graphs is False
+    assert cleanups == [1, 2]
+
+
+def test_clip_generate_runs_on_a_core_without_graph_decode(comfy_stubs, monkeypatch):
+    monkeypatch.setitem(sys.modules, "comfy.model_prefetch", None)
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a wall")
+
+    assert captions.clip_generate(clip, clip.tokenize("x", images=[torch.zeros(1, 8, 8, 3)])) is not None
 
 
 def test_generate_caption_raises_when_every_fallback_is_empty():

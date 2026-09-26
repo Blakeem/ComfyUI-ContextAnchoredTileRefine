@@ -40,7 +40,6 @@ import re
 import tomllib
 import weakref
 from collections import OrderedDict
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -833,25 +832,23 @@ def _caption_cache_write(key, clip, text):
         _CAPTION_CACHE.popitem(last=False)
 
 
-@contextmanager
-def cuda_graphs_disabled():
-    """Core's CUDA graph decode off for the duration, the previous flag restored after.
+def clip_generate(clip, tokens, **kwargs):
+    """clip.generate, then core's cleanup of the CUDA graphs that generate captured.
 
-    Core's Qwen3 CUDA graph decode (PR #15623) raises a device side assert on the second image
-    generate in one process, Comfy-Org/ComfyUI issue #16441. Remove once core fixes it.
-    """
+    Each decoder layer keeps the graph it captured, bound to that generate's freed KV cache, and
+    core cleans up only between nodes, so the next generate in the same node replayed it and
+    raised a device side assert (Comfy-Org/ComfyUI issue #16441). A core without graph decode
+    has nothing to clean up."""
     try:
-        import comfy.model_management as model_management
-    except ImportError:
-        yield
-        return
-
-    previous = model_management.args.disable_cuda_graphs
-    model_management.args.disable_cuda_graphs = True
-    try:
-        yield
+        return clip.generate(tokens, **kwargs)
     finally:
-        model_management.args.disable_cuda_graphs = previous
+        try:
+            import comfy.model_prefetch as model_prefetch
+        except ImportError:
+            model_prefetch = None
+        cleanup = getattr(model_prefetch, "cleanup_prefetch_queues", None)
+        if cleanup is not None:
+            cleanup()
 
 
 def generate_caption(clip, vl_input, instruction, max_length, thinking=True, scope=()):
@@ -877,18 +874,17 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
         return stored
 
     tokens, _tail = _tokenize_images(clip, instruction, vl_input, thinking=thinking)
-    with cuda_graphs_disabled():
-        ids = clip.generate(tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
+    ids = clip_generate(clip, tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
+    text = strip_thinking(clip.decode(ids))
+    if not text:
+        ids = clip_generate(clip, tokens, do_sample=True, max_length=max_length, temperature=0.7,
+                            top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
         text = strip_thinking(clip.decode(ids))
-        if not text:
-            ids = clip.generate(tokens, do_sample=True, max_length=max_length, temperature=0.7,
-                                top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
-            text = strip_thinking(clip.decode(ids))
-        if not text:
-            retokens, _tail = _tokenize_images(clip, "Write one short sentence describing this image.",
-                                               vl_input, thinking=False)
-            ids = clip.generate(retokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
-            text = strip_thinking(clip.decode(ids))
+    if not text:
+        retokens, _tail = _tokenize_images(clip, "Write one short sentence describing this image.",
+                                           vl_input, thinking=False)
+        ids = clip_generate(clip, retokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
+        text = strip_thinking(clip.decode(ids))
     if not text:
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): caption generation returned an empty answer "

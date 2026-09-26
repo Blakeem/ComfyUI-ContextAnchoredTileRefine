@@ -67,13 +67,9 @@ class FakeTagClip:
         return {"qwen3vl_4b": [stream], "_probe": (text, image)}
 
     def generate(self, tokens, **kwargs):
-        import comfy.model_management
-
         text, image = tokens["_probe"]
         is_propose = text.startswith("<|im_start|>")
-        self.generate_calls.append({"text": text, "image": image, "propose": is_propose,
-                                    "cuda_graphs_off": comfy.model_management.args.disable_cuda_graphs,
-                                    **kwargs})
+        self.generate_calls.append({"text": text, "image": image, "propose": is_propose, **kwargs})
         handle = len(self.generate_calls)
         self._answers[handle] = self.proposal if is_propose else self.style_answer
         return [handle] * (self.proposal_tokens if is_propose else 3)
@@ -200,14 +196,16 @@ def test_propose_decodes_greedily_at_the_budget_on_a_1mp_copy_of_the_crop(classi
     assert nouls(classifier)[0]["image"] is call["image"]
 
 
-def test_propose_turns_cuda_graphs_off_and_restores_the_flag(classifier):
-    import comfy.model_management
-
+def test_propose_drops_the_decode_graphs_after_its_generate(classifier, monkeypatch):
+    cleanups = []
+    prefetch = types.ModuleType("comfy.model_prefetch")
+    prefetch.cleanup_prefetch_queues = lambda: cleanups.append(len(clip.generate_calls))
+    monkeypatch.setitem(sys.modules, "comfy.model_prefetch", prefetch)
     clip = FakeTagClip()
     run(clip, a_tags_preset())
 
-    assert propose_calls(clip)[0]["cuda_graphs_off"] is True
-    assert comfy.model_management.args.disable_cuda_graphs is False
+    assert any(call["propose"] for call in clip.generate_calls)
+    assert cleanups == list(range(1, len(clip.generate_calls) + 1))
 
 
 def test_the_with_prompt_instruction_is_prepended_only_when_the_preset_carries_a_prompt(classifier):

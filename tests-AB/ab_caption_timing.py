@@ -16,7 +16,7 @@ import json
 import statistics
 import time
 from collections import defaultdict
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -168,7 +168,7 @@ def instrument(clock, clip, tags, captions, lc_tags, backend_cls):
     return undo
 
 
-def run_condition(clip, canvas, tiles, prompt_key, with_style, cuda_graphs):
+def run_condition(clip, canvas, tiles, prompt_key, with_style):
     import logit_classifier.tags as lc_tags
     import torch
     from logit_classifier.backends.comfy_clip import ComfyClipBackend
@@ -183,9 +183,6 @@ def run_condition(clip, canvas, tiles, prompt_key, with_style, cuda_graphs):
         preset = replace(preset, style_instruction="")
     clock = Clock(torch)
     undo = instrument(clock, clip, tags, captions, lc_tags, ComfyClipBackend)
-    if cuda_graphs:
-        # Core issue #16441: a second image generate may raise a device side assert here.
-        undo.append(wrap(captions, "cuda_graphs_disabled", lambda _original: nullcontext()))
     try:
         with clock.stage("whole pass"):
             run = tags.generate_tag_trace(clip, canvas, tiles, preset)
@@ -254,8 +251,6 @@ def parse_args():
     parser.add_argument("--style-every", action="store_true",
                         help="run the style caption for every prompt, not only the first (it reads no prompt)")
     parser.add_argument("--no-style", action="store_true", help="skip the style caption for every prompt")
-    parser.add_argument("--cuda-graphs", action="store_true",
-                        help="leave core's CUDA graph decode on in propose (core issue #16441 may crash)")
     parser.add_argument("--label", default="", help="suffix for the output file")
     return parser.parse_args()
 
@@ -290,8 +285,7 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     records = []
     for index, prompt_key in enumerate(p.strip() for p in args.prompts.split(",")):
-        preset, clock, run = run_condition(clip, canvas, tiles, prompt_key, not args.no_style and (index == 0 or args.style_every),
-                                         args.cuda_graphs)
+        preset, clock, run = run_condition(clip, canvas, tiles, prompt_key, not args.no_style and (index == 0 or args.style_every))
         record = summarize(prompt_key, preset, clock, run, wanted)
         record["first_condition"] = index == 0
         records.append(record)

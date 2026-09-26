@@ -237,8 +237,8 @@ def propose(clip, picture, preset):
     from logit_classifier.tags import drop_unfinished_tag
 
     tokens, _tail = captions._tokenize_images(clip, propose_text(preset), picture)
-    with captions.cuda_graphs_disabled(), stop_on_repeat(clip):
-        ids = clip.generate(tokens, do_sample=False, max_length=PROPOSE_MAX_TOKENS)
+    with stop_on_repeat(clip):
+        ids = captions.clip_generate(clip, tokens, do_sample=False, max_length=PROPOSE_MAX_TOKENS)
     text = clip.decode(ids)
     # Core stops early only on a stop token, so a decode that fills the budget ends mid tag.
     if len(ids) >= PROPOSE_MAX_TOKENS:
