@@ -1,29 +1,34 @@
 """Per-tile tag text: the tile text a tags preset writes in place of a caption.
 
 Two entry points run one pass. `generate_tag_trace` returns every stage's result as a
-`TagRun`: the style line per picture row, the prompt fragment sort as a `PromptTrace` and a
+`TagRun`: the style line per picture row, the prompt tags as a `PromptTrace` and a
 `TileTrace` per tile row, so a test node can show what each stage did. `generate_tag_set` is
 the engine's, and reads only the texts from that run, as `(style_texts, tile_texts)` in the
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
     picture pass   the style caption (captions.generate_caption), which is the style line
-                   alone, then one text-only subject or style choice per prompt fragment.
-                   Style fragments are left out of the tile candidates and dropped.
-    per tile row   propose (clip.generate over the crop), merge (subject fragments first,
-                   normalized, category nouns and repeats dropped), verify (one noul per
-                   candidate on the crop, kept at the preset's verification threshold), clean
+                   alone, then the prompt tags: one text-only generate lists the physical
+                   things the prompt names, and the thing check keeps the ones that are
+                   things. They join every tile's candidates. The prompt reaches no other
+                   question, so a long prompt never lengthens a tile's reply.
+    per tile row   propose (clip.generate over the crop, stopped after MAX_PROPOSED_TAGS
+                   tags), merge (the model's tags first, then the prompt tags, normalized,
+                   category nouns and repeats dropped), thing check, verify (one noul per
+                   candidate on the crop, the model's tags at the verification threshold and a
+                   prompt tag the model did not list at the prompt tags threshold), clean
                    (logit_classifier.tags.drop_subsets), locate (the verification statement on
                    three horizontal and three vertical strips of the full-resolution crop, a
                    tag present on no strip dropped), render ("<item> <term>"). An empty
                    verification statement skips verify and locate and keeps every candidate.
 
-The pipeline is the Logit Tagger's (ComfyUI-LogitTagger/logit_tagger/tagging.py) run per
-tile, and every constant below was measured there or in tests-AB/ab_tile_tags.py. Module
+Every constant below was measured in the Logit Tagger's harnesses or in tests-AB, and the
+2026-09-25 changes in tests-AB/ab_tags_bench.py (log: tests-AB/tags-bench-log.md). Module
 scope is torch and stdlib only. comfy and logit_classifier are imported inside functions, so
 a missing library fails with its pip command (a subprocess test pins the comfy half).
 """
 import hashlib
 import importlib
+import re
 import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -40,9 +45,13 @@ VL_MAX_PIXELS = 1024 * 1024
 # repeating tags, and 192 added no tag on nine images.
 PROPOSE_MAX_TOKENS = 128
 
-# tests-AB/ab_prompt_fragments.py: style fragments scored 0.98 and up, mixed ones such as
-# "the moon" 0.67 to 0.69, so 0.9 keeps the mixed ones as subjects.
-STYLE_THRESHOLD = 0.9
+# The wrong and vague tags of a greedy list sit at its tail. Stopping after 25 tags raised the
+# judged precision of the no-prompt lists from 0.865 to 0.915 (tests-AB/tags-bench-log.md).
+MAX_PROPOSED_TAGS = 25
+
+# The model's 25 and a long prompt's 30 to 40 tags, in one packed verify pass beside a 1 MP
+# picture. Model tags come first, so prompt tags never push a model tag out.
+MAX_MERGED_TAGS = 64
 
 # tests-AB/ab_tile_tags.py on market: the propose instruction's own nouns came back as tags
 # and passed verify.
@@ -60,22 +69,41 @@ PROPOSE_TEMPLATE = (
     "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{instruction}"
     "<|im_end|>\n<|im_start|>assistant\n"
 )
+PROMPT_TAGS_TEMPLATE = "<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n"
 
-# The subject or style choice, worded as tests-AB/ab_prompt_fragments.py measured it.
-FRAGMENT_QUESTION = 'What does the image prompt phrase "{fragment}" describe'
-FRAGMENT_CRITERIA = {
-    "subject": "a thing, person, animal, place or part of the scene that could be pointed at in the picture",
-    "style": "the picture's medium, art style, quality, lighting, colour palette, camera, framing or mood",
+# A 500 word prompt listed 28 to 45 tags in 70 to 256 tokens (tests-AB/tags-bench-log.md).
+PROMPT_TAGS_MAX_TOKENS = 256
+
+# Past the prompt's own things the model pads the list with words the prompt lacks
+# ("materials", "details"), so two such tags in a row end it.
+UNGROUNDED_STREAK = 2
+_STOP_WORDS = frozenset({"a", "an", "the", "of", "with", "and", "in", "on", "at", "to", "for", "by", "from"})
+
+# The thing check: one text-only choice per tag string. It drops whole-scene and setting words
+# ("cityscape", "urban environment"), lighting, color and quality words, which no threshold on
+# the verify score separates from real things. This wording counts landscape features, groups
+# and light sources as things, which an earlier one dropped ("red moon", "army of soldiers").
+THING_QUESTION = 'What does the image tag "{tag}" name'
+THING_CRITERIA = {
+    "thing": "something that could be pointed at in a picture: an object, a person, a group of people "
+             "or animals, an animal, a plant, a body part, a garment, a material, a building, a "
+             "landscape feature such as hills, cliffs, sky, the moon or stars, a light source such as "
+             "lamps, signs or lit windows, or a substance such as water, smoke, fire, clouds or rain",
+    "other": "nothing to point at: a kind of place or a whole scene, a time of day, a color alone, a "
+             "shape or form, lighting in general, a camera or render effect, a style, a mood, a "
+             "quality or an idea",
 }
+# Mid scores mix real things with non-things ("chinese characters" 0.45, "huge" 0.43), so only a
+# confident "other" drops a tag.
+THING_THRESHOLD = 0.9
 
 # What the tags pass reads from the library. 0.2.0 lacks drop_unfinished_tag and keeps no
 # initialism whole, and an older release lacks the tags module and ComfyClipBackend.
 LIBRARY_VERSION = "0.2.1"
 _LIBRARY_NAMES = {
     "logit_classifier": ("Classifier", "Config", "ChoiceQuestion", "NoulQuestion", "SystemOneRequest"),
-    "logit_classifier.tags": ("split_prompt", "parse_candidates", "normalize_item", "drop_subsets",
-                              "complete_tags", "repeated_block", "drop_unfinished_tag",
-                              "MAX_CANDIDATES"),
+    "logit_classifier.tags": ("parse_candidates", "normalize_item", "drop_subsets", "complete_tags",
+                              "repeated_block", "drop_unfinished_tag"),
     "logit_classifier.backends.comfy_clip": ("ComfyClipBackend",),
 }
 _LIBRARY_FIX = f'pip install -U "logit-classifier>={LIBRARY_VERSION}"'
@@ -121,6 +149,95 @@ def build_classifier(clip):
     return Classifier(Config(use_prior_debias=False, calibration_path=None), backend)
 
 
+def _transformer(clip):
+    # Core's generating transformer, or None for a CLIP without one.
+    model = getattr(clip, "cond_stage_model", None)
+    encoder_name = getattr(model, "clip", None)
+    encoder = getattr(model, encoder_name, None) if isinstance(encoder_name, str) else None
+    return getattr(encoder, "transformer", None)
+
+
+def _resident(clip):
+    # Whether the CLIP heads core's loaded list with its weights in place, the state its own
+    # load_model call leaves it in. Another model's load always inserts at the head.
+    try:
+        import comfy.model_management as model_management
+
+        patcher = clip.patcher
+        head = model_management.current_loaded_models
+        return (bool(head) and head[0].model is patcher
+                and patcher.model.device == patcher.load_device
+                and patcher.model.current_weight_patches_uuid == patcher.patches_uuid
+                and patcher.model.model_loaded_weight_memory > 0)
+    except (ImportError, AttributeError):
+        return False
+
+
+@contextmanager
+def skip_resident_loads(clip):
+    """clip.load_model returns at once while the CLIP is resident.
+
+    Core's load_models_gpu has no fast path for a loaded model and costs about 0.1 s, and
+    logit_classifier loads once per request, seven requests per tile. The skip belongs in
+    logit_classifier's ComfyClipBackend, which should load once per pass."""
+    original = clip.load_model
+    shadowed = "load_model" in vars(clip)
+
+    def load_model(*args, **kwargs):
+        if _resident(clip):
+            return clip.patcher
+        return original(*args, **kwargs)
+
+    clip.load_model = load_model
+    try:
+        yield
+    finally:
+        if shadowed:
+            clip.load_model = original
+        else:
+            del clip.load_model
+
+
+@contextmanager
+def shared_vision_encode(clip):
+    """One vision tower pass per picture tensor for the duration, so the propose generate and
+    the verify request, which read the same picture, encode it once.
+
+    The encode runs inside logit_classifier's determinism window, where the verify request
+    always ran it, so the verify scores keep their values. That window is a private helper of
+    the library, and a library without it skips the sharing."""
+    import torch
+
+    transformer = _transformer(clip)
+    original = getattr(transformer, "preprocess_embed", None)
+    try:
+        from logit_classifier.backends._torch_window import _determinism
+    except ImportError:
+        _determinism = None
+    cache = {}
+
+    if not callable(original) or _determinism is None:
+        yield
+        return
+
+    def preprocess_embed(embed, device):
+        data = embed.get("data")
+        if embed.get("type") != "image" or not torch.is_tensor(data):
+            return original(embed, device=device)
+        # The tensor itself is held beside its result, so its id cannot be reused while cached.
+        key = (id(data), tuple(data.shape), data.dtype, str(device))
+        if key not in cache:
+            with _determinism():
+                cache[key] = (data, original(embed, device=device))
+        return cache[key][1]
+
+    transformer.preprocess_embed = preprocess_embed
+    try:
+        yield
+    finally:
+        del transformer.preprocess_embed
+
+
 def _nouls(classifier, picture, statements):
     # One packed request, so every statement shares one encode of the picture.
     from logit_classifier import NoulQuestion, SystemOneRequest
@@ -142,61 +259,57 @@ def _verify_scores(classifier, picture, items, statement):
     return tuple(_nouls(classifier, picture, _statements(items, statement)))
 
 
-def _passed(items, scores, threshold):
-    return tuple(item for item, p in zip(items, scores, strict=True) if p >= threshold)
+def _passed(items, origins, scores, preset):
+    """The items whose score reaches their origin's threshold: a prompt tag the model did not
+    list itself needs the prompt tags threshold, since the verify statement also passes a near
+    name for what is there ("wooden carriage" for a cart)."""
+    passed = []
+    for item, origin, p in zip(items, origins, scores, strict=True):
+        threshold = (preset.prompt_tags_verification_threshold if origin == "prompt"
+                     else preset.tile_tags_verification_threshold)
+        if p >= threshold:
+            passed.append(item)
+    return tuple(passed)
 
 
-def fragment_style_p(classifier, fragments):
-    """p(style) per fragment, from one text-only subject or style choice per fragment."""
+def thing_scores(classifier, tags, known):
+    """p("other") of the thing check per tag, text-only, each distinct tag asked once per
+    `known` dict, which carries the answers across a run's tiles."""
     from logit_classifier import ChoiceQuestion, SystemOneRequest
 
-    if not fragments:
-        return ()
-    questions = {f"f{index}": ChoiceQuestion(instructions=FRAGMENT_QUESTION.format(fragment=fragment),
-                                             criteria=FRAGMENT_CRITERIA)
-                 for index, fragment in enumerate(fragments)}
-    response, _diagnostics = classifier.classify(SystemOneRequest(state="", questions=questions))
-    return tuple(response.answers[qid].probabilities["style"] for qid in questions)
+    unknown = tuple(dict.fromkeys(tag for tag in tags if tag not in known))
+    if unknown:
+        questions = {f"t{index}": ChoiceQuestion(instructions=THING_QUESTION.format(tag=tag),
+                                                 criteria=THING_CRITERIA)
+                     for index, tag in enumerate(unknown)}
+        response, _diagnostics = classifier.classify(SystemOneRequest(state="", questions=questions))
+        known.update((tag, response.answers[qid].probabilities["other"])
+                     for tag, qid in zip(unknown, questions, strict=True))
+    return tuple(known[tag] for tag in tags)
 
 
-def sort_fragments(fragments, style_p):
-    """(subject fragments, style fragments): a fragment is style at p(style) >= STYLE_THRESHOLD."""
-    pairs = tuple(zip(fragments, style_p, strict=True))
-    subjects = tuple(fragment for fragment, p in pairs if p < STYLE_THRESHOLD)
-    styles = tuple(fragment for fragment, p in pairs if p >= STYLE_THRESHOLD)
-    return subjects, styles
-
-
-def _sampler(clip):
-    # Core's generating transformer and its first stop token, or None for a CLIP without them.
-    model = getattr(clip, "cond_stage_model", None)
-    encoder_name = getattr(model, "clip", None)
-    encoder = getattr(model, encoder_name, None) if isinstance(encoder_name, str) else None
-    transformer = getattr(encoder, "transformer", None)
-    config = getattr(getattr(transformer, "model", None), "config", None)
-    stop_tokens = getattr(config, "stop_tokens", None)
-
-    if not callable(getattr(transformer, "sample_token", None)) or not stop_tokens:
-        return None
-    return transformer, stop_tokens[0]
+def is_thing(p_other):
+    return p_other < THING_THRESHOLD
 
 
 @contextmanager
-def stop_on_repeat(clip):
-    """Ends core's greedy decode on a stop token once the reply repeats a block of tags.
+def stop_tag_list(clip, should_stop):
+    """Ends core's greedy decode on a stop token once `should_stop(complete tags so far)`.
 
     Core's generate loop takes no stop condition, so the token sample_token returns is
     replaced. Core copies that token into the sequence and breaks on it
     (comfy/text_encoders/llama.py, the generate loop)."""
-    from logit_classifier.tags import complete_tags, repeated_block
+    from logit_classifier.tags import complete_tags
 
-    sampler = _sampler(clip)
+    transformer = _transformer(clip)
+    config = getattr(getattr(transformer, "model", None), "config", None)
+    stop_tokens = getattr(config, "stop_tokens", None)
     history = []
 
-    if sampler is None:
+    if not callable(getattr(transformer, "sample_token", None)) or not stop_tokens:
         yield
         return
-    transformer, stop_id = sampler
+    stop_id = stop_tokens[0]
     original = transformer.sample_token
     shadowed = "sample_token" in vars(transformer)
     previous = vars(transformer).get("sample_token")
@@ -204,7 +317,7 @@ def stop_on_repeat(clip):
     def watch(*args, **kwargs):
         token = original(*args, **kwargs)
         history.append(int(token.reshape(-1)[0]))
-        if repeated_block(complete_tags(clip.decode(history))):
+        if should_stop(complete_tags(clip.decode(history))):
             return token.new_full(token.shape, stop_id)
         return token
 
@@ -218,18 +331,15 @@ def stop_on_repeat(clip):
             del transformer.sample_token
 
 
-def tile_tags_question(preset):
-    """The tile tags question without the chat template, the filled
-    tile_tags_with_prompt_instruction first when the preset carries a prompt."""
-    if not preset.prompt:
-        return preset.tile_tags_instruction
-    prompt_text = preset.tile_tags_with_prompt_instruction.replace(captions.PROMPT_PLACEHOLDER, preset.prompt)
-    return prompt_text + preset.tile_tags_instruction
+def _full_or_repeating(tags):
+    from logit_classifier.tags import repeated_block
+
+    return len(tags) >= MAX_PROPOSED_TAGS or bool(repeated_block(tags))
 
 
 def propose_text(preset):
     """The propose request as the tokenizer reads it."""
-    return PROPOSE_TEMPLATE.format(instruction=tile_tags_question(preset))
+    return PROPOSE_TEMPLATE.format(instruction=preset.tile_tags_instruction)
 
 
 def propose(clip, picture, preset):
@@ -237,7 +347,7 @@ def propose(clip, picture, preset):
     from logit_classifier.tags import drop_unfinished_tag
 
     tokens, _tail = captions._tokenize_images(clip, propose_text(preset), picture)
-    with stop_on_repeat(clip):
+    with stop_tag_list(clip, _full_or_repeating):
         ids = captions.clip_generate(clip, tokens, do_sample=False, max_length=PROPOSE_MAX_TOKENS)
     text = clip.decode(ids)
     # Core stops early only on a stop token, so a decode that fills the budget ends mid tag.
@@ -246,17 +356,64 @@ def propose(clip, picture, preset):
     return text
 
 
-def merge_trace(fragments, proposed):
-    """(candidates, origins, dropped): the subject fragments, then the proposed tags,
-    normalized, without the propose instruction's category nouns or a repeat, capped at the
-    library's MAX_CANDIDATES. An origin is "prompt", "model", or "both" for a subject fragment the
-    model also proposed, and `dropped` holds each left-out name with its reason."""
-    from logit_classifier.tags import MAX_CANDIDATES, normalize_item
+def _word_stems(text):
+    # Lowercase words with a plural ending cut, so "towers" and "tower" match.
+    stems = set()
+    for word in re.findall(r"[a-z0-9]+", text.lower()):
+        for suffix, ending in (("ies", "y"), ("es", ""), ("s", "")):
+            if word.endswith(suffix) and len(word) > len(suffix) + 2:
+                word = word[:-len(suffix)] + ending
+                break
+        stems.add(word)
+    return stems
+
+
+def grounded(tag, prompt_stems):
+    """Whether every content word of `tag` is a word of the prompt."""
+    words = _word_stems(tag) - _STOP_WORDS
+    return bool(words) and words <= prompt_stems
+
+
+def prompt_tags_text(preset):
+    """The prompt tags request as the tokenizer reads it."""
+    instruction = preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, preset.prompt)
+    return PROMPT_TAGS_TEMPLATE.format(instruction=instruction)
+
+
+def list_prompt_tags(clip, preset):
+    """(reply, listed): the VL model's greedy list of the things the prompt names, and its tags
+    whose every word is a word of the prompt."""
+    from logit_classifier.tags import drop_unfinished_tag, parse_candidates, repeated_block
+
+    prompt_stems = _word_stems(preset.prompt)
+
+    def ungrounded_or_repeating(tags):
+        streak = 0
+        for tag in reversed(tags):
+            if grounded(tag, prompt_stems):
+                break
+            streak += 1
+        return streak >= UNGROUNDED_STREAK or bool(repeated_block(tags))
+
+    with stop_tag_list(clip, ungrounded_or_repeating):
+        ids = captions.clip_generate(clip, clip.tokenize(prompt_tags_text(preset)), do_sample=False,
+                                     max_length=PROMPT_TAGS_MAX_TOKENS)
+    reply = clip.decode(ids)
+    text = drop_unfinished_tag(reply) if len(ids) >= PROMPT_TAGS_MAX_TOKENS else reply
+    return reply, tuple(tag for tag in parse_candidates(text) if grounded(tag, prompt_stems))
+
+
+def merge_trace(proposed, prompt_tags):
+    """(candidates, origins, dropped): the proposed tags, then the prompt tags, normalized,
+    without the propose instruction's category nouns or a repeat, capped at MAX_MERGED_TAGS. An
+    origin is "model", "prompt", or "both" for a prompt tag the model also proposed, and
+    `dropped` holds each left-out name with its reason."""
+    from logit_classifier.tags import normalize_item
 
     index_of = {}
     origins = []
     dropped = []
-    for origin, items in (("prompt", fragments), ("model", proposed)):
+    for origin, items in (("model", proposed), ("prompt", prompt_tags)):
         for item in items:
             name = normalize_item(item)
             index = index_of.get(name)
@@ -264,21 +421,16 @@ def merge_trace(fragments, proposed):
                 continue
             if name in CATEGORY_NOUNS:
                 dropped.append((name, "category noun"))
-            elif index is not None and origin == "model" and origins[index] != "model":
+            elif index is not None and origin == "prompt" and origins[index] == "model":
                 origins[index] = "both"
             elif index is not None:
                 dropped.append((name, "repeat"))
-            elif len(index_of) == MAX_CANDIDATES:
+            elif len(index_of) == MAX_MERGED_TAGS:
                 dropped.append((name, "over the cap"))
             else:
                 index_of[name] = len(origins)
                 origins.append(origin)
     return tuple(index_of), tuple(origins), tuple(dropped)
-
-
-def merge_candidates(fragments, proposed):
-    """The candidates `merge_trace` keeps, in merge order."""
-    return list(merge_trace(fragments, proposed)[0])
 
 
 def strip_rects(height, width):
@@ -332,7 +484,7 @@ def strip_term(strips, threshold):
 
 
 def on_no_strip(strips, threshold):
-    """Whether no strip holds the item. The whole tile's score can pass a tag that no part of
+    """Whether no strip holds the item. The entire tile's score can pass a tag that no part of
     the tile shows, and on the owner's storm sky tile every such tag named something the tile
     lacks."""
     return max(strips) < threshold
@@ -345,23 +497,24 @@ def render_tags(items, terms):
 
 @dataclass(frozen=True)
 class PromptTrace:
-    """The prompt fragment sort of one picture. `fragments` and `style_p` are the prompt's
-    parts and their p(style). `subjects` join every tile's candidates first and `styles` are
-    dropped."""
+    """The prompt tags of one picture. `reply` is the VL model's list as written, `listed` its
+    tags whose every word is a word of the prompt, `p_other` each listed tag's thing check
+    score, and `tags` the listed tags the thing check keeps, which join every tile's
+    candidates."""
 
-    fragments: tuple
-    style_p: tuple
-    subjects: tuple
-    styles: tuple
+    reply: str
+    listed: tuple
+    p_other: tuple
+    tags: tuple
 
 
 @dataclass(frozen=True)
 class TileTrace:
     """One tile row's stages. `origins` names where each candidate came from and `dropped`
-    what the merge left out and why. `scores` holds None per candidate when verify is off.
-    `strips` holds per kept item its six strip probabilities in `strip_rects` order, and
-    `unplaced` the kept items no strip holds, which the text leaves out. With locate off every
-    `strips` entry is (), every term "" and `unplaced` empty."""
+    what the merge and the thing check left out and why. `scores` holds None per candidate
+    when verify is off. `strips` holds per kept item its six strip probabilities in
+    `strip_rects` order, and `unplaced` the kept items no strip holds, which the text leaves
+    out. With locate off every `strips` entry is (), every term "" and `unplaced` empty."""
 
     reply: str
     proposed: tuple
@@ -377,23 +530,29 @@ class TileTrace:
     text: str
 
 
-def trace_tile(clip, classifier, crop, picture, preset, subjects, locate=True):
-    """Every stage of one tile row: propose on `picture`, merge, verify, clean, then locate on
-    the full-resolution `crop` unless `locate` is off. An empty verification statement skips
-    verify and locate, so every candidate is kept."""
-    from logit_classifier.tags import MAX_CANDIDATES, drop_subsets, parse_candidates
+def trace_tile(clip, classifier, crop, picture, preset, prompt_tags, known_things, locate=True):
+    """Every stage of one tile row: propose on `picture`, merge with `prompt_tags`, the thing
+    check (answers shared through `known_things`), verify, clean, then locate on the
+    full-resolution `crop` unless `locate` is off. An empty verification statement skips verify
+    and locate, so every candidate is kept."""
+    from logit_classifier.tags import drop_subsets, parse_candidates
 
     statement = preset.tile_tags_verification_statement
     position_threshold = preset.tile_tags_position_threshold
-    reply = propose(clip, picture, preset)
-    proposed = tuple(parse_candidates(reply, max_candidates=MAX_CANDIDATES))
-    candidates, origins, dropped = merge_trace(subjects, proposed)
-    scores = (None,) * len(candidates)
-    verified = candidates
 
-    if statement:
-        scores = _verify_scores(classifier, picture, candidates, statement)
-        verified = _passed(candidates, scores, preset.tile_tags_verification_threshold)
+    with shared_vision_encode(clip):
+        reply = propose(clip, picture, preset)
+        proposed = tuple(parse_candidates(reply, max_candidates=MAX_PROPOSED_TAGS))
+        merged, merged_origins, dropped = merge_trace(proposed, prompt_tags)
+        p_other = thing_scores(classifier, merged, known_things)
+        candidates = tuple(c for c, p in zip(merged, p_other, strict=True) if is_thing(p))
+        origins = tuple(o for o, p in zip(merged_origins, p_other, strict=True) if is_thing(p))
+        dropped += tuple((c, "not a thing") for c, p in zip(merged, p_other, strict=True) if not is_thing(p))
+        scores = (None,) * len(candidates)
+        verified = candidates
+        if statement:
+            scores = _verify_scores(classifier, picture, candidates, statement)
+            verified = _passed(candidates, origins, scores, preset)
     kept = tuple(drop_subsets(list(verified)))
     strips = ((),) * len(kept)
     terms = ("",) * len(kept)
@@ -414,7 +573,7 @@ def trace_tile(clip, classifier, crop, picture, preset, subjects, locate=True):
 @dataclass(frozen=True)
 class TagRun:
     """Every stage of one tags pass. `style_texts` is the style line per batch row, "" for
-    none, `prompt` is the fragment sort or None when the preset carries no prompt, and
+    none, `prompt` is the prompt tags or None when the preset carries no prompt, and
     `tiles[tile_index][batch_row]` is a TileTrace."""
 
     style_texts: tuple
@@ -445,9 +604,10 @@ def clear_tag_cache():
 
 def _tuning():
     # Read per call, so a changed constant never serves text written under the old one.
-    return (VL_MAX_PIXELS, PROPOSE_MAX_TOKENS, STYLE_THRESHOLD,
-            tuple(sorted(CATEGORY_NOUNS)), PROPOSE_TEMPLATE, FRAGMENT_QUESTION,
-            tuple(FRAGMENT_CRITERIA.items()), STRIP_MEGAPIXELS)
+    return (VL_MAX_PIXELS, PROPOSE_MAX_TOKENS, MAX_PROPOSED_TAGS, MAX_MERGED_TAGS,
+            tuple(sorted(CATEGORY_NOUNS)), PROPOSE_TEMPLATE, PROMPT_TAGS_TEMPLATE,
+            PROMPT_TAGS_MAX_TOKENS, UNGROUNDED_STREAK, THING_QUESTION,
+            tuple(THING_CRITERIA.items()), THING_THRESHOLD, STRIP_MEGAPIXELS)
 
 
 def _tag_cache_key(picture, preset, scope):
@@ -456,9 +616,10 @@ def _tag_cache_key(picture, preset, scope):
     if picture is not None:
         pixels = picture.contiguous().cpu().float().numpy().tobytes()
         digest = (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
-    wording = (preset.tile_tags_instruction, preset.tile_tags_with_prompt_instruction,
+    wording = (preset.tile_tags_instruction, preset.prompt_tags_instruction,
                preset.tile_tags_verification_statement, preset.tile_tags_verification_threshold,
-               preset.tile_tags_position_threshold, preset.style_instruction)
+               preset.prompt_tags_verification_threshold, preset.tile_tags_position_threshold,
+               preset.style_instruction)
     return (digest, wording, preset.prompt, _tuning(), scope)
 
 
@@ -475,6 +636,13 @@ def _cached(key, clip, compute):
     while len(_TAG_CACHE) > TAG_CACHE_ENTRIES:
         _TAG_CACHE.popitem(last=False)
     return value
+
+
+def _prompt_trace(clip, classifier, preset, known_things):
+    reply, listed = list_prompt_tags(clip, preset)
+    p_other = thing_scores(classifier, listed, known_things)
+    return PromptTrace(reply=reply, listed=listed, p_other=p_other,
+                       tags=tuple(tag for tag, p in zip(listed, p_other, strict=True) if is_thing(p)))
 
 
 def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0, progress=None,
@@ -495,8 +663,6 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
             f"{captions.TILE_TEXT_TAGS!r}. Hand a caption preset to captions.generate_caption_set.")
     captions._check_prompt_filled(preset)
     check_tags_ready(clip)
-    # Imported after the guard, so a missing library fails with its pip command.
-    from logit_classifier.tags import split_prompt
 
     batch = int(source.shape[0])
     style_rows = captions.style_row_count(preset, batch)
@@ -505,8 +671,7 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
     pbar = None if progress is not None else comfy.utils.ProgressBar(total)
     done = per_picture * batch_index
     classifier = build_classifier(clip)
-    fragments = tuple(split_prompt(preset.prompt))
-    style_p = ()
+    known_things = {}
     prompt_trace = None
     style_texts = [""] * batch
     tile_traces = []
@@ -519,39 +684,38 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
         else:
             pbar.update_absolute(done, total)
 
-    if fragments:
-        style_p = _cached(_tag_cache_key(None, preset, ("fragments",)), clip,
-                          lambda: fragment_style_p(classifier, fragments))
-    subjects, styles = sort_fragments(fragments, style_p)
-    if preset.prompt:
-        prompt_trace = PromptTrace(fragments=fragments, style_p=tuple(style_p), subjects=subjects,
-                                   styles=styles)
+    with skip_resident_loads(clip):
+        if preset.prompt and preset.prompt_tags_instruction:
+            prompt_trace = _cached(_tag_cache_key(None, preset, ("prompt tags",)), clip,
+                                   lambda: _prompt_trace(clip, classifier, preset, known_things))
+        prompt_tags = () if prompt_trace is None else prompt_trace.tags
 
-    if style_rows:
-        style_canvas = source if style_source is None else style_source
-        if int(style_canvas.shape[0]) != batch:
-            raise RuntimeError(
-                f"Context-Anchored Tile Refine (VL): {batch} batch row(s) to tag but the style "
-                f"canvas has {int(style_canvas.shape[0])}. Every row needs its own style line or "
-                "a row would carry another row's style.")
-        comfy.model_management.throw_exception_if_processing_interrupted()
-        for b in range(batch):
-            style_texts[b] = style_line(clip, style_canvas[b:b + 1], preset, ("style", b, batch_index))
-            advance()
+        if style_rows:
+            style_canvas = source if style_source is None else style_source
+            if int(style_canvas.shape[0]) != batch:
+                raise RuntimeError(
+                    f"Context-Anchored Tile Refine (VL): {batch} batch row(s) to tag but the style "
+                    f"canvas has {int(style_canvas.shape[0])}. Every row needs its own style line or "
+                    "a row would carry another row's style.")
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            for b in range(batch):
+                style_texts[b] = style_line(clip, style_canvas[b:b + 1], preset, ("style", b, batch_index))
+                advance()
 
-    for tile in tiles:
-        comfy.model_management.throw_exception_if_processing_interrupted()
-        crop = tile.crop_rect
-        row_traces = []
-        for b in range(batch):
-            row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
-            picture = captions.resample_for_vl(row, VL_MAX_PIXELS)
-            scope = ("tile", crop.x0, crop.y0, crop.x1, crop.y1, b, batch_index, locate)
-            row_traces.append(_cached(_tag_cache_key(picture, preset, scope), clip,
-                                      lambda row=row, picture=picture: trace_tile(
-                                          clip, classifier, row, picture, preset, subjects, locate)))
-            advance()
-        tile_traces.append(tuple(row_traces))
+        for tile in tiles:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            crop = tile.crop_rect
+            row_traces = []
+            for b in range(batch):
+                row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
+                picture = captions.resample_for_vl(row, VL_MAX_PIXELS)
+                scope = ("tile", crop.x0, crop.y0, crop.x1, crop.y1, b, batch_index, locate)
+                row_traces.append(_cached(_tag_cache_key(picture, preset, scope), clip,
+                                          lambda row=row, picture=picture: trace_tile(
+                                              clip, classifier, row, picture, preset, prompt_tags,
+                                              known_things, locate)))
+                advance()
+            tile_traces.append(tuple(row_traces))
     return TagRun(style_texts=tuple(style_texts), prompt=prompt_trace, tiles=tuple(tile_traces))
 
 

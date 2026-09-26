@@ -153,11 +153,16 @@ TILE_TEXT_TAGS = "tags"
 TILE_TEXT_KINDS = (TILE_TEXT_CAPTION, TILE_TEXT_TAGS)
 
 # The shipped tags thresholds, and the defaults of a tags Preset built in code. On the owner's
-# 8K storm sky tile (2026-09-24) every tag scoring 0.5 to 0.9 on the whole tile, or under 0.9
+# 8K storm sky tile (2026-09-24) every tag scoring 0.5 to 0.9 on the entire tile, or under 0.9
 # on every strip, was a bay or buildings the tile does not hold, and they grew a skyline in
 # the clouds. At 0.9 the tile rendered its clouds and masts only.
 SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.9
 SHIPPED_TAGS_POSITION_THRESHOLD = 0.9
+# A prompt tag the tile's own list lacks passes the verify statement as a near name for what is
+# there ("wooden carriage" for a cart) with whole-tile scores from 0.9 to 0.9999. At 0.9999 the
+# wrong tags per tile fell from 0.92 to 0.29 on held-out tiles and prompts
+# (tests-AB/tags-bench-log.md).
+SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD = 0.9999
 
 # Caption input budget (total pixels, aspect preserved) — AB27's prep, what resample_for_vl
 # falls back to, and the size every judged tests-AB arm was captioned at (ab_env.caption_preset
@@ -193,9 +198,10 @@ _PRESET_KEYS = {
     },
     TILE_TEXT_TAGS: {
         "tile_tags_instruction": str,
-        "tile_tags_with_prompt_instruction": str,
+        "prompt_tags_instruction": str,
         "tile_tags_verification_statement": str,
         "tile_tags_verification_threshold": float,
+        "prompt_tags_verification_threshold": float,
         "tile_tags_position_threshold": float,
         "global_style_instruction": str,
         "global_style_max_tokens": int,
@@ -204,21 +210,28 @@ _PRESET_KEYS = {
 
 # The placeholder each tags key must hold, since without it the prompt or the tag never
 # reaches the question.
-_TAGS_PLACEHOLDERS = {"tile_tags_with_prompt_instruction": PROMPT_PLACEHOLDER,
+_TAGS_PLACEHOLDERS = {"prompt_tags_instruction": PROMPT_PLACEHOLDER,
                       "tile_tags_verification_statement": TAG_PLACEHOLDER}
 
 # The tags keys that never take the prompt. The tags pass fills {PROMPT} in
-# tile_tags_with_prompt_instruction only, so anywhere else it reaches the VL model literally.
+# prompt_tags_instruction only, so anywhere else it reaches the VL model literally.
 _TAGS_PROMPT_FREE_KEYS = ("tile_tags_instruction", "tile_tags_verification_statement")
 
-_TAGS_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "tile_tags_position_threshold")
+_TAGS_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "prompt_tags_verification_threshold",
+                        "tile_tags_position_threshold")
 
 # The tags keys' names before the release, so a user's own copy that still carries one fails
 # with its new name rather than with a missing key.
 _RENAMED_TAGS_KEYS = {
     "propose_instruction": "tile_tags_instruction",
-    "prompt_anchor": "tile_tags_with_prompt_instruction",
     "verify_statement": "tile_tags_verification_statement",
+}
+
+# Tags keys whose job moved to a new key with different wording, so a user's own copy that
+# still carries one fails with what to copy in its place.
+_REPLACED_TAGS_KEYS = {
+    "prompt_anchor": "prompt_tags_instruction",
+    "tile_tags_with_prompt_instruction": "prompt_tags_instruction",
 }
 
 # Per-preset keys this version no longer reads: the caption picture size moved to the
@@ -254,14 +267,13 @@ class Preset:
     block asks for. `label` is "" for the vision-only surface, which reads no preset, and
     `style_instruction` is "" when this preset asks for no whole-image style caption.
 
-    `kind` is the block's tile_text. A tags preset carries the three tags fields in place of
-    the tile question and budget, and `prompt` is the node's prompt input, which `with_prompt`
-    stores on a tags preset because its tile_tags_with_prompt_instruction is placed before
-    the question only when the prompt is not empty. An empty
-    tile_tags_verification_statement, reachable only on a preset built in code, keeps every
-    candidate tag without verifying or locating it. The two thresholds are the scores that
-    statement must reach on the whole tile to keep a tag, and on a strip of the tile to place
-    it there."""
+    `kind` is the block's tile_text. A tags preset carries the tags fields in place of the
+    tile question and budget, and `prompt` is the node's prompt input, which `with_prompt`
+    stores on a tags preset because its prompt_tags_instruction is asked only when the prompt
+    is not empty. An empty tile_tags_verification_statement, reachable only on a preset built
+    in code, keeps every candidate tag without verifying or locating it. The thresholds are the
+    scores that statement must reach on the entire tile to keep a tag the model listed, to keep
+    a prompt tag it did not list, and on a strip of the tile to place a tag there."""
 
     surface: str
     label: str
@@ -272,9 +284,10 @@ class Preset:
     style_max_tokens: int = 0
     kind: str = TILE_TEXT_CAPTION
     tile_tags_instruction: str = ""
-    tile_tags_with_prompt_instruction: str = ""
+    prompt_tags_instruction: str = ""
     tile_tags_verification_statement: str = ""
     tile_tags_verification_threshold: float = SHIPPED_TAGS_VERIFICATION_THRESHOLD
+    prompt_tags_verification_threshold: float = SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD
     tile_tags_position_threshold: float = SHIPPED_TAGS_POSITION_THRESHOLD
     prompt: str = ""
 
@@ -351,6 +364,14 @@ def _check_preset(path, label, block):
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries a tags key "
             f"under its old name ({names}). Rename the key in {path.name} and keep its value.")
+    replaced = [old for old in _REPLACED_TAGS_KEYS if old in given] if kind == TILE_TEXT_TAGS else []
+    if replaced:
+        names = ", ".join(f"{old} by {_REPLACED_TAGS_KEYS[old]}" for old in replaced)
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries a tags key this "
+            f"version replaced ({names}). The prompt no longer goes into the tile question. It is "
+            "asked once per picture for the things it names. Remove the old key and copy "
+            f"prompt_tags_instruction and prompt_tags_verification_threshold from {SETTINGS_NAME}.")
     missing = sorted(set(keys) - given)
     if missing:
         raise RuntimeError(
@@ -386,8 +407,8 @@ def _check_preset(path, label, block):
             if PROMPT_PLACEHOLDER in block[key]:
                 raise RuntimeError(
                     f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
-                    f"holds {PROMPT_PLACEHOLDER}, which only tile_tags_with_prompt_instruction "
-                    f"takes. Move {PROMPT_PLACEHOLDER} to tile_tags_with_prompt_instruction.")
+                    f"holds {PROMPT_PLACEHOLDER}, which only prompt_tags_instruction takes. "
+                    f"Remove {PROMPT_PLACEHOLDER} from {key}.")
         for key in _TAGS_THRESHOLD_KEYS:
             if not 0 <= block[key] <= 1:
                 raise RuntimeError(
@@ -600,9 +621,10 @@ def resolve_method(vlm_method):
             style_max_tokens=block["global_style_max_tokens"],
             kind=TILE_TEXT_TAGS,
             tile_tags_instruction=block["tile_tags_instruction"],
-            tile_tags_with_prompt_instruction=block["tile_tags_with_prompt_instruction"],
+            prompt_tags_instruction=block["prompt_tags_instruction"],
             tile_tags_verification_statement=block["tile_tags_verification_statement"],
             tile_tags_verification_threshold=float(block["tile_tags_verification_threshold"]),
+            prompt_tags_verification_threshold=float(block["prompt_tags_verification_threshold"]),
             tile_tags_position_threshold=float(block["tile_tags_position_threshold"]),
         )
     return Preset(
@@ -637,9 +659,9 @@ def with_prompt(preset, prompt):
     before any GPU time, rather than a question that quotes an empty prompt at every tile.
 
     A tags preset stores the stripped prompt, "" for none, and keeps
-    `tile_tags_with_prompt_instruction` as the template, since it is placed before the
-    question only when the prompt is not empty. Its style
-    question still follows the rule above, so it never asks with the literal placeholder."""
+    `prompt_tags_instruction` as the template, since it is asked only when the prompt is not
+    empty. Its style question still follows the rule above, so it never asks with the literal
+    placeholder."""
     if preset.kind == TILE_TEXT_TAGS:
         return replace(
             preset,
@@ -681,8 +703,8 @@ def _check_prompt_filled(preset):
         if PROMPT_PLACEHOLDER in getattr(preset, key):
             raise RuntimeError(
                 f"Context-Anchored Tile Refine (VL): preset {preset.label!r} carries "
-                f"{PROMPT_PLACEHOLDER} in its {key}, which only tile_tags_with_prompt_instruction "
-                f"takes. Move {PROMPT_PLACEHOLDER} to tile_tags_with_prompt_instruction.")
+                f"{PROMPT_PLACEHOLDER} in its {key}, which only prompt_tags_instruction takes. "
+                f"Move {PROMPT_PLACEHOLDER} to prompt_tags_instruction.")
 
 
 def caption_budget_pixels(megapixels, source):

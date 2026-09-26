@@ -1,7 +1,8 @@
-"""tags.py: the tile text a tags preset writes, from propose, merge, verify, clean and render.
+"""tags.py: the tile text a tags preset writes, from the prompt tags, propose, merge, the thing
+check, verify, clean and render.
 
 A duck-typed CLIP stands in for the VL text encoder and a scripted classifier, patched in at
-`tags.build_classifier`, answers every noul and choice. logit_classifier itself is the real
+`tags.build_classifier`, answers every noul and thing check. logit_classifier itself is the real
 library (its tags helpers and question types), so no comfy install and no model are needed.
 """
 import dataclasses
@@ -12,7 +13,6 @@ import types
 
 import pytest
 import torch
-from logit_classifier.tags import MAX_CANDIDATES
 from test_vl import Tile
 
 from context_anchored_tile_refine import captions, tags
@@ -20,7 +20,7 @@ from context_anchored_tile_refine.grid import Rect
 
 TILE_A = Rect(0, 0, 16, 16)
 TILE_B = Rect(16, 0, 32, 16)
-ANCHOR = "This image was made from the prompt: {PROMPT}\n"
+PROMPT_TAGS = "List the things this prompt names: {PROMPT}"
 PROPOSE = "Tag this image."
 VERIFY = "This image visibly contains {TAG}"
 
@@ -31,7 +31,7 @@ def a_tags_preset(prompt="", style="", style_tokens=128, **thresholds):
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0,
                                        caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
         style_instruction=style, style_max_tokens=style_tokens, kind=captions.TILE_TEXT_TAGS,
-        tile_tags_instruction=PROPOSE, tile_tags_with_prompt_instruction=ANCHOR,
+        tile_tags_instruction=PROPOSE, prompt_tags_instruction=PROMPT_TAGS,
         tile_tags_verification_statement=VERIFY, prompt=prompt, **thresholds)
 
 
@@ -40,20 +40,26 @@ def statement(item):
 
 
 class FakeTagClip:
-    """Duck-typed VL clip. A request rendered from PROPOSE_TEMPLATE is a propose and answers
-    with `proposal`, anything else is the style caption and answers with `style_answer`.
-    generate returns `proposal_tokens` ids, which is what the budget check reads."""
+    """Duck-typed VL clip. A chat-templated request with a picture is a propose and answers
+    with `proposal`, one without a picture is the prompt tags request and answers with
+    `prompt_tags_reply`, and anything else is the style caption and answers with
+    `style_answer`. generate returns `proposal_tokens` ids for a propose, which is what the
+    budget check reads."""
 
     def __init__(self, proposal="red apple, wooden table", style_answer="<think>hm</think>Oil painting.",
-                 proposal_tokens=5, image_tokens=True, rejects_images=False):
+                 proposal_tokens=5, image_tokens=True, rejects_images=False, prompt_tags_reply=""):
         self.proposal = proposal
         self.style_answer = style_answer
+        self.prompt_tags_reply = prompt_tags_reply
         self.proposal_tokens = proposal_tokens
         self.image_tokens = image_tokens
         self.rejects_images = rejects_images
         self.tokenize_calls = []
         self.generate_calls = []
         self._answers = {}
+
+    def load_model(self, *args, **kwargs):
+        return None
 
     def tokenize(self, text, images=None, **kwargs):
         if self.rejects_images and images is not None:
@@ -68,25 +74,29 @@ class FakeTagClip:
 
     def generate(self, tokens, **kwargs):
         text, image = tokens["_probe"]
-        is_propose = text.startswith("<|im_start|>")
-        self.generate_calls.append({"text": text, "image": image, "propose": is_propose, **kwargs})
+        kind = "style"
+        if text.startswith("<|im_start|>"):
+            kind = "propose" if image is not None else "prompt tags"
+        self.generate_calls.append({"text": text, "image": image, "kind": kind,
+                                    "propose": kind == "propose", **kwargs})
         handle = len(self.generate_calls)
-        self._answers[handle] = self.proposal if is_propose else self.style_answer
-        return [handle] * (self.proposal_tokens if is_propose else 3)
+        self._answers[handle] = {"propose": self.proposal, "prompt tags": self.prompt_tags_reply,
+                                 "style": self.style_answer}[kind]
+        return [handle] * (self.proposal_tokens if kind == "propose" else 3)
 
     def decode(self, token_ids, skip_special_tokens=True):
         return self._answers[token_ids[0]]
 
 
 class FakeClassifier:
-    """Scripted classifier: `noul(statement)` answers every noul and `style(fragment)` every
-    subject or style choice. `noul_at(statement, picture)`, when set, answers the nouls in
-    place of `noul`, so a test can script each strip. Every request is recorded with its
-    statements and its picture."""
+    """Scripted classifier: `noul(statement)` answers every noul and `other(tag)` the p("other")
+    of every thing check, 0.0 (a thing) by default. `noul_at(statement, picture)`, when set,
+    answers the nouls in place of `noul`, so a test can script each strip. Every request is
+    recorded with its statements and its picture."""
 
-    def __init__(self, noul=None, style=None):
+    def __init__(self, noul=None, other=None):
         self.noul = noul if noul is not None else (lambda text: 0.95)
-        self.style = style if style is not None else (lambda fragment: 0.0)
+        self.other = other if other is not None else (lambda tag: 0.0)
         self.noul_at = None
         self.requests = []
 
@@ -98,9 +108,9 @@ class FakeClassifier:
             texts.append(question.instructions)
             kinds.add(question.type)
             if question.type == "choice":
-                fragment = re.search(r'"(.*)"', question.instructions).group(1)
-                p = self.style(fragment)
-                answers[qid] = types.SimpleNamespace(probabilities={"subject": 1.0 - p, "style": p})
+                tag = re.search(r'"(.*)"', question.instructions).group(1)
+                p = self.other(tag)
+                answers[qid] = types.SimpleNamespace(probabilities={"thing": 1.0 - p, "other": p})
             elif self.noul_at is not None:
                 answers[qid] = types.SimpleNamespace(noul=self.noul_at(question.instructions, image))
             else:
@@ -126,8 +136,16 @@ def propose_calls(clip):
     return [call for call in clip.generate_calls if call["propose"]]
 
 
+def calls_of(clip, kind):
+    return [call for call in clip.generate_calls if call["kind"] == kind]
+
+
 def nouls(classifier):
     return [request for request in classifier.requests if request["kind"] == "noul"]
+
+
+def thing_checks(classifier):
+    return [request for request in classifier.requests if request["kind"] == "choice"]
 
 
 def is_strip(request):
@@ -208,16 +226,32 @@ def test_propose_drops_the_decode_graphs_after_its_generate(classifier, monkeypa
     assert cleanups == list(range(1, len(clip.generate_calls) + 1))
 
 
-def test_the_with_prompt_instruction_is_prepended_only_when_the_preset_carries_a_prompt(classifier):
+def test_the_prompt_is_asked_once_per_picture_text_only_and_never_in_the_propose_question(classifier):
     without = FakeTagClip()
-    with_prompt = FakeTagClip()
+    with_prompt = FakeTagClip(prompt_tags_reply="cat, mat")
 
-    run(without, a_tags_preset())
-    run(with_prompt, a_tags_preset(prompt="a cat {on} a mat"))
+    run(without, a_tags_preset(), tiles=(TILE_A, TILE_B))
+    run(with_prompt, a_tags_preset(prompt="a cat {on} a mat"), tiles=(TILE_A, TILE_B))
 
-    assert without.tokenize_calls[0]["text"] == tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
-    assert with_prompt.tokenize_calls[-1]["text"] == tags.PROPOSE_TEMPLATE.format(
-        instruction="This image was made from the prompt: a cat {on} a mat\n" + PROPOSE)
+    propose_question = tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
+    assert [call["text"] for call in propose_calls(without)] == [propose_question] * 2
+    assert [call["text"] for call in propose_calls(with_prompt)] == [propose_question] * 2
+    assert calls_of(without, "prompt tags") == []
+    (asked,) = calls_of(with_prompt, "prompt tags")
+    assert asked["text"] == tags.PROMPT_TAGS_TEMPLATE.format(
+        instruction="List the things this prompt names: a cat {on} a mat")
+    assert asked["image"] is None
+    assert asked["do_sample"] is False
+    assert asked["max_length"] == tags.PROMPT_TAGS_MAX_TOKENS == 256
+    assert "thinking" not in with_prompt.tokenize_calls[0]
+
+
+def test_the_pass_restores_the_clips_own_load_model(classifier):
+    clip = FakeTagClip()
+
+    run(clip, a_tags_preset(prompt="an apple"))
+
+    assert "load_model" not in vars(clip)
 
 
 def test_a_decode_that_fills_the_budget_drops_its_cut_tail(classifier):
@@ -229,27 +263,78 @@ def test_a_decode_that_fills_the_budget_drops_its_cut_tail(classifier):
     assert tile_texts == [["red apple, wooden table"]]
 
 
-def test_the_repeat_stop_ends_the_decode_on_a_repeated_block_and_restores_sample_token():
-    words = {1: "apple, ", 2: "pear, "}
+STOP_ID = 99
 
-    class Transformer:
-        def __init__(self):
-            self.model = types.SimpleNamespace(config=types.SimpleNamespace(stop_tokens=[99]))
 
-        def sample_token(self, *args, **kwargs):
-            return torch.tensor([next(feed)])
+class ScriptedTransformer:
+    """Core's generating transformer as the stop reads it: stop tokens on its config, and a
+    sample_token that returns the next scripted id."""
 
-    transformer = Transformer()
+    def __init__(self, ids):
+        self.model = types.SimpleNamespace(config=types.SimpleNamespace(stop_tokens=[STOP_ID]))
+        self.feed = iter(ids)
+
+    def sample_token(self, *args, **kwargs):
+        return torch.tensor([next(self.feed)])
+
+
+class GeneratingClip:
+    """A clip whose generate runs core's loop shape over a ScriptedTransformer: one
+    sample_token per step, the stop token copied in and the loop broken on it. Token id n
+    decodes to `words[n]` and the stop token to nothing."""
+
+    def __init__(self, words, ids):
+        self.words = words
+        self.transformer = ScriptedTransformer(ids)
+        self.cond_stage_model = types.SimpleNamespace(
+            clip="qwen", qwen=types.SimpleNamespace(transformer=self.transformer))
+        self.tokenize_calls = []
+        self.generate_calls = []
+
+    def tokenize(self, text, **kwargs):
+        self.tokenize_calls.append(text)
+        return {"qwen3vl_4b": [[(10, 1.0)]]}
+
+    def generate(self, tokens, **kwargs):
+        self.generate_calls.append(kwargs)
+        ids = []
+        while len(ids) < kwargs["max_length"]:
+            ids.append(int(self.transformer.sample_token()))
+            if ids[-1] == STOP_ID:
+                break
+        return ids
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "".join(self.words.get(i, "") for i in ids)
+
+
+def stop_clip(words, ids):
+    transformer = ScriptedTransformer(ids)
     clip = types.SimpleNamespace(
         cond_stage_model=types.SimpleNamespace(clip="qwen", qwen=types.SimpleNamespace(transformer=transformer)),
-        decode=lambda ids: "".join(words[i] for i in ids))
-    feed = iter([1, 2, 1, 2])
+        decode=lambda token_ids: "".join(words.get(i, "") for i in token_ids))
+    return clip, transformer
 
-    with tags.stop_on_repeat(clip):
+
+def test_the_propose_stop_ends_the_decode_on_a_repeated_block_and_restores_sample_token():
+    clip, transformer = stop_clip({1: "apple, ", 2: "pear, "}, [1, 2, 1, 2])
+
+    with tags.stop_tag_list(clip, tags._full_or_repeating):
         sampled = [int(transformer.sample_token()) for _ in range(4)]
 
-    assert sampled == [1, 2, 1, 99]
+    assert sampled == [1, 2, 1, STOP_ID]
     assert "sample_token" not in vars(transformer)
+
+
+def test_the_propose_stop_ends_the_decode_at_max_proposed_tags_complete_tags():
+    count = tags.MAX_PROPOSED_TAGS
+    clip, transformer = stop_clip({n: f"thing {n}, " for n in range(1, count + 5)}, range(1, count + 5))
+
+    with tags.stop_tag_list(clip, tags._full_or_repeating):
+        sampled = [int(transformer.sample_token()) for _ in range(count)]
+
+    assert tags.MAX_PROPOSED_TAGS == 25
+    assert sampled == [*range(1, count), STOP_ID]
 
 
 def test_a_tokenizer_that_rejects_images_fails_at_the_first_propose_naming_the_fix(classifier):
@@ -314,33 +399,59 @@ def test_a_subset_survives_when_its_superset_fails_verify(classifier):
     assert tile_texts == [["herbs, jar"]]
 
 
-def test_the_candidates_are_capped_at_48_with_the_subject_fragments_first(classifier):
+def test_the_proposed_tags_are_capped_at_25_and_the_prompt_tags_follow_them(classifier):
     proposal = ", ".join(f"thing {n}" for n in range(60))
-    clip = FakeTagClip(proposal=proposal)
+    clip = FakeTagClip(proposal=proposal, prompt_tags_reply="lantern, moon")
 
     run(clip, a_tags_preset(prompt="a lantern, the moon"))
 
     texts = verify_requests(classifier)[-1]["texts"]
-    assert MAX_CANDIDATES == 48
-    assert len(texts) == 48
-    assert texts[:3] == [statement("lantern"), statement("moon"), statement("thing 0")]
+    assert texts == [statement(f"thing {n}") for n in range(tags.MAX_PROPOSED_TAGS)] + [
+        statement("lantern"), statement("moon")]
 
 
-def test_an_initialism_in_the_prompt_reaches_the_candidates_whole(classifier):
-    run(FakeTagClip(proposal=""), a_tags_preset(prompt="a flag of the U.S.A., Washington D.C. at night"))
+def test_an_initialism_in_the_prompt_tags_reaches_the_candidates_whole(classifier):
+    clip = FakeTagClip(proposal="", prompt_tags_reply="flag of the U.S.A., Washington D.C.")
+
+    run(clip, a_tags_preset(prompt="a flag of the U.S.A., Washington D.C. at night"))
 
     assert verify_requests(classifier)[-1]["texts"] == [
-        statement("flag of the u.s.a."), statement("washington d.c. at night")]
+        statement("flag of the u.s.a."), statement("washington d.c.")]
 
 
 def test_two_spellings_of_an_initialism_merge_into_one_candidate():
-    from logit_classifier.tags import parse_candidates, split_prompt
+    from logit_classifier.tags import parse_candidates
 
-    candidates, origins, _dropped = tags.merge_trace(split_prompt("flag of the U.S.A, a cowboy"),
-                                                     parse_candidates("flag of the U.S.A., sky"))
+    candidates, origins, _dropped = tags.merge_trace(parse_candidates("flag of the U.S.A., sky"),
+                                                     parse_candidates("flag of the U.S.A, a cowboy"))
 
-    assert candidates == ("flag of the u.s.a.", "cowboy", "sky")
-    assert origins == ("both", "prompt", "model")
+    assert candidates == ("flag of the u.s.a.", "sky", "cowboy")
+    assert origins == ("both", "model", "prompt")
+
+
+def test_the_merge_puts_the_models_tags_first_and_marks_a_prompt_tag_it_also_listed_both():
+    candidates, origins, dropped = tags.merge_trace(("sky", "a lantern", "boats"), ("lantern", "the moon", "sky"))
+
+    assert candidates == ("sky", "lantern", "boats", "moon")
+    assert origins == ("both", "both", "model", "prompt")
+    assert dropped == ()
+
+
+def test_a_prompt_tag_the_model_did_not_list_needs_the_prompt_threshold(classifier):
+    scores = {"red apple": 0.9, "lantern": 0.95, "moon": 0.9999, "boat": 0.9998}
+    classifier.noul = lambda text: scores[text.removeprefix(statement(""))]
+    clip = FakeTagClip(proposal="red apple, lantern", prompt_tags_reply="lantern, moon, boat")
+    prompt = "a lantern, the moon and a boat"
+
+    shipped = run_trace(clip, a_tags_preset(prompt=prompt), locate=False).tiles[0][0]
+    lowered = run_trace(clip, a_tags_preset(prompt=prompt, prompt_tags_verification_threshold=0.5),
+                        locate=False).tiles[0][0]
+
+    assert shipped.origins == ("model", "both", "prompt", "prompt")
+    assert a_tags_preset().prompt_tags_verification_threshold == 0.9999
+    # "lantern" is listed by both, so it is held to the tile threshold, not the prompt one.
+    assert shipped.verified == ("red apple", "lantern", "moon")
+    assert lowered.verified == ("red apple", "lantern", "moon", "boat")
 
 
 # --- the locate and render stages -------------------------------------------------------
@@ -515,42 +626,77 @@ def test_a_tile_with_nothing_kept_makes_no_strip_request(classifier, comfy_stubs
     assert len(comfy_stubs["common_upscale_calls"]) == 1
 
 
-# --- the prompt fragments and the style line --------------------------------------------
+# --- the prompt tags and the thing check ------------------------------------------------
 
-def test_no_prompt_makes_no_fragment_request(classifier):
-    run(FakeTagClip(), a_tags_preset())
+def test_no_prompt_makes_no_prompt_tags_request(classifier):
+    clip = FakeTagClip()
 
-    assert [request["kind"] for request in classifier.requests] == ["noul"] * (1 + 6)
+    run(clip, a_tags_preset())
 
-
-def test_fragments_are_routed_to_style_at_0_9_in_one_text_only_request(classifier):
-    scores = {"masterpiece": 0.98, "the moon": 0.69, "85mm": 0.9, "wet street": 0.2}
-    classifier.style = lambda fragment: scores[fragment]
-    clip = FakeTagClip(proposal="")
-
-    style_texts, tile_texts = run(clip, a_tags_preset(prompt="masterpiece, the moon, 85mm, wet street"))
-
-    choices = [request for request in classifier.requests if request["kind"] == "choice"]
-    assert len(choices) == 1
-    assert choices[0]["image"] is None
-    assert choices[0]["texts"][1] == 'What does the image prompt phrase "the moon" describe'
-    # The style fragments are dropped, so the tile verify is the only verify request.
-    (tile_verify,) = verify_requests(classifier)
-    assert tile_verify["texts"] == [statement("moon"), statement("wet street")]
-    assert style_texts == []
-    assert tile_texts == [["moon, wet street"]]
+    assert calls_of(clip, "prompt tags") == []
+    assert [request["kind"] for request in classifier.requests] == ["choice"] + ["noul"] * (1 + 6)
 
 
-def test_the_style_line_is_the_style_caption_alone_with_style_fragments_in_the_prompt(classifier):
-    classifier.style = lambda fragment: 0.99
+def test_the_prompt_tags_keep_only_tags_whose_every_word_is_a_prompt_word_and_stop_on_an_ungrounded_streak(
+        comfy_stubs):
+    words = {1: "red lantern, ", 2: "wet cobblestones, ", 3: "moon, ", 4: "glowing sign, ", 5: "lanterns, ",
+             6: "materials, ", 7: "details, ", 8: "rain, "}
+    clip = GeneratingClip(words, [1, 2, 3, 4, 5, 6, 7, 8])
+    preset = a_tags_preset(prompt="a red lantern on wet cobblestones under the moon")
+
+    reply, listed = tags.list_prompt_tags(clip, preset)
+
+    # One ungrounded tag ("glowing sign") does not end the list, two in a row do.
+    assert reply == "red lantern, wet cobblestones, moon, glowing sign, lanterns, materials, "
+    assert listed == ("red lantern", "wet cobblestones", "moon", "lanterns")
+    assert [int(token) for token in clip.transformer.feed] == [8]
+    assert "sample_token" not in vars(clip.transformer)
+    assert clip.tokenize_calls == [tags.prompt_tags_text(preset)]
+    assert clip.generate_calls == [{"do_sample": False, "max_length": tags.PROMPT_TAGS_MAX_TOKENS}]
+
+
+def test_a_tag_is_grounded_when_every_content_word_is_a_prompt_word_up_to_a_plural_ending():
+    prompt_stems = tags._word_stems("Two tall towers, a city of berries")
+
+    assert tags.grounded("the tower", prompt_stems)
+    assert tags.grounded("tall towers of a city", prompt_stems)
+    assert tags.grounded("berry", prompt_stems)
+    assert not tags.grounded("red tower", prompt_stems)
+    assert not tags.grounded("the", prompt_stems)
+
+
+def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_run(classifier):
+    scores = {"sky glow": 0.9, "wooden table": 0.89, "night": 0.95}
+    classifier.other = lambda tag: scores.get(tag, 0.0)
+    clip = FakeTagClip(proposal="red apple, wooden table, sky glow", prompt_tags_reply="moon, night")
+
+    tag_run = run_trace(clip, a_tags_preset(prompt="the moon at night"), tiles=(TILE_A, TILE_B),
+                        locate=False)
+
+    assert tags.THING_THRESHOLD == 0.9
+    assert tag_run.prompt == tags.PromptTrace(reply="moon, night", listed=("moon", "night"),
+                                              p_other=(0.0, 0.95), tags=("moon",))
+    for trace in (row[0] for row in tag_run.tiles):
+        assert trace.candidates == ("red apple", "wooden table", "moon")
+        assert trace.origins == ("model", "model", "prompt")
+        assert trace.dropped == (("sky glow", "not a thing"),)
+    # The prompt's two tags, then the first tile's three new ones. The second tile asks nothing.
+    checks = thing_checks(classifier)
+    assert [request["texts"] for request in checks] == [
+        [tags.THING_QUESTION.format(tag=tag) for tag in ("moon", "night")],
+        [tags.THING_QUESTION.format(tag=tag) for tag in ("red apple", "wooden table", "sky glow")]]
+    assert all(request["image"] is None for request in checks)
+
+
+def test_the_style_line_is_the_style_caption_alone_with_a_prompt(classifier):
     clip = FakeTagClip()
 
     style_texts, _tiles = run(clip, a_tags_preset(prompt="masterpiece, 85mm", style="Name the style."))
 
     assert style_texts == ["Oil painting."]
-    style_call = next(call for call in clip.generate_calls if not call["propose"])
+    (style_call,) = calls_of(clip, "style")
     assert style_call["max_length"] == 128
-    assert clip.tokenize_calls[0]["thinking"] is True
+    assert next(call for call in clip.tokenize_calls if call["text"] == "Name the style.")["thinking"] is True
     # No request reads the whole style picture: one verify on the tile, then its six strips.
     assert len(verify_requests(classifier)) == 1
     assert len(nouls(classifier)) == 1 + 6
@@ -564,31 +710,28 @@ def test_the_style_caption_alone_is_the_style_line_without_a_prompt(classifier):
 
 def test_the_style_stages_read_the_style_source(classifier, monkeypatch):
     monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
-    classifier.style = lambda fragment: 0.99
     clip = FakeTagClip()
     style_source = torch.rand(1, 40, 48, 3)
 
     run(clip, a_tags_preset(prompt="masterpiece", style="Name the style."), style_source=style_source)
 
-    assert clip.generate_calls[0]["image"].shape == (1, 40, 48, 3)
+    assert calls_of(clip, "style")[0]["image"].shape == (1, 40, 48, 3)
     assert all(request["image"].shape != (1, 40, 48, 3) for request in nouls(classifier))
 
 
 def test_a_prompt_without_a_style_instruction_writes_no_style_line(classifier):
-    classifier.style = lambda fragment: 0.99
     clip = FakeTagClip()
 
     style_texts, _tiles = run(clip, a_tags_preset(prompt="masterpiece"))
 
     assert style_texts == []
-    assert [call for call in clip.generate_calls if not call["propose"]] == []
+    assert calls_of(clip, "style") == []
 
 
 # --- the cache --------------------------------------------------------------------------
 
 def test_a_second_identical_call_runs_no_generate_and_no_classifier_request(classifier):
-    classifier.style = lambda fragment: 0.99 if fragment == "masterpiece" else 0.1
-    clip = FakeTagClip()
+    clip = FakeTagClip(prompt_tags_reply="moon")
     preset = a_tags_preset(prompt="masterpiece, the moon", style="Name the style.")
     source = torch.rand(1, 16, 32, 3)
 
@@ -621,8 +764,9 @@ def test_a_changed_strip_size_or_threshold_runs_the_tile_again(classifier, monke
     run(clip, a_tags_preset(), source=source)
     run(clip, a_tags_preset(tile_tags_verification_threshold=0.6), source=source)
     run(clip, a_tags_preset(tile_tags_position_threshold=0.6), source=source)
+    run(clip, a_tags_preset(prompt_tags_verification_threshold=0.6), source=source)
 
-    assert len(propose_calls(clip)) == 4
+    assert len(propose_calls(clip)) == 5
 
 
 def test_the_cache_never_serves_one_clips_text_to_another(classifier):
@@ -642,7 +786,7 @@ def run_trace(clip, preset, tiles=(TILE_A,), source=None, **kwargs):
     return tags.generate_tag_trace(clip, source, [Tile(rect) for rect in tiles], preset, **kwargs)
 
 
-TRACE_PROPOSAL = "moon, objects, a red apple, Red Apple, herbs, hanging dried herbs, wooden table"
+TRACE_PROPOSAL = "moon, objects, a red apple, Red Apple, herbs, hanging dried herbs, wooden table, night"
 TRACE_PRESENCE = {
     "moon": ((0.9, 0.1, 0.1), (0.1, 0.1, 0.9)),
     "red apple": ((0.1, 0.1, 0.9), (0.9, 0.2, 0.9)),
@@ -653,17 +797,18 @@ TRACE_PRESENCE = {
 def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
     classifier.noul_at = scripted_strips(TRACE_PRESENCE, whole={"wooden table": 0.2})
-    clip = FakeTagClip(proposal=TRACE_PROPOSAL)
+    classifier.other = lambda tag: 0.95 if tag == "night" else 0.0
+    clip = FakeTagClip(proposal=TRACE_PROPOSAL, prompt_tags_reply="moon")
 
     tag_run = run_trace(clip, a_tags_preset(prompt="the moon"), source=coordinate_source())
 
     trace = tag_run.tiles[0][0]
     assert trace.reply == TRACE_PROPOSAL
     assert trace.proposed == ("moon", "objects", "a red apple", "red apple", "herbs", "hanging dried herbs",
-                              "wooden table")
+                              "wooden table", "night")
     assert trace.candidates == ("moon", "red apple", "herbs", "hanging dried herbs", "wooden table")
     assert trace.origins == ("both", "model", "model", "model", "model")
-    assert trace.dropped == (("objects", "category noun"), ("red apple", "repeat"))
+    assert trace.dropped == (("objects", "category noun"), ("red apple", "repeat"), ("night", "not a thing"))
     assert trace.scores == (0.95, 0.95, 0.95, 0.95, 0.2)
     assert trace.verified == ("moon", "red apple", "herbs", "hanging dried herbs")
     assert trace.kept == ("moon", "red apple", "hanging dried herbs")
@@ -672,20 +817,20 @@ def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     assert trace.terms == ("top-right", "bottom", "")
     assert trace.text == "moon top-right, red apple bottom, hanging dried herbs"
     assert tag_run.style_texts == ("",)
-    assert tag_run.prompt == tags.PromptTrace(fragments=("the moon",), style_p=(0.0,),
-                                              subjects=("the moon",), styles=())
+    assert tag_run.prompt == tags.PromptTrace(reply="moon", listed=("moon",), p_other=(0.0,), tags=("moon",))
 
 
-def test_the_merge_records_every_item_over_the_cap():
-    proposed = [f"thing {n}" for n in range(MAX_CANDIDATES + 2)]
+def test_the_merge_records_every_item_over_the_cap_and_never_drops_a_model_tag_for_a_prompt_tag():
+    cap = tags.MAX_MERGED_TAGS
+    proposed = [f"thing {n}" for n in range(cap + 2)]
 
-    candidates, origins, dropped = tags.merge_trace(["a lantern"], proposed)
+    candidates, origins, dropped = tags.merge_trace(proposed, ["a lantern"])
 
-    assert len(candidates) == MAX_CANDIDATES
-    assert origins == ("prompt",) + ("model",) * (MAX_CANDIDATES - 1)
-    assert dropped == tuple((f"thing {n}", "over the cap") for n in range(MAX_CANDIDATES - 1,
-                                                                         MAX_CANDIDATES + 2))
-    assert tags.merge_candidates(["a lantern"], proposed) == list(candidates)
+    assert cap == 64
+    assert candidates == tuple(proposed[:cap])
+    assert origins == ("model",) * cap
+    assert dropped == ((f"thing {cap}", "over the cap"), (f"thing {cap + 1}", "over the cap"),
+                       ("lantern", "over the cap"))
 
 
 def test_locate_off_makes_no_strip_request_and_writes_no_term(classifier):
@@ -702,27 +847,26 @@ def test_locate_off_makes_no_strip_request_and_writes_no_term(classifier):
         assert trace.text == "red apple, wooden table"
 
 
-def test_the_run_records_the_style_caption_and_the_fragment_sort(classifier):
-    scores = {"masterpiece": 0.99, "85mm": 0.95, "the moon": 0.4}
-    classifier.style = lambda fragment: scores[fragment]
-    prompt = "masterpiece, 85mm, the moon"
+def test_the_run_records_the_style_caption_and_the_prompt_tags(classifier):
+    classifier.other = lambda tag: 0.95 if tag == "city" else 0.0
+    prompt = "masterpiece, 85mm, the moon over a city"
+    reply = "moon, city, skyline"
 
-    with_caption = run_trace(FakeTagClip(), a_tags_preset(prompt=prompt, style="Name the style."))
-    without_caption = run_trace(FakeTagClip(), a_tags_preset(prompt=prompt))
+    with_caption = run_trace(FakeTagClip(prompt_tags_reply=reply),
+                             a_tags_preset(prompt=prompt, style="Name the style."))
+    without_caption = run_trace(FakeTagClip(prompt_tags_reply=reply), a_tags_preset(prompt=prompt))
 
-    sort = tags.PromptTrace(fragments=("masterpiece", "85mm", "the moon"), style_p=(0.99, 0.95, 0.4),
-                            subjects=("the moon",), styles=("masterpiece", "85mm"))
+    prompt_tags = tags.PromptTrace(reply=reply, listed=("moon", "city"), p_other=(0.0, 0.95), tags=("moon",))
     assert with_caption.style_texts == ("Oil painting.",)
-    assert with_caption.prompt == sort
+    assert with_caption.prompt == prompt_tags
     assert without_caption.style_texts == ("",)
-    assert without_caption.prompt == sort
-    # The subject fragment joins the candidates first and no style fragment joins them.
-    assert with_caption.tiles[0][0].candidates == ("moon", "red apple", "wooden table")
+    assert without_caption.prompt == prompt_tags
+    # The kept prompt tag joins the candidates after the model's tags and the dropped one never does.
+    assert with_caption.tiles[0][0].candidates == ("red apple", "wooden table", "moon")
 
 
 def test_the_set_and_the_trace_share_one_cache_keyed_on_locate(classifier):
-    classifier.style = lambda fragment: 0.99 if fragment == "masterpiece" else 0.1
-    clip = FakeTagClip()
+    clip = FakeTagClip(prompt_tags_reply="moon")
     preset = a_tags_preset(prompt="masterpiece, the moon", style="Name the style.")
     source = torch.rand(1, 16, 32, 3)
 
@@ -756,15 +900,12 @@ def test_a_changed_caption_size_or_style_budget_writes_a_new_style_caption(class
     assert len(propose_calls(clip)) == 1
 
 
-def test_the_tile_tags_question_is_the_request_without_the_template():
-    no_prompt_text = dataclasses.replace(a_tags_preset(prompt="a cat"), tile_tags_with_prompt_instruction="")
-
-    assert tags.tile_tags_question(a_tags_preset()) == PROPOSE
-    assert tags.tile_tags_question(a_tags_preset(prompt="a cat")) == (
-        "This image was made from the prompt: a cat\n" + PROPOSE)
-    assert tags.tile_tags_question(no_prompt_text) == PROPOSE
-    assert tags.propose_text(a_tags_preset(prompt="a cat")) == tags.PROPOSE_TEMPLATE.format(
-        instruction=tags.tile_tags_question(a_tags_preset(prompt="a cat")))
+def test_the_propose_request_never_carries_the_prompt_and_the_prompt_tags_request_does():
+    assert tags.propose_text(a_tags_preset(prompt="a cat")) == tags.propose_text(a_tags_preset()) == (
+        tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE))
+    assert tags.prompt_tags_text(a_tags_preset(prompt="a cat {on} a mat")) == (
+        "<|im_start|>user\nList the things this prompt names: a cat {on} a mat<|im_end|>\n"
+        "<|im_start|>assistant\n")
 
 
 # --- the empty verification statement --------------------------------------------------
@@ -776,7 +917,7 @@ def test_an_empty_verification_statement_keeps_every_candidate_unverified(classi
     tag_run = run_trace(clip, preset)
 
     trace = tag_run.tiles[0][0]
-    assert classifier.requests == []
+    assert nouls(classifier) == []
     assert trace.candidates == ("herbs", "hanging dried herbs", "jar")
     assert trace.scores == (None, None, None)
     assert trace.verified == trace.candidates
@@ -842,12 +983,12 @@ def test_an_unfilled_prompt_placeholder_is_refused_before_any_generate(classifie
 
 
 @pytest.mark.parametrize("key", ["tile_tags_instruction", "tile_tags_verification_statement"])
-def test_a_prompt_placeholder_outside_the_with_prompt_instruction_is_refused_before_any_generate(classifier, key):
+def test_a_prompt_placeholder_outside_the_prompt_tags_instruction_is_refused_before_any_generate(classifier, key):
     clip = FakeTagClip()
     preset = dataclasses.replace(a_tags_preset(prompt="a cat"), **{key: "{TAG} from {PROMPT}"})
 
     with pytest.raises(RuntimeError, match=rf"'tags' carries \{{PROMPT\}} in its {key}, which only "
-                                           r"tile_tags_with_prompt_instruction takes"):
+                                           r"prompt_tags_instruction takes"):
         run(clip, preset)
     assert clip.generate_calls == []
 
@@ -891,6 +1032,10 @@ def test_a_missing_library_fails_before_any_generate(classifier, monkeypatch):
 
 def test_every_tuning_value_is_the_measured_one():
     assert tags.VL_MAX_PIXELS == 1024 * 1024
-    assert tags.STYLE_THRESHOLD == 0.9
+    assert tags.MAX_PROPOSED_TAGS == 25
+    assert tags.MAX_MERGED_TAGS == 64
+    assert tags.PROMPT_TAGS_MAX_TOKENS == 256
+    assert tags.UNGROUNDED_STREAK == 2
+    assert tags.THING_THRESHOLD == 0.9
     assert tags.STRIP_MEGAPIXELS == 0.25
     assert sorted(tags.CATEGORY_NOUNS) == ["animals", "clothing", "materials", "objects", "people", "setting"]

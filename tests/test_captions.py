@@ -204,20 +204,29 @@ def test_settings_toml_ships_the_owner_tested_wording():
             "clothing, materials, and the setting. Use short lowercase noun phrases separated by "
             "commas. List each thing once. Do not list moods, styles, or ideas. Output only the "
             "tags."),
-        "tile_tags_with_prompt_instruction": (
-            "This image was made from the prompt: {PROMPT}\n"
-            "Use the prompt's words for the things the image shows.\n\n"),
+        "prompt_tags_instruction": (
+            "This is a prompt for an image:\n{PROMPT}\n\nList the physical things the prompt "
+            "names that could be pointed at in the image: objects, people, animals, plants, "
+            "clothing, materials, buildings and parts of the scene. Use short lowercase noun "
+            "phrases of one to four words, separated by commas. Keep each thing's own descriptive "
+            "words, such as its color. Leave out places and settings, actions, sizes, moods, the "
+            "image's style, medium, quality, camera and lighting, artist names and position words. "
+            "List each thing once. Output only the list."),
         "tile_tags_verification_statement": "This image visibly contains {TAG}",
         # The owner's 8K storm sky tile of 2026-09-24: at 0.5 a bay and buildings the tile
         # lacks grew a skyline in the clouds, and at 0.9 on both they were dropped.
         "tile_tags_verification_threshold": 0.9,
+        # tests-AB/tags-bench-log.md: a prompt tag the tile's own list lacks passes as a near
+        # name for what is there below 0.9999.
+        "prompt_tags_verification_threshold": 0.9999,
         "tile_tags_position_threshold": 0.9,
         "global_style_instruction": (
             "Concise prose containing only the style of media used and the general style within "
             "that type of media."),
         "global_style_max_tokens": 768,
     }
-    assert (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_TAGS_POSITION_THRESHOLD) == (0.9, 0.9)
+    assert (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_TAGS_POSITION_THRESHOLD,
+            captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD) == (0.9, 0.9, 0.9999)
     # The shipped file is that one tags preset and nothing else, so it is the default.
     assert settings.presets == {"tags": examples["tags"]}
 
@@ -450,9 +459,10 @@ TAGS_PRESET = (
     '[presets.tagged]\n'
     'tile_text = "tags"\n'
     'tile_tags_instruction = "list the things"\n'
-    'tile_tags_with_prompt_instruction = "Made from: {PROMPT}\\n"\n'
+    'prompt_tags_instruction = "List the things in: {PROMPT}"\n'
     'tile_tags_verification_statement = "It shows {TAG}"\n'
     'tile_tags_verification_threshold = 0.8\n'
+    'prompt_tags_verification_threshold = 0.95\n'
     'tile_tags_position_threshold = 0.7\n'
     'global_style_instruction = "the style"\n'
     'global_style_max_tokens = 512\n')
@@ -467,9 +477,10 @@ def test_a_tags_preset_loads_and_resolves_to_its_tags_fields(tmp_path, monkeypat
     assert preset.label == "tagged"
     assert preset.kind == captions.TILE_TEXT_TAGS
     assert preset.tile_tags_instruction == "list the things"
-    assert preset.tile_tags_with_prompt_instruction == "Made from: {PROMPT}\n"
+    assert preset.prompt_tags_instruction == "List the things in: {PROMPT}"
     assert preset.tile_tags_verification_statement == "It shows {TAG}"
-    assert (preset.tile_tags_verification_threshold, preset.tile_tags_position_threshold) == (0.8, 0.7)
+    assert (preset.tile_tags_verification_threshold, preset.prompt_tags_verification_threshold,
+            preset.tile_tags_position_threshold) == (0.8, 0.95, 0.7)
     assert preset.style_instruction == "the style"
     assert preset.style_max_tokens == 512
     # A tags preset asks no tile question, and its prompt is empty until with_prompt runs.
@@ -487,7 +498,7 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
     assert implicit == explicit
     assert implicit.kind == captions.TILE_TEXT_CAPTION
     assert implicit.tile_instruction == "ask about the tile"
-    assert (implicit.tile_tags_instruction, implicit.tile_tags_with_prompt_instruction,
+    assert (implicit.tile_tags_instruction, implicit.prompt_tags_instruction,
             implicit.tile_tags_verification_statement, implicit.prompt) == ("", "", "", "")
 
 
@@ -506,24 +517,30 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
     (TAGS_SETTINGS.replace("global_style_max_tokens = 512", "global_style_max_tokens = 0"),
      "preset 'tagged' key global_style_max_tokens in .* between 1 and 4096"),
     (TAGS_SETTINGS.replace("{PROMPT}", "the prompt"),
-     r"preset 'tagged' key tile_tags_with_prompt_instruction in .* does not hold \{PROMPT\}"),
+     r"preset 'tagged' key prompt_tags_instruction in .* does not hold \{PROMPT\}"),
     (TAGS_SETTINGS.replace("{TAG}", "a tag"),
      r"preset 'tagged' key tile_tags_verification_statement in .* does not hold \{TAG\}"),
     (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7\n", ""),
      r"preset 'tagged' in .* is missing \['tile_tags_position_threshold'\]"),
+    (TAGS_SETTINGS.replace('prompt_tags_instruction = "List the things in: {PROMPT}"\n', ""),
+     r"preset 'tagged' in .* is missing \['prompt_tags_instruction'\]"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95\n", ""),
+     r"preset 'tagged' in .* is missing \['prompt_tags_verification_threshold'\]"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 1.5"),
+     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be between 0 and 1, got 1.5"),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", 'tile_tags_verification_threshold = "high"'),
      "preset 'tagged' key tile_tags_verification_threshold in .* must be of type float, got str"),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 1.5"),
      "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be between 0 and 1, got 1.5"),
     (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7", "tile_tags_position_threshold = -0.1"),
      "preset 'tagged' key tile_tags_position_threshold in .* is a score and must be between 0 and 1, got -0.1"),
-    # {PROMPT} belongs in tile_tags_with_prompt_instruction only.
+    # {PROMPT} belongs in prompt_tags_instruction only.
     (TAGS_SETTINGS.replace('"list the things"', '"list the things in {PROMPT}"'),
      r"preset 'tagged' key tile_tags_instruction in .* holds \{PROMPT\}, which only "
-     r"tile_tags_with_prompt_instruction takes"),
+     r"prompt_tags_instruction takes"),
     (TAGS_SETTINGS.replace('"It shows {TAG}"', '"It shows {TAG} from {PROMPT}"'),
      r"preset 'tagged' key tile_tags_verification_statement in .* holds \{PROMPT\}, which only "
-     r"tile_tags_with_prompt_instruction takes"),
+     r"prompt_tags_instruction takes"),
     # The tags keys are unknown on a caption preset.
     (GOOD_SETTINGS + 'tile_tags_verification_statement = "It shows {TAG}"\n',
      r"preset 'demo' in .* carries unknown keys \['tile_tags_verification_statement'\] for tile_text 'caption'"),
@@ -538,7 +555,6 @@ def test_a_broken_tags_preset_is_a_named_hard_error(tmp_path, content, message):
 
 @pytest.mark.parametrize(("old", "new"), [
     ("propose_instruction", "tile_tags_instruction"),
-    ("prompt_anchor", "tile_tags_with_prompt_instruction"),
     ("verify_statement", "tile_tags_verification_statement"),
 ])
 def test_an_old_tags_key_name_fails_naming_its_new_name_and_the_file(tmp_path, old, new):
@@ -552,15 +568,30 @@ def test_an_old_tags_key_name_fails_naming_its_new_name_and_the_file(tmp_path, o
         captions.load_settings(path)
 
 
-def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_with_prompt_template():
-    # The with-prompt text is placed first only when the prompt is not empty, so it stays a
+@pytest.mark.parametrize("old", ["prompt_anchor", "tile_tags_with_prompt_instruction"])
+def test_a_replaced_tags_key_fails_naming_the_keys_to_copy_in_its_place(tmp_path, old):
+    # A user's own copy from before the replacement also lacks the threshold key, and the
+    # replacement is checked first, so the message names the fix rather than a missing key.
+    path = tmp_path / "settings.user.toml"
+    path.write_text(TAGS_SETTINGS.replace("prompt_tags_instruction = ", f"{old} = ")
+                    .replace("prompt_tags_verification_threshold = 0.95\n", ""))
+
+    with pytest.raises(RuntimeError, match=rf"preset 'tagged' in .*settings\.user\.toml carries a tags "
+                                           rf"key this version replaced \({old} by prompt_tags_instruction\)\. "
+                                           r".*copy prompt_tags_instruction and "
+                                           r"prompt_tags_verification_threshold from settings\.toml"):
+        captions.load_settings(path)
+
+
+def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_prompt_tags_template():
+    # The prompt tags question is asked only when the prompt is not empty, so it stays a
     # template here.
     preset = captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS, label="tagged",
         vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
         style_instruction="Style of {PROMPT}.", style_max_tokens=768,
         kind=captions.TILE_TEXT_TAGS, tile_tags_instruction="list",
-        tile_tags_with_prompt_instruction="From: {PROMPT}\n", tile_tags_verification_statement="It shows {TAG}")
+        prompt_tags_instruction="List the things in: {PROMPT}", tile_tags_verification_statement="It shows {TAG}")
 
     filled = captions.with_prompt(preset, "  a fox\n")
 

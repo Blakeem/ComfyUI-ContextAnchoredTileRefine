@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from test_captions import FakeCaptionClip
-from test_tags import ANCHOR, PROPOSE, VERIFY, FakeClassifier, FakeTagClip, strip_requests
+from test_tags import PROMPT_TAGS, PROPOSE, VERIFY, FakeClassifier, FakeTagClip, calls_of, strip_requests
 
 from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine
@@ -216,6 +216,7 @@ CAPTION_INPUTS = {
     "global_style_max_tokens": 768,
     "tile_tags_verification_threshold": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD,
     "tile_tags_position_threshold": captions.SHIPPED_TAGS_POSITION_THRESHOLD,
+    "prompt_tags_verification_threshold": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD,
     "tile_caption_instruction": "name the objects",
 }
 
@@ -223,14 +224,14 @@ CAPTION_INPUTS = {
 TAGS_SOCKETS = {
     "tile_caption_instruction": None,
     "tile_tags_instruction": PROPOSE,
-    "tile_tags_with_prompt_instruction": ANCHOR,
+    "prompt_tags_instruction": PROMPT_TAGS,
     "tile_tags_verification_statement": VERIFY,
     "global_style_instruction": "name the medium",
     "global_style_max_tokens": 64,
 }
 
 TEXT_SOCKETS = ("global_style_instruction", "tile_caption_instruction", "tile_tags_instruction",
-                "tile_tags_with_prompt_instruction", "tile_tags_verification_statement")
+                "prompt_tags_instruction", "tile_tags_verification_statement")
 
 
 def _caption_layout():
@@ -256,10 +257,10 @@ def _caption(clip, layout=None, image=None, **overrides):
     if image is None:
         width, height = test_layout.target_size
         image = torch.rand(1, height, width, 3)
-    written, tile_texts, tiles, fragments, listed, verified, final = (
+    written, tile_texts, tiles, prompt_tags, listed, verified, final = (
         ContextAnchoredTileTestCaptions().caption_tiles(image=image, layout=test_layout, clip=clip,
                                                         **connected))
-    return SimpleNamespace(written=written, tile_texts=tile_texts, tiles=tiles, fragments=fragments,
+    return SimpleNamespace(written=written, tile_texts=tile_texts, tiles=tiles, prompt_tags=prompt_tags,
                            listed=listed, verified=verified, final=final)
 
 
@@ -278,7 +279,8 @@ def test_the_inputs_are_the_widgets_then_the_text_sockets():
     assert list(inputs["required"]) == [
         "image", "layout", "clip", "tiles", "with_neighbors", "position_terms",
         "caption_megapixels", "tile_caption_max_tokens", "global_style_max_tokens",
-        "tile_tags_verification_threshold", "tile_tags_position_threshold"]
+        "tile_tags_verification_threshold", "tile_tags_position_threshold",
+        "prompt_tags_verification_threshold"]
     assert list(inputs["optional"]) == ["prompt", *TEXT_SOCKETS]
 
 
@@ -358,7 +360,7 @@ def test_the_captions_node_asks_for_its_node_id():
 def test_the_captions_node_returns_the_captions_the_tile_texts_the_tiles_and_four_debug_texts():
     assert ContextAnchoredTileTestCaptions.RETURN_TYPES == ("CATR_CAPTIONS",) + ("STRING",) * 6
     assert ContextAnchoredTileTestCaptions.RETURN_NAMES == (
-        "captions", "tile_texts", "tiles", "prompt_fragments", "tags_listed", "tags_verified",
+        "captions", "tile_texts", "tiles", "prompt_tags", "tags_listed", "tags_verified",
         "tags_final")
 
 
@@ -382,7 +384,7 @@ def test_both_tile_sockets_on_is_refused_naming_both(comfy_stubs):
 
 
 @pytest.mark.parametrize(("name", "value"), [
-    ("tile_tags_with_prompt_instruction", ANCHOR),
+    ("prompt_tags_instruction", PROMPT_TAGS),
     ("tile_tags_verification_statement", VERIFY),
 ])
 def test_a_tags_socket_on_in_the_caption_kind_is_refused_naming_it(comfy_stubs, name, value):
@@ -396,7 +398,7 @@ def test_a_tags_socket_on_in_the_caption_kind_is_refused_naming_it(comfy_stubs, 
 def test_a_whitespace_tags_socket_is_off_in_the_caption_kind(comfy_stubs):
     clip = _asking_clip()
 
-    result = _caption(clip, tile_tags_with_prompt_instruction="  ", tile_tags_verification_statement="\n")
+    result = _caption(clip, prompt_tags_instruction="  ", tile_tags_verification_statement="\n")
 
     assert result.written.kind == captions.TILE_TEXT_CAPTION
     assert len(clip.generate_calls) == 2
@@ -668,9 +670,9 @@ def test_the_captions_node_reports_the_settings_file_in_its_cache_key():
 def test_a_caption_run_fills_the_four_debug_outputs_with_a_title_and_one_sentence(comfy_stubs):
     result = _caption(_asking_clip())
 
-    assert result.fragments == (
-        f"{testing.FRAGMENTS_TITLE}\nThe caption kind reads the prompt only through {{PROMPT}} "
-        "in its instructions, so no fragment is sorted.")
+    assert result.prompt_tags == (
+        f"{testing.PROMPT_TAGS_TITLE}\nThe caption kind reads the prompt only through {{PROMPT}} "
+        "in its instructions, so no things are listed from it.")
     for text, title in ((result.listed, "tags_listed: "), (result.verified, "tags_verified: "),
                         (result.final, "tags_final: ")):
         assert text.startswith(title)
@@ -683,16 +685,18 @@ def test_a_caption_run_fills_the_four_debug_outputs_with_a_title_and_one_sentenc
 # --- the tags kind ---------------------------------------------------------------------
 
 # One scene every tags stage acts on: "objects" is a category noun, "the moon" is a prompt
-# subject the model also lists, "wooden spoon" fails verification and "apple" is a subset of
-# "red apple". The prompt's "oil painting" is a style fragment.
+# tag the model also lists, "lantern" is a prompt tag it does not list and misses the prompt
+# threshold, "wooden spoon" fails verification and "apple" is a subset of "red apple". The
+# prompt's "oil painting" fails the thing check.
 TAG_PROPOSAL = "red apple, objects, the moon, wooden spoon, apple"
-TAG_PROMPT = "the moon, oil painting"
+TAG_PROMPT = "the moon, a lantern, oil painting"
+TAG_PROMPT_TAGS = "moon, lantern, oil painting"
 
 
 @pytest.fixture
 def tag_classifier(comfy_stubs, monkeypatch):
     fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.95,
-                          style=lambda fragment: 0.97 if fragment == "oil painting" else 0.1)
+                          other=lambda tag: 0.97 if tag == "oil painting" else 0.1)
     monkeypatch.setattr(tags, "build_classifier", lambda clip: fake)
     return fake
 
@@ -700,7 +704,7 @@ def tag_classifier(comfy_stubs, monkeypatch):
 def _tag_run(**overrides):
     inputs = dict(TAGS_SOCKETS, prompt=TAG_PROMPT)
     inputs.update(overrides)
-    clip = FakeTagClip(proposal=TAG_PROPOSAL)
+    clip = FakeTagClip(proposal=TAG_PROPOSAL, prompt_tags_reply=TAG_PROMPT_TAGS)
     return clip, _caption(clip, **inputs)
 
 
@@ -709,24 +713,25 @@ def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
 
     assert result.written.preset == "Tile Test: Captions"
     assert result.written.kind == captions.TILE_TEXT_TAGS
-    assert result.written.captions == (("moon, red apple",),) * 2
+    assert result.written.captions == (("red apple, moon",),) * 2
     assert result.written.style == ("Oil painting.",)
     assert result.tile_texts.startswith(
         "tile_texts: tags kind, 2 tiles\n"
         f"{TILE_TEXTS_SENTENCE}\n\n"
         "=== style caption (placed on top of every tile's text) ===\n  Oil painting.\n\n")
     # The style caption is asked with global_style_max_tokens.
-    style_calls = [call for call in clip.generate_calls if not call["propose"]]
+    style_calls = calls_of(clip, "style")
     assert [(call["text"], call["max_length"]) for call in style_calls] == [("name the medium", 64)]
-    propose = [call for call in clip.generate_calls if call["propose"]]
-    assert propose[0]["text"] == tags.PROPOSE_TEMPLATE.format(
-        instruction=ANCHOR.replace("{PROMPT}", TAG_PROMPT) + PROPOSE)
+    (prompt_tags_call,) = calls_of(clip, "prompt tags")
+    assert prompt_tags_call["text"] == tags.PROMPT_TAGS_TEMPLATE.format(
+        instruction=PROMPT_TAGS.replace("{PROMPT}", TAG_PROMPT))
+    assert calls_of(clip, "propose")[0]["text"] == tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
 
 
 def test_the_tags_kind_ignores_the_caption_budget_a_tags_settings_node_outputs(tag_classifier):
     _clip, result = _tag_run(tile_caption_max_tokens=0)
 
-    assert result.written.captions == (("moon, red apple",),) * 2
+    assert result.written.captions == (("red apple, moon",),) * 2
 
 
 def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_classifier, monkeypatch):
@@ -741,27 +746,49 @@ def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_cla
     assert set(seen) <= {250_000, tags.VL_MAX_PIXELS, round(tags.STRIP_MEGAPIXELS * 1_000_000)}
 
 
-def test_the_prompt_fragments_output_prints_each_fragment_with_its_sort(tag_classifier):
+PROMPT_TAGS_SENTENCE = (
+    "The VL model lists the things the prompt names, a listed tag with a word the prompt lacks is "
+    "dropped, and the thing check drops a tag at p(other) 0.90 or above. The kept tags join every "
+    "tile's candidates.")
+
+
+def test_the_prompt_tags_output_prints_the_question_the_reply_and_each_tag_with_its_thing_check(tag_classifier):
     _clip, result = _tag_run()
 
-    assert result.fragments == (
-        f"{testing.FRAGMENTS_TITLE}\n"
-        "A subject fragment joins every tile's tag candidates, and a fragment at p(style) 0.90 "
-        "or above is style and is dropped.\n\n"
-        "=== each fragment with its p(style) and its sort ===\n"
-        "  0.10  subject  the moon\n"
-        "  0.97  style    oil painting")
+    assert result.prompt_tags == (
+        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n"
+        "=== question sent to the VL model once per picture ===\n"
+        "  <|im_start|>user\n"
+        f"  List the things this prompt names: {TAG_PROMPT}<|im_end|>\n"
+        "  <|im_start|>assistant\n"
+        "  \n\n"
+        "=== VL model reply, verbatim ===\n"
+        f"  {TAG_PROMPT_TAGS}\n\n"
+        "=== each listed tag with its p(other) ===\n"
+        "  kept     0.10  moon\n"
+        "  kept     0.10  lantern\n"
+        "  dropped  0.97  oil painting")
 
 
 @pytest.mark.parametrize("prompt", [None, "  "])
-def test_the_prompt_fragments_output_says_no_prompt_connected(tag_classifier, prompt):
-    _clip, result = _tag_run(prompt=prompt, global_style_instruction=None)
+def test_the_prompt_tags_output_says_no_prompt_connected(tag_classifier, prompt):
+    clip, result = _tag_run(prompt=prompt, global_style_instruction=None)
 
-    assert result.fragments.endswith("=== each fragment with its p(style) and its sort ===\n"
-                                     "  no prompt connected")
+    assert result.prompt_tags == (
+        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n=== prompt ===\n  no prompt connected")
+    assert calls_of(clip, "prompt tags") == []
     assert result.written.style is None
     assert "  off, global_style_instruction is not connected" in result.tile_texts
 
+
+def test_an_unconnected_prompt_tags_instruction_lists_no_things_from_the_connected_prompt(tag_classifier):
+    clip, result = _tag_run(prompt_tags_instruction=None)
+
+    assert result.prompt_tags == (
+        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n"
+        "=== prompt ===\n  prompt_tags_instruction is not connected")
+    assert calls_of(clip, "prompt tags") == []
+    assert result.written.captions == (("red apple, moon",),) * 2
 
 def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its_tags(tag_classifier):
     _clip, result = _tag_run()
@@ -772,10 +799,9 @@ def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its
             "    red apple, objects, the moon, wooden spoon, apple")
     assert result.listed == (
         "tags_listed: the tags the VL model listed for each tile\n"
-        "The VL model is asked the question below about each tile, and its reply is split into "
-        "tags.\n\n"
+        "The VL model is asked the question below about each tile, its list is stopped after 25 "
+        "tags, and its reply is split into tags.\n\n"
         "=== question sent to the VL model for every tile ===\n"
-        f"  This image was made from the prompt: {TAG_PROMPT}\n"
         f"  {PROPOSE}\n\n"
         f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
         f"=== tile 1 (row 0, column 1) ===\n{tile}")
@@ -786,6 +812,7 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 
     tile = ("  from the prompt\n"
             "    kept     0.95  moon, also listed by the VL model\n"
+            "    dropped  0.95  lantern\n"
             "  from the VL model\n"
             "    kept     0.95  red apple\n"
             "    dropped  0.20  wooden spoon\n"
@@ -794,8 +821,9 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
             "    objects: category noun")
     assert result.verified == (
         "tags_verified: each candidate tag scored on its tile\n"
-        "Each candidate is scored with tile_tags_verification_statement on its tile, and a score "
-        "of 0.90 or above (tile_tags_verification_threshold) keeps it.\n\n"
+        "Each candidate is scored with tile_tags_verification_statement on its tile. A tag the VL "
+        "model listed is kept at 0.90 or above (tile_tags_verification_threshold), and a prompt "
+        "tag it did not list at 0.9999 or above (prompt_tags_verification_threshold).\n\n"
         f"=== tile 0 (row 0, column 0) ===\n{tile}\n\n"
         f"=== tile 1 (row 0, column 1) ===\n{tile}")
 
@@ -810,10 +838,10 @@ def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_tex
             "    apple\n"
             "  positions of the kept tags. A strip holds a tag at 0.90 or above "
             "(tile_tags_position_threshold)\n"
-            f"    moon: {no_term}\n{strips}"
             f"    red apple: {no_term}\n{strips}"
+            f"    moon: {no_term}\n{strips}"
             "  tile text\n"
-            "    moon, red apple")
+            "    red apple, moon")
     assert result.final == (
         "tags_final: the kept tags of each tile, their positions and the tile text\n"
         "A kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on "
@@ -824,19 +852,23 @@ def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_tex
         f"=== tile 1 (row 0, column 1) ===\n{tile}")
 
 
-def test_the_two_threshold_widgets_reach_the_tags_pass(tag_classifier):
+def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
     # Every kept tag scores 0.95 on its tile and on every strip.
     _clip, strict_verify = _tag_run(tile_tags_verification_threshold=0.96)
     _clip, strict_strips = _tag_run(tile_tags_position_threshold=0.96)
+    _clip, loose_prompt = _tag_run(prompt_tags_verification_threshold=0.9)
 
     assert strict_verify.written.captions == (("",),) * 2
     assert "    dropped  0.95  red apple" in strict_verify.verified
     assert strict_strips.written.captions == (("",),) * 2
     assert "    red apple: dropped, no strip holds it\n" in strict_strips.final
+    assert loose_prompt.written.captions == (("red apple, moon, lantern",),) * 2
+    assert "    kept     0.95  lantern" in loose_prompt.verified
 
 
 @pytest.mark.parametrize(("name", "value"), [
-    ("tile_tags_verification_threshold", 1.5), ("tile_tags_position_threshold", -0.1)])
+    ("tile_tags_verification_threshold", 1.5), ("tile_tags_position_threshold", -0.1),
+    ("prompt_tags_verification_threshold", 1.5)])
 def test_a_linked_threshold_outside_0_to_1_is_refused_before_any_request(tag_classifier, name, value):
     with pytest.raises(ValueError, match=f"was given {name} {value}, and it is a score between 0 and 1"):
         _tag_run(**{name: value})
@@ -852,9 +884,9 @@ def test_position_terms_off_makes_no_strip_request_and_says_so(tag_classifier):
     _clip, result = _tag_run(position_terms=False)
 
     assert strip_requests(tag_classifier) == []
-    assert result.written.captions == (("moon, red apple",),) * 2
+    assert result.written.captions == (("red apple, moon",),) * 2
     assert ("  positions of the kept tags: off, position_terms is off\n"
-            "  tile text\n    moon, red apple") in result.final
+            "  tile text\n    red apple, moon") in result.final
 
 
 @pytest.mark.parametrize("value", [None, " "])
@@ -862,22 +894,23 @@ def test_verification_off_keeps_every_candidate_unchecked_and_says_so(tag_classi
     _clip, result = _tag_run(tile_tags_verification_statement=value)
 
     assert [request for request in tag_classifier.requests if request["kind"] == "noul"] == []
-    assert result.written.captions == (("moon, red apple, wooden spoon",),) * 2
+    assert result.written.captions == (("red apple, moon, wooden spoon, lantern",),) * 2
     assert result.verified.split("\n")[1] == (
         "tile_tags_verification_statement is not connected, so verification is off and no "
         "candidate was scored.")
     assert ("=== tile 0 (row 0, column 0) ===\n"
-            "  every candidate was kept unchecked (4): moon, red apple, wooden spoon, apple") in result.verified
+            "  every candidate was kept unchecked (5): red apple, moon, wooden spoon, apple, lantern") in result.verified
     assert ("  positions of the kept tags: off, tile_tags_verification_statement is not "
             "connected") in result.final
 
 
-@pytest.mark.parametrize(("prompt", "anchor"), [(TAG_PROMPT, None), (None, ANCHOR), ("  ", ANCHOR)])
-def test_the_tags_question_goes_alone_without_a_prompt_or_without_the_prompt_socket(tag_classifier, prompt, anchor):
-    clip, _result = _tag_run(prompt=prompt, tile_tags_with_prompt_instruction=anchor)
+@pytest.mark.parametrize(("prompt", "asked"), [(TAG_PROMPT, 1), (None, 0), ("  ", 0)])
+def test_the_prompt_never_reaches_the_tile_question_and_is_asked_once_when_connected(tag_classifier, prompt, asked):
+    clip, _result = _tag_run(prompt=prompt)
 
-    propose = [call for call in clip.generate_calls if call["propose"]]
-    assert propose[0]["text"] == tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
+    propose = calls_of(clip, "propose")
+    assert [call["text"] for call in propose] == [tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)] * 2
+    assert len(calls_of(clip, "prompt tags")) == asked
 
 
 def test_the_debug_sections_follow_the_listing_order(tag_classifier):
@@ -897,14 +930,14 @@ def test_the_debug_sections_follow_the_listing_order(tag_classifier):
 
 
 @pytest.mark.parametrize(("inputs", "message"), [
-    ({"tile_tags_with_prompt_instruction": "Made from the prompt."},
-     r"tile_tags_with_prompt_instruction without \{PROMPT\}"),
+    ({"prompt_tags_instruction": "List the things in the prompt."},
+     r"prompt_tags_instruction without \{PROMPT\}"),
     ({"tile_tags_verification_statement": "It shows a tag"},
      r"tile_tags_verification_statement without \{TAG\}"),
     ({"tile_tags_instruction": "Tag {PROMPT}."},
-     r"tile_tags_instruction holding \{PROMPT\}\. Only tile_tags_with_prompt_instruction carries the prompt"),
+     r"tile_tags_instruction holding \{PROMPT\}\. Only prompt_tags_instruction carries the prompt"),
     ({"tile_tags_verification_statement": "{TAG} fits {PROMPT}"},
-     r"tile_tags_verification_statement holding \{PROMPT\}\. Only tile_tags_with_prompt_instruction carries the prompt"),
+     r"tile_tags_verification_statement holding \{PROMPT\}\. Only prompt_tags_instruction carries the prompt"),
     ({"global_style_instruction": "Style of {PROMPT}.", "prompt": None},
      r"asks for \{PROMPT\} in its global_style_instruction"),
     ({"global_style_max_tokens": 0}, "was given global_style_max_tokens 0"),
@@ -922,8 +955,8 @@ def test_the_tags_kind_refuses_a_socket_it_cannot_run_before_any_request(tag_cla
 def test_the_tags_kind_needs_no_style_budget_with_the_style_socket_off(tag_classifier):
     clip, result = _tag_run(global_style_max_tokens=0, global_style_instruction=None)
 
-    assert [call for call in clip.generate_calls if not call["propose"]] == []
-    # The prompt's style fragment is dropped, never written as a style line of its own.
+    assert calls_of(clip, "style") == []
+    # The prompt's non-thing is dropped, never written as a style line of its own.
     assert result.written.style is None
 
 
@@ -1551,12 +1584,13 @@ def test_the_settings_node_has_the_preset_widget_alone():
 def test_the_settings_outputs_are_named_as_the_settings_keys_in_order():
     assert ContextAnchoredTileTestSettings.RETURN_NAMES == (
         "global_style_instruction", "global_style_max_tokens", "tile_caption_instruction",
-        "tile_caption_max_tokens", "tile_tags_instruction", "tile_tags_with_prompt_instruction",
+        "tile_caption_max_tokens", "tile_tags_instruction", "prompt_tags_instruction",
         "tile_tags_verification_statement", "caption_megapixels", "canvas_tokens", "crop_tokens",
-        "tile_tags_verification_threshold", "tile_tags_position_threshold")
+        "tile_tags_verification_threshold", "tile_tags_position_threshold",
+        "prompt_tags_verification_threshold")
     assert ContextAnchoredTileTestSettings.RETURN_TYPES == (
         "STRING", "INT", "STRING", "INT", "STRING", "STRING", "STRING", "FLOAT", "INT", "INT",
-        "FLOAT", "FLOAT")
+        "FLOAT", "FLOAT", "FLOAT")
     assert ContextAnchoredTileTestSettings.CATEGORY == "image/upscaling/tile testing"
 
 
@@ -1569,10 +1603,11 @@ def test_a_tags_preset_outputs_its_own_keys_and_empty_caption_keys():
     assert result["global_style_instruction"] == block["global_style_instruction"]
     assert result["global_style_max_tokens"] == block["global_style_max_tokens"]
     assert result["tile_tags_instruction"] == block["tile_tags_instruction"]
-    assert result["tile_tags_with_prompt_instruction"] == block["tile_tags_with_prompt_instruction"]
+    assert result["prompt_tags_instruction"] == block["prompt_tags_instruction"]
     assert result["tile_tags_verification_statement"] == block["tile_tags_verification_statement"]
     assert result["tile_tags_verification_threshold"] == block["tile_tags_verification_threshold"]
     assert result["tile_tags_position_threshold"] == block["tile_tags_position_threshold"]
+    assert result["prompt_tags_verification_threshold"] == block["prompt_tags_verification_threshold"]
     assert result["tile_caption_instruction"] == ""
     assert result["tile_caption_max_tokens"] == 0
 
@@ -1586,10 +1621,11 @@ def test_a_caption_preset_outputs_its_own_keys_and_empty_tags_keys(caption_setti
     assert result["tile_caption_max_tokens"] == block["tile_caption_max_tokens"]
     assert result["global_style_instruction"] == block["global_style_instruction"]
     assert result["global_style_max_tokens"] == block["global_style_max_tokens"]
-    for name in ("tile_tags_instruction", "tile_tags_with_prompt_instruction",
+    for name in ("tile_tags_instruction", "prompt_tags_instruction",
                  "tile_tags_verification_statement"):
         assert result[name] == ""
-    assert (result["tile_tags_verification_threshold"], result["tile_tags_position_threshold"]) == (0.0, 0.0)
+    assert (result["tile_tags_verification_threshold"], result["tile_tags_position_threshold"],
+            result["prompt_tags_verification_threshold"]) == (0.0, 0.0, 0.0)
 
 
 def test_the_vision_outputs_are_the_files_vision_table(caption_settings):
@@ -1612,7 +1648,7 @@ def test_the_placeholders_are_left_in_place(caption_settings):
 def test_the_tags_placeholders_are_left_in_place():
     result = _settings("tags")
 
-    assert captions.PROMPT_PLACEHOLDER in result["tile_tags_with_prompt_instruction"]
+    assert captions.PROMPT_PLACEHOLDER in result["prompt_tags_instruction"]
     assert captions.TAG_PLACEHOLDER in result["tile_tags_verification_statement"]
 
 

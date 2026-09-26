@@ -145,6 +145,105 @@ SCENES = {s.key: s for s in (
 )}
 PROMPT_KEYS = ("none", "short", "long")
 
+# The hold-out set: tiles and prompts no arm was tuned on. "tags" is a comma tag prompt in the
+# style of SD 1.5 and SDXL workflows, "xlong" is 450 to 650 words. Both name absent things.
+CITY2_TAGS = (
+    "masterpiece, best quality, ultra detailed, 8k, cyberpunk, city, night, skyscrapers, neon lights, "
+    "empire state building, pink spire, radio antenna, river, city lights, smoke, fog, dark sky, stars, "
+    "flying cars, rain, puddles, holograms, cinematic lighting, purple, blue, wide shot, from above, "
+    "no humans, highly detailed, sharp focus"
+)
+CITY2_XLONG = (
+    "A breathtaking cinematic aerial photograph of a vast cyberpunk metropolis at night, taken from the "
+    "top of a skyscraper high above the streets, ultra detailed, 8k, award winning, photorealistic. The "
+    "city stretches all the way to the horizon, where a wide dark river bends to the left and a long "
+    "bridge lined with orange lights crosses it. Along the far shore thousands of tiny lights glitter "
+    "like a sea of embers. In the center of the frame rises an art deco tower modeled on the Empire "
+    "State Building, its stepped crown lit in soft pink and its needle spire glowing ice blue against "
+    "the black sky. Far behind it, a very thin television tower with a red tip stands alone on the "
+    "left. On the right side of the image a sharply angled glass skyscraper with a slanted, faceted top "
+    "glows from within in violet and magenta, and above it a tall lattice radio mast is lit hot pink "
+    "from base to tip. Behind that mast, columns of white steam rise from rooftop vents and drift to "
+    "the right. A second red and white radio tower stands at the far right edge. On the far right a "
+    "tall dark building carries a huge glowing billboard with red and white letters and a white apple "
+    "logo. In the foreground, dense blocks of office towers and apartment buildings fill the lower "
+    "half of the frame, each covered in grids of lit windows in warm yellow, cold white and teal, "
+    "with a few red aircraft warning lights blinking on their roofs. A narrow avenue cuts through the "
+    "buildings on the right, glowing orange with streetlights and the tail lights of traffic. Pink and "
+    "red neon signs hang from several towers, one reading LAMOR in pink letters near the center. A "
+    "small green glowing pyramid roof sits on a tower left of center. Snow flurries drift through "
+    "the air. The sky is a deep navy with thin wisps of cloud and a few faint stars, and a soft purple "
+    "haze hangs over the skyline. Flying cars with bright headlights weave between the towers, a giant "
+    "hologram of a koi fish swims above the river, searchlight beams sweep the clouds, and a blimp "
+    "with a glowing screen floats over the bridge. Rain slicked rooftops reflect the neon, and a "
+    "crowd of people with umbrellas fills a plaza at the bottom of the image. Mood: lonely, electric, "
+    "melancholic, dreamlike, blade runner, cyberpunk 2077, ghost in the shell. Style: long exposure "
+    "night photography, shot on a Sony A7R IV, 24mm wide angle lens, f/8, deep depth of field, sharp "
+    "focus from foreground to horizon, cinematic color grading with deep blues, violet and magenta "
+    "highlights, high dynamic range, crisp details, subtle film grain, volumetric haze, light bloom, "
+    "lens flare, trending on artstation, featured on 500px, masterpiece, best quality, highly detailed, "
+    "intricate, octane render, unreal engine 5, ray tracing, hdr, 8k uhd"
+)
+STYLE_TAIL = (
+    " Rendering: masterpiece, best quality, ultra detailed, 8k uhd, hdr, sharp focus, intricate "
+    "details, physically based rendering, ray tracing, global illumination, subsurface scattering, "
+    "volumetric lighting, soft shadows, cinematic color grading, film grain, bokeh, depth of field, "
+    "award winning, trending on artstation, featured on behance, unreal engine 5, octane render, "
+    "photorealistic, hyperrealistic, studio quality, professional, vivid colors, high contrast, "
+    "dramatic composition, rule of thirds, golden ratio, masterful lighting, epic, stunning, gorgeous."
+)
+HANGAR_EXTRA = (
+    " More detail: the deck is painted with yellow hazard stripes and numbered bay markings, puddles "
+    "of coolant reflect the lights, and loose cables snake across the floor. Hover drones with "
+    "spotlights inspect the hull, a stack of spare engine nozzles sits beside a tool cart, and a "
+    "foreman with a tablet points at the ship. Behind the glass of a control tower on the left, "
+    "officers watch holographic displays. Warning lights spin orange, a banner with a golden eagle "
+    "emblem hangs from the ceiling, and a row of escape pods waits along the right wall."
+)
+DRAGON_EXTRA = (
+    " More detail: the soldiers carry round shields painted with a white tree, archers on the "
+    "rooftops draw their bows, and a cart of hay has overturned in the street. Laundry hangs between "
+    "the houses, a black cat watches from a window sill, and church bells ring in a steeple. On the "
+    "water a small rowing boat carries fishermen, and a lighthouse stands at the end of the pier. A "
+    "tattered banner with a red lion flies from the castle, and smoke rises from a blacksmith's forge."
+)
+MARKET_EXTRA = (
+    " More detail: a spice seller weighs saffron on brass scales, pyramids of oranges and lemons fill "
+    "wooden crates, and clay amphorae of olive oil stand in a row. A stray dog sniffs at a basket of "
+    "bread, a nobleman in a feathered hat haggles with a merchant, and pigeons peck between the "
+    "cobblestones. Garlands of flowers hang from a balcony, a stone well with a bucket sits by the "
+    "fountain, and a painter at an easel sketches the cathedral."
+)
+FACE_EXTRA = (
+    " More detail: her eyes are a vivid emerald green, a single tear runs down her cheek, and a thin "
+    "silver chain with a crescent moon pendant rests on her collarbone. Pale moths circle her head, a "
+    "crown of thorns and black roses sits in her hair, and rain drips from the leaves above. Behind "
+    "her an owl watches from a hollow tree, a stone angel statue with broken wings stands among the "
+    "ruins, and a stream of glowing blue water winds between the flowers."
+)
+HOLDOUT = {s.key: s for s in (
+    Scene("city2", "samples/cyberpunk-city2-8k.webp", (1, 10, 19),
+          {"none": "", "tags": CITY2_TAGS, "xlong": CITY2_XLONG}),
+    Scene("hangar8k-h", "samples/orbital-shipyard-hangar-8k.webp", (5, 18),
+          {"none": "", "tags": "masterpiece, best quality, sci-fi, spaceship, hangar, robots, workers, cranes, "
+           "sparks, fire, trucks, containers, catwalks, pipes, astronaut, space station, laser, highly detailed",
+           "xlong": HANGAR_LONG + HANGAR_EXTRA + STYLE_TAIL}),
+    Scene("dragon4k-h", "samples/dragon-4x-vl-upscale.png", (3,),
+          {"none": "", "tags": "epic fantasy, dragon, medieval town, harbor, sailing ships, soldiers, army, "
+           "castle, bell tower, sunrise, seagulls, wizard, fire, smoke, cinematic, 8k, masterpiece",
+           "xlong": DRAGON_LONG + DRAGON_EXTRA + STYLE_TAIL}),
+    Scene("market4k-h", "samples/renaissance-market-4x-vl-upscale.png", (2,),
+          {"none": "", "tags": "renaissance, florence, market, stalls, merchants, monks, cheese, copper pots, "
+           "garlic, herbs, pumpkins, tapestry, cathedral, horse, juggler, crowd, oil painting, masterpiece",
+           "xlong": MARKET_LONG + MARKET_EXTRA + STYLE_TAIL}),
+    Scene("face3k-h", "tests-AB/cache/krea2-00676_upscale_2304x3072_*.pt", (5,),
+          {"none": "", "tags": "1girl, solo, long hair, black hair, red flowers, forest, night, moon, ruins, "
+           "dark fantasy, black dress, looking at viewer, wolf, candles, masterpiece, best quality",
+           "xlong": FACE_LONG + FACE_EXTRA + STYLE_TAIL}),
+)}
+HOLDOUT_PROMPT_KEYS = ("none", "tags", "xlong")
+SETS = {"main": (SCENES, PROMPT_KEYS), "holdout": (HOLDOUT, HOLDOUT_PROMPT_KEYS)}
+
 
 def load_canvas(scene):
     import numpy as np
@@ -310,6 +409,17 @@ TERMS_INSTRUCTION = (
     "the image's style, medium, quality, camera, lighting mood and any position words. "
     "List each thing once. Output only the list."
 )
+# The second wording drops "places" (which invited "florence", "hangar", "forest") and names
+# the non-things a short prompt otherwise lists ("huge", "being built", "attack").
+TERMS_INSTRUCTION_2 = (
+    "This is a prompt for an image:\n{prompt}\n\n"
+    "List the physical things the prompt names that could be pointed at in the image: objects, "
+    "people, animals, plants, clothing, materials, buildings and parts of the scene. Use short "
+    "lowercase noun phrases of one to four words, separated by commas. Keep each thing's own "
+    "descriptive words, such as its color. Leave out places and settings, actions, sizes, moods, "
+    "the image's style, medium, quality, camera and lighting, artist names and position words. "
+    "List each thing once. Output only the list."
+)
 TERMS_MAX_TOKENS = 256
 # Two invented terms in a row end the list: past the prompt's own things the model pads with
 # generic words ("materials", "details") until the budget runs out.
@@ -365,7 +475,7 @@ def stop_when(clip, should_stop):
     return scope()
 
 
-def extract_prompt_terms(clip, prompt):
+def extract_prompt_terms(clip, prompt, instruction=TERMS_INSTRUCTION):
     """(terms, reply, tokens written): the grounded noun phrases the prompt names."""
     from logit_classifier.tags import drop_unfinished_tag, parse_candidates, repeated_block
 
@@ -381,7 +491,7 @@ def extract_prompt_terms(clip, prompt):
             streak += 1
         return streak >= UNGROUNDED_STREAK or bool(repeated_block(tags_so_far))
 
-    tokens = clip.tokenize(TERMS_TEMPLATE.format(instruction=TERMS_INSTRUCTION.format(prompt=prompt)))
+    tokens = clip.tokenize(TERMS_TEMPLATE.format(instruction=instruction.format(prompt=prompt)))
     with stop_when(clip, should_stop):
         ids = captions.clip_generate(clip, tokens, do_sample=False, max_length=TERMS_MAX_TOKENS)
     reply = clip.decode(ids)
@@ -505,6 +615,98 @@ def with_options(arm, options):
     return run
 
 
+PROPOSE_CAP = 25
+THING_THRESHOLD = 0.9
+
+
+def merge_model_first(fragments, proposed, merge_cap):
+    """tags.merge_trace with the model's own tags first, so prompt terms never displace them."""
+    from logit_classifier.tags import normalize_item
+
+    from context_anchored_tile_refine import tags
+
+    index_of, origins, dropped = {}, [], []
+    for origin, items in (("model", proposed), ("prompt", fragments)):
+        for item in items:
+            name = normalize_item(item)
+            index = index_of.get(name)
+            if not name:
+                continue
+            if name in tags.CATEGORY_NOUNS:
+                dropped.append((name, "category noun"))
+            elif index is not None and origin == "prompt" and origins[index] == "model":
+                origins[index] = "both"
+            elif index is not None:
+                dropped.append((name, "repeat"))
+            elif len(index_of) == merge_cap:
+                dropped.append((name, "over the cap"))
+            else:
+                index_of[name] = len(origins)
+                origins.append(origin)
+    return tuple(index_of), tuple(origins), tuple(dropped)
+
+
+def arm_v2(ctx, scene, prompt, canvas, layout, cap=PROPOSE_CAP, criteria=None,
+           terms_instruction=TERMS_INSTRUCTION, merge_cap=None):
+    """The prompt terms pass with the concreteness choice in place of the style sort, applied to
+    the prompt terms and to every tile's candidates before verify, and the propose stopped after
+    `cap` complete tags."""
+    from logit_classifier.tags import repeated_block
+
+    from context_anchored_tile_refine import captions, tags
+
+    criteria = criteria or CONCRETE_CRITERIA_2
+    classifier = tags.build_classifier(ctx.clip)
+    p_other = {}
+
+    def things(items):
+        unknown = tuple(dict.fromkeys(i for i in items if i not in p_other))
+        if unknown:
+            p_other.update(zip(unknown, concrete_p_other(classifier, unknown, criteria), strict=True))
+        return [i for i in items if p_other[i] < THING_THRESHOLD]
+
+    original_merge = tags.merge_trace
+    original_stop = tags.stop_on_repeat
+
+    def merge_trace(fragments, proposed):
+        if merge_cap is None:
+            candidates, origins, dropped = original_merge(fragments, proposed)
+        else:
+            candidates, origins, dropped = merge_model_first(fragments, proposed, merge_cap)
+        kept = set(things(candidates))
+        pairs = [(c, o) for c, o in zip(candidates, origins, strict=True) if c in kept]
+        dropped = dropped + tuple((c, "not a thing") for c in candidates if c not in kept)
+        return tuple(c for c, _o in pairs), tuple(o for _c, o in pairs), dropped
+
+    tags.merge_trace = merge_trace
+    tags.stop_on_repeat = lambda clip: stop_when(clip, lambda t: len(t) >= cap or bool(repeated_block(t)))
+    try:
+        preset = replace(shipped_preset(prompt), prompt="")
+        ctx.torch.cuda.synchronize()
+        started = time.perf_counter()
+        terms, reply, written, subjects = [], "", 0, []
+        if prompt.strip():
+            terms, reply, written = extract_prompt_terms(ctx.clip, prompt, terms_instruction)
+            subjects = things(terms)
+        ctx.torch.cuda.synchronize()
+        record = {"picture_ms": round((time.perf_counter() - started) * 1000.0, 1), "tiles": {},
+                  "prompt_terms": terms, "subject_terms": subjects, "terms_reply": reply,
+                  "terms_tokens": written}
+        for index in scene.tiles:
+            crop = layout.tiles[index].crop_rect
+            row = canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :]
+            ctx.torch.cuda.synchronize()
+            started = time.perf_counter()
+            picture = captions.resample_for_vl(row, tags.VL_MAX_PIXELS)
+            trace = tags.trace_tile(ctx.clip, classifier, row, picture, preset, tuple(subjects))
+            ctx.torch.cuda.synchronize()
+            record["tiles"][str(index)] = tile_record(trace, (time.perf_counter() - started) * 1000.0)
+    finally:
+        tags.merge_trace = original_merge
+        tags.stop_on_repeat = original_stop
+    return record
+
+
 ARMS = {
     "baseline": arm_baseline,
     "terms": arm_terms,
@@ -514,6 +716,10 @@ ARMS = {
     "base+vision": with_options(arm_baseline, {"vision"}),
     "base+fast": with_options(arm_baseline, {"loadskip", "vision"}),
     "terms+fast": with_options(arm_terms, {"loadskip", "vision"}),
+    "prod": arm_baseline,
+    "v2": with_options(arm_v2, {"loadskip", "vision"}),
+    "v3": with_options(lambda *a: arm_v2(*a, terms_instruction=TERMS_INSTRUCTION_2, merge_cap=64),
+                       {"loadskip", "vision"}),
 }
 
 
@@ -525,8 +731,9 @@ def cmd_run(args):
     from context_anchored_tile_refine import captions, tags
 
     arm = ARMS[args.arm]
-    scenes = [SCENES[k] for k in args.scenes.split(",")] if args.scenes else list(SCENES.values())
-    prompts = args.prompts.split(",") if args.prompts else list(PROMPT_KEYS)
+    registry, prompt_keys = SETS[args.set]
+    scenes = [registry[k] for k in args.scenes.split(",")] if args.scenes else list(registry.values())
+    prompts = args.prompts.split(",") if args.prompts else list(prompt_keys)
     out = RUNS_DIR / f"{args.arm}.json"
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     record = json.loads(out.read_text()) if out.exists() and not args.fresh else {}
@@ -634,7 +841,7 @@ def cmd_merge(_args):
             print(f"{path.name}: {len(missing)} verdicts missing, e.g. {missing[:3]}")
         entry["items"].update(verdict.get("items", {}))
         entry["positions"].update(verdict.get("positions", {}))
-        path.rename(path.with_suffix(".merged"))
+        path.replace(path.with_name(f"{path.stem}.{len(judgments)}.merged"))
     JUDGMENTS.write_text(json.dumps(judgments, indent=1, sort_keys=True))
     print(f"judgments for {len(judgments)} tiles in {JUDGMENTS}")
 
@@ -671,7 +878,9 @@ def format_row(label, c):
     wrong = c["no"] / judged if judged else math.nan
     positions = c["pos_right"] + c["pos_wrong"]
     position_right = c["pos_right"] / positions if positions else math.nan
-    return (f"{label:<22}{c['tiles']:>5}{c['items'] / max(c['tiles'], 1):>7.1f}{c['yes'] / max(c['tiles'], 1):>7.1f}"
+    tiles = max(c["tiles"], 1)
+    return (f"{label:<28}{c['tiles']:>5}{c['items'] / tiles:>7.1f}{c['yes'] / tiles:>7.1f}"
+            f"{c['no'] / tiles:>6.2f}{c['vague'] / tiles:>6.2f}"
             f"{precision:>7.3f}{wrong:>7.3f}{c['vague'] / max(judged, 1):>7.3f}{position_right:>7.3f}"
             f"{positions:>6}{statistics.mean(c['ms']) / 1000:>8.2f}{statistics.mean(c['picture_ms']) / 1000:>8.2f}"
             f"{statistics.mean(c['projected_s']):>9.1f}{c['unjudged']:>6}")
@@ -680,42 +889,111 @@ def format_row(label, c):
 ITEM_KINDS = BENCH_DIR / "item_kinds.json"
 
 
+# Two text-only choices per item string: the shipped fragment sort (p(style)) and a
+# concreteness choice (p(other)), each stored under its own key in item_kinds.json.
+CONCRETE_QUESTION = 'What does the image tag "{fragment}" name'
+CONCRETE_CRITERIA = {
+    "thing": "one physical thing that could be pointed at in a picture: an object, person, animal, "
+             "plant, body part, garment, material, structure, or a visible substance such as water, "
+             "smoke, fire, clouds or rain",
+    "other": "not one physical thing: a kind of place or a whole scene, a color, a shape or form, "
+             "lighting, a camera or render effect, a style, a mood, a quality or an idea",
+}
+
+
+# The second wording counts landscape features, groups and light sources as things, which the
+# first sent to "other" ("red moon", "green cliffs", "army of soldiers", "lights").
+CONCRETE_CRITERIA_2 = {
+    "thing": "something that could be pointed at in a picture: an object, a person, a group of people "
+             "or animals, an animal, a plant, a body part, a garment, a material, a building, a "
+             "landscape feature such as hills, cliffs, sky, the moon or stars, a light source such as "
+             "lamps, signs or lit windows, or a substance such as water, smoke, fire, clouds or rain",
+    "other": "nothing to point at: a kind of place or a whole scene, a time of day, a color alone, a "
+             "shape or form, lighting in general, a camera or render effect, a style, a mood, a "
+             "quality or an idea",
+}
+CONCRETE_VARIANTS = {"other": CONCRETE_CRITERIA, "other2": CONCRETE_CRITERIA_2}
+
+
+def concrete_p_other(classifier, items, criteria=CONCRETE_CRITERIA):
+    from logit_classifier import ChoiceQuestion, SystemOneRequest
+
+    questions = {f"c{index}": ChoiceQuestion(instructions=CONCRETE_QUESTION.format(fragment=item),
+                                             criteria=criteria)
+                 for index, item in enumerate(items)}
+    response, _diagnostics = classifier.classify(SystemOneRequest(state="", questions=questions))
+    return tuple(response.answers[qid].probabilities["other"] for qid in questions)
+
+
 def cmd_classify_items(_args):
-    """p(style) of every item any arm emitted, from tags.fragment_style_p, into item_kinds.json."""
+    """p(style) and p(other) of every item any arm emitted, into item_kinds.json."""
     ab_env.bootstrap()
     import ab_models
     import torch
 
     from context_anchored_tile_refine import tags
 
-    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {}
-    items = sorted({item for record in run_records().values() for by_prompt in record.values()
-                    for result in by_prompt.values() for tile in result["tiles"].values()
-                    for item, _term in tile["items"]} - set(kinds))
+    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {"style": {}, "other": {}}
+    emitted = {item for record in run_records().values() for by_prompt in record.values()
+               for result in by_prompt.values() for tile in result["tiles"].values()
+               for item, _term in tile["items"]}
     clip = ab_models.load_clip(CLIP_NAME, "krea2")
     classifier = tags.build_classifier(clip)
+    started = time.perf_counter()
     with torch.inference_mode():
-        for start in range(0, len(items), 64):
-            chunk = tuple(items[start:start + 64])
-            kinds.update(zip(chunk, tags.fragment_style_p(classifier, chunk), strict=True))
+        asks = {"style": tags.fragment_style_p,
+                **{name: (lambda c, i, crit=crit: concrete_p_other(c, i, crit))
+                   for name, crit in CONCRETE_VARIANTS.items()}}
+        for name, ask in asks.items():
+            kinds.setdefault(name, {})
+            items = sorted(emitted - set(kinds[name]))
+            for start in range(0, len(items), 64):
+                chunk = tuple(items[start:start + 64])
+                kinds[name].update(zip(chunk, ask(classifier, chunk), strict=True))
     ITEM_KINDS.write_text(json.dumps(kinds, indent=1, sort_keys=True))
-    print(f"{len(items)} new items classified, {len(kinds)} in {ITEM_KINDS}")
+    print(f"{len(emitted)} items, {time.perf_counter() - started:.1f} s, stored in {ITEM_KINDS}")
 
 
 def filtered(record, spec, kinds):
-    """The record with each tile's items cut by one offline filter: vT keeps items whose
-    verify score is at least T, kT keeps items whose p(style) is below T."""
+    """`spec` joined by "&" applies each filter in turn."""
+    for part in spec.split("&"):
+        record = filtered_once(record, part, kinds)
+    return record
+
+
+def filtered_once(record, spec, kinds):
+    """The record with each tile's items cut by one offline filter:
+    vT  keeps items whose verify score is at least T
+    kT  keeps items whose p(style) is below T
+    cT  keeps items whose p(other) from the concreteness choice is below T
+    dT  the same with the second concreteness wording
+    pT  keeps model tags, and prompt-only terms whose verify score is at least T
+    nN  keeps prompt-origin items and the model's first N proposed tags (greedy decoding makes a
+        propose stopped after N tags write exactly these)"""
     kind, threshold = spec[0], float(spec[1:])
     out = {}
     for scene_key, by_prompt in record.items():
         for prompt_key, result in by_prompt.items():
             tiles = {}
             for index, tile in result["tiles"].items():
-                scores = {c: s for c, _o, s in tile.get("candidates", [])}
+                candidates = tile.get("candidates", [])
+                scores = {c: s for c, _o, s in candidates}
+                model_order = [c for c, o, _s in candidates if o != "prompt"]
                 if kind == "v":
                     keep = [p for p in tile["items"] if (scores.get(p[0]) or 0.0) >= threshold]
+                elif kind == "k":
+                    keep = [p for p in tile["items"] if kinds["style"].get(p[0], 0.0) < threshold]
+                elif kind == "p":
+                    origin = {c: o for c, o, _s in candidates}
+                    keep = [p for p in tile["items"]
+                            if origin.get(p[0]) != "prompt" or (scores.get(p[0]) or 0.0) >= threshold]
+                elif kind in "cd":
+                    table = kinds["other" if kind == "c" else "other2"]
+                    keep = [p for p in tile["items"] if table.get(p[0], 0.0) < threshold]
                 else:
-                    keep = [p for p in tile["items"] if kinds.get(p[0], 0.0) < threshold]
+                    first = set(model_order[:int(threshold)])
+                    prompt_items = {c for c, o, _s in candidates if o == "prompt"}
+                    keep = [p for p in tile["items"] if p[0] in first or p[0] in prompt_items]
                 tiles[index] = {**tile, "items": keep}
             out.setdefault(scene_key, {})[prompt_key] = {**result, "tiles": tiles}
     return out
@@ -725,21 +1003,22 @@ def cmd_report(args):
     judgments = load_judgments()
     arms = args.arms.split(",") if args.arms else None
     records = run_records(arms)
-    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {}
+    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {"style": {}, "other": {}}
     for spec in (s for s in args.filters.split(",") if s):
         for name in list(records):
-            if "+" not in name or name.split("+")[-1][0] not in "vk":
-                records[f"{name}+{spec}"] = filtered(records[name], spec, kinds)
-    header = (f"{'arm / prompt':<22}{'tiles':>5}{'items':>7}{'yes':>7}{'prec':>7}{'wrong':>7}{'vague':>7}"
+            if "@" not in name:
+                records[f"{name}@{spec}"] = filtered(records[name], spec, kinds)
+    header = (f"{'arm / prompt':<28}{'tiles':>5}{'items':>7}{'yes':>7}{'no':>6}{'vg':>6}{'prec':>7}{'wrong':>7}{'vague':>7}"
               f"{'pos ok':>7}{'pos n':>6}{'s/tile':>8}{'pic s':>8}{'grid s':>9}{'unjdg':>6}")
-    print("items and yes are per tile. prec = yes / (yes + no + vague). pos ok = right terms of "
+    print("items, yes, no and vg are per tile. prec = yes / (yes + no + vague). pos ok = right terms of "
           "judged terms on yes items.\ngrid s = picture + the scene's full tile count x mean tile time, "
           "averaged over scenes.")
     print(header)
+    registry, prompt_keys = SETS[args.set]
     for name, record in records.items():
-        for prompt_key in (*PROMPT_KEYS, "all"):
+        for prompt_key in (*prompt_keys, "all"):
             results = [(scene_key, by_prompt[p]) for scene_key, by_prompt in record.items()
-                       for p in by_prompt if prompt_key in ("all", p)]
+                       if scene_key in registry for p in by_prompt if prompt_key in ("all", p)]
             if results:
                 print(format_row(f"{name} / {prompt_key}", score(results, judgments)))
         print()
@@ -772,6 +1051,7 @@ def parse_args():
     sub.add_parser("layouts")
     run = sub.add_parser("run")
     run.add_argument("--arm", required=True, choices=sorted(ARMS))
+    run.add_argument("--set", choices=sorted(SETS), default="main")
     run.add_argument("--scenes", default="")
     run.add_argument("--prompts", default="")
     run.add_argument("--fresh", action="store_true", help="drop the arm's earlier record")
@@ -783,7 +1063,8 @@ def parse_args():
     sub.add_parser("classify-items")
     report = sub.add_parser("report")
     report.add_argument("--arms", default="")
-    report.add_argument("--filters", default="", help="csv of offline filters, vT (verify) or kT (p(style))")
+    report.add_argument("--set", choices=sorted(SETS), default="main")
+    report.add_argument("--filters", default="", help="csv of offline filters: vT, kT, cT, nN (see filtered)")
     return parser.parse_args()
 
 

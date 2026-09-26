@@ -2090,7 +2090,7 @@ def a_tags_preset(surface=captions.VLM_METHOD_CAPTIONS, prompt="", style="the st
         surface=surface, label="tags",
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0, caption_megapixels=0.1),
         style_instruction=style, style_max_tokens=64, kind=captions.TILE_TEXT_TAGS,
-        tile_tags_instruction="list the things", tile_tags_with_prompt_instruction="From: {PROMPT}\n",
+        tile_tags_instruction="list the things", prompt_tags_instruction="List the things in: {PROMPT}",
         tile_tags_verification_statement="It shows {TAG}", prompt=prompt)
 
 

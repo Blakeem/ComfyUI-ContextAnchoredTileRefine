@@ -54,7 +54,7 @@ INSTRUCTION_SOCKETS = (
     ("global_style_instruction", None),
     ("tile_caption_instruction", captions.TILE_TEXT_CAPTION),
     ("tile_tags_instruction", captions.TILE_TEXT_TAGS),
-    ("tile_tags_with_prompt_instruction", captions.TILE_TEXT_TAGS),
+    ("prompt_tags_instruction", captions.TILE_TEXT_TAGS),
     ("tile_tags_verification_statement", captions.TILE_TEXT_TAGS),
 )
 
@@ -70,7 +70,7 @@ SETTINGS_PRESET_OUTPUTS = (
     ("tile_caption_instruction", "STRING"),
     ("tile_caption_max_tokens", "INT"),
     ("tile_tags_instruction", "STRING"),
-    ("tile_tags_with_prompt_instruction", "STRING"),
+    ("prompt_tags_instruction", "STRING"),
     ("tile_tags_verification_statement", "STRING"),
 )
 SETTINGS_VISION_OUTPUTS = (
@@ -84,6 +84,7 @@ SETTINGS_VISION_OUTPUTS = (
 SETTINGS_TAGS_THRESHOLD_OUTPUTS = (
     ("tile_tags_verification_threshold", "FLOAT"),
     ("tile_tags_position_threshold", "FLOAT"),
+    ("prompt_tags_verification_threshold", "FLOAT"),
 )
 SETTINGS_OUTPUTS = (*SETTINGS_PRESET_OUTPUTS, *SETTINGS_VISION_OUTPUTS, *SETTINGS_TAGS_THRESHOLD_OUTPUTS)
 # What a preset key outputs when the preset's kind does not carry it, so an unused socket
@@ -460,14 +461,14 @@ def _check_tags_texts(texts):
         if captions.PROMPT_PLACEHOLDER in texts[name]:
             raise ValueError(
                 f"{CAPTIONS_NODE} was given {name} holding {captions.PROMPT_PLACEHOLDER}. Only "
-                "tile_tags_with_prompt_instruction carries the prompt, so move "
+                "prompt_tags_instruction carries the prompt, so move "
                 f"{captions.PROMPT_PLACEHOLDER} there.")
-    anchor = texts["tile_tags_with_prompt_instruction"]
-    if anchor and captions.PROMPT_PLACEHOLDER not in anchor:
+    question = texts["prompt_tags_instruction"]
+    if question and captions.PROMPT_PLACEHOLDER not in question:
         raise ValueError(
-            f"{CAPTIONS_NODE} was given tile_tags_with_prompt_instruction without "
+            f"{CAPTIONS_NODE} was given prompt_tags_instruction without "
             f"{captions.PROMPT_PLACEHOLDER}. Write {captions.PROMPT_PLACEHOLDER} where the prompt "
-            "goes, or disconnect it to send the tags question alone.")
+            "goes, or disconnect it to list no things from the prompt.")
     statement = texts["tile_tags_verification_statement"]
     if statement and captions.TAG_PLACEHOLDER not in statement:
         raise ValueError(
@@ -495,7 +496,8 @@ def _check_score(name, value):
 
 
 def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_tokens,
-                   caption_megapixels, verification_threshold, position_threshold):
+                   caption_megapixels, verification_threshold, position_threshold,
+                   prompt_verification_threshold):
     # One preset built from the sockets, checked in full before any model call, since the
     # text encoder costs minutes to reach the same rejection.
     kind = _text_kind(texts)
@@ -507,6 +509,7 @@ def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_toke
         _check_tags_texts(texts)
         _check_score("tile_tags_verification_threshold", verification_threshold)
         _check_score("tile_tags_position_threshold", position_threshold)
+        _check_score("prompt_tags_verification_threshold", prompt_verification_threshold)
         preset = captions.Preset(
             surface=captions.VLM_METHOD_CAPTIONS,
             label=CAPTIONS_NODE,
@@ -515,9 +518,10 @@ def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_toke
             style_max_tokens=global_style_max_tokens,
             kind=captions.TILE_TEXT_TAGS,
             tile_tags_instruction=texts["tile_tags_instruction"],
-            tile_tags_with_prompt_instruction=texts["tile_tags_with_prompt_instruction"],
+            prompt_tags_instruction=texts["prompt_tags_instruction"],
             tile_tags_verification_statement=texts["tile_tags_verification_statement"],
             tile_tags_verification_threshold=verification_threshold,
+            prompt_tags_verification_threshold=prompt_verification_threshold,
             tile_tags_position_threshold=position_threshold,
         )
     else:
@@ -565,7 +569,7 @@ def _tag_texts(run):
 
 # --- the Captions node's text outputs. Pure functions over the tags traces, one picture row.
 
-FRAGMENTS_TITLE = "prompt_fragments: the connected prompt, split into fragments and sorted into subject and style"
+PROMPT_TAGS_TITLE = "prompt_tags: the things the VL model listed from the connected prompt, which every tile checks"
 LISTED_TITLE = "tags_listed: the tags the VL model listed for each tile"
 VERIFIED_TITLE = "tags_verified: each candidate tag scored on its tile"
 FINAL_TITLE = "tags_final: the kept tags of each tile, their positions and the tile text"
@@ -601,16 +605,20 @@ def _tile_header(index, columns):
     return f"=== tile {index} (row {index // columns}, column {index % columns}) ==="
 
 
-def _fragments_debug(run):
-    lines = ["no prompt connected"]
-    if run.prompt is not None:
-        pairs = zip(run.prompt.fragments, run.prompt.style_p, strict=True)
-        lines = [f"{_p(p)}  {'style' if p >= tags.STYLE_THRESHOLD else 'subject':<7}  {fragment}"
-                 for fragment, p in pairs] or ["the prompt holds no fragment"]
-    sentence = ("A subject fragment joins every tile's tag candidates, and a fragment at p(style) "
-                f"{_p(tags.STYLE_THRESHOLD)} or above is style and is dropped.")
-    return _debug_text(FRAGMENTS_TITLE, sentence,
-                       [_section("=== each fragment with its p(style) and its sort ===", _rows(lines))])
+def _prompt_tags_debug(preset, run):
+    sentence = ("The VL model lists the things the prompt names, a listed tag with a word the "
+                "prompt lacks is dropped, and the thing check drops a tag at p(other) "
+                f"{_p(tags.THING_THRESHOLD)} or above. The kept tags join every tile's candidates.")
+    if run.prompt is None:
+        reason = "no prompt connected" if not preset.prompt else "prompt_tags_instruction is not connected"
+        return _debug_text(PROMPT_TAGS_TITLE, sentence, [_section("=== prompt ===", _rows([reason]))])
+    pairs = zip(run.prompt.listed, run.prompt.p_other, strict=True)
+    lines = [f"{'kept' if tags.is_thing(p) else 'dropped':<7}  {_p(p)}  {tag}" for tag, p in pairs]
+    return _debug_text(PROMPT_TAGS_TITLE, sentence, [
+        _section("=== question sent to the VL model once per picture ===",
+                 _indented(tags.prompt_tags_text(preset))),
+        _section("=== VL model reply, verbatim ===", _indented(run.prompt.reply)),
+        _section("=== each listed tag with its p(other) ===", _rows(lines))])
 
 
 def _listed_block(header, trace):
@@ -622,10 +630,11 @@ def _listed_block(header, trace):
 
 def _listed_debug(preset, headers, traces):
     sections = [_section("=== question sent to the VL model for every tile ===",
-                         _indented(tags.tile_tags_question(preset)))]
+                         _indented(preset.tile_tags_instruction))]
     sections.extend(_listed_block(header, trace) for header, trace in zip(headers, traces, strict=True))
     return _debug_text(LISTED_TITLE, "The VL model is asked the question below about each tile, "
-                       "and its reply is split into tags.", sections)
+                       f"its list is stopped after {tags.MAX_PROPOSED_TAGS} tags, and its reply is "
+                       "split into tags.", sections)
 
 
 def _score_row(item, p, threshold, suffix=""):
@@ -633,9 +642,10 @@ def _score_row(item, p, threshold, suffix=""):
     return f"{verdict:<7}  {_p(p)}  {item}{suffix}"
 
 
-def _verified_block(header, trace, threshold):
+def _verified_block(header, trace, threshold, prompt_threshold):
     rows = tuple(zip(trace.candidates, trace.scores, trace.origins, strict=True))
-    from_prompt = [_score_row(item, p, threshold, ", also listed by the VL model" if origin == "both" else "")
+    from_prompt = [_score_row(item, p, threshold, ", also listed by the VL model") if origin == "both"
+                   else _score_row(item, p, prompt_threshold)
                    for item, p, origin in rows if origin != "model"]
     from_model = [_score_row(item, p, threshold) for item, p, origin in rows if origin == "model"]
     left_out = [f"{name}: {reason}" for name, reason in trace.dropped]
@@ -655,9 +665,12 @@ def _verified_debug(preset, headers, traces):
                            "verification is off and no candidate was scored.", [_unchecked_block(header, trace)
                                            for header, trace in zip(headers, traces, strict=True)])
     threshold = preset.tile_tags_verification_threshold
-    sentence = ("Each candidate is scored with tile_tags_verification_statement on its tile, and "
-                f"a score of {_p(threshold)} or above (tile_tags_verification_threshold) keeps it.")
-    return _debug_text(VERIFIED_TITLE, sentence, [_verified_block(header, trace, threshold)
+    prompt_threshold = preset.prompt_tags_verification_threshold
+    sentence = ("Each candidate is scored with tile_tags_verification_statement on its tile. A tag "
+                f"the VL model listed is kept at {_p(threshold)} or above "
+                "(tile_tags_verification_threshold), and a prompt tag it did not list at "
+                f"{prompt_threshold} or above (prompt_tags_verification_threshold).")
+    return _debug_text(VERIFIED_TITLE, sentence, [_verified_block(header, trace, threshold, prompt_threshold)
                                                   for header, trace in zip(headers, traces, strict=True)])
 
 
@@ -709,18 +722,18 @@ def _final_debug(preset, headers, traces, locate):
 
 
 def _tags_debug(preset, headers, run, locate):
-    # (prompt_fragments, tags_listed, tags_verified, tags_final).
+    # (prompt_tags, tags_listed, tags_verified, tags_final).
     traces = [rows[0] for rows in run.tiles]
-    return (_fragments_debug(run), _listed_debug(preset, headers, traces),
+    return (_prompt_tags_debug(preset, run), _listed_debug(preset, headers, traces),
             _verified_debug(preset, headers, traces), _final_debug(preset, headers, traces, locate))
 
 
 def _caption_debug():
     # The caption kind has no tag stages, so each tags output says so in one sentence.
-    fragments = _debug_text(FRAGMENTS_TITLE, "The caption kind reads the prompt only through "
-                            f"{captions.PROMPT_PLACEHOLDER} in its instructions, so no fragment "
-                            "is sorted.", [])
-    return (fragments, *(_debug_text(title, NO_TAG_STAGES, [])
+    prompt_tags = _debug_text(PROMPT_TAGS_TITLE, "The caption kind reads the prompt only through "
+                              f"{captions.PROMPT_PLACEHOLDER} in its instructions, so no things are "
+                              "listed from it.", [])
+    return (prompt_tags, *(_debug_text(title, NO_TAG_STAGES, [])
                          for title in (LISTED_TITLE, VERIFIED_TITLE, FINAL_TITLE)))
 
 
@@ -732,8 +745,8 @@ class ContextAnchoredTileTestCaptions:
     a stage is turned off by disconnecting it and a wording is tried by wiring a text node in
     its place. tile_caption_instruction runs the caption kind and tile_tags_instruction the
     tags kind, and exactly one of the two must be on. Wire them from Tile Test: Settings.
-    tile_texts lists the texts Tile Test: Render conditions on, and prompt_fragments,
-    tags_listed, tags_verified and tags_final print every tags stage per tile. An empty tiles
+    tile_texts lists the texts Tile Test: Render conditions on, and prompt_tags, tags_listed,
+    tags_verified and tags_final print every tags stage per tile. An empty tiles
     list captions every tile. A tile list captions those tiles, plus their bordering tiles
     when with_neighbors is on, which is what Tile Test: Render needs to render one of them
     with its neighbours. There is no seed here, so ComfyUI serves the texts from its cache
@@ -754,22 +767,23 @@ class ContextAnchoredTileTestCaptions:
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the picture the VL model reads for every caption this node writes, the tile captions and the style caption. Use 0 for the picture's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels. The tags kind reads it for the style caption only, since its tags questions read a fixed copy of about 1 megapixel. Can take the caption_megapixels output of Tile Test: Settings."}),
                 "tile_caption_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for each tile caption, which also covers the model's hidden reasoning turn. Read by the caption kind and ignored by the tags kind. Can take the tile_caption_max_tokens output of Tile Test: Settings."}),
                 "global_style_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for the style caption, which also covers the model's hidden reasoning turn. Read when global_style_instruction is connected. Can take the global_style_max_tokens output of Tile Test: Settings."}),
-                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the whole tile to keep a listed tag. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
                 "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
+                "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
             },
             "optional": {
                 "prompt": node._prompt(),
                 "global_style_instruction": ("STRING", {"forceInput": True, "tooltip": f"What the VL model is asked about the entire image, for one style caption placed on top of every tile's text, in either kind. {captions.PROMPT_PLACEHOLDER} is filled from prompt. Unconnected, or holding only whitespace, writes no style caption."}),
                 "tile_caption_instruction": ("STRING", {"forceInput": True, "tooltip": f"What the VL model is asked about each tile, which runs the caption kind. {captions.PROMPT_PLACEHOLDER} is filled from prompt. Connect this or tile_tags_instruction, never both. Unconnected leaves the caption kind off."}),
                 "tile_tags_instruction": ("STRING", {"forceInput": True, "tooltip": f"The question that asks the VL model to list the things in each tile as comma separated tags, which runs the tags kind. It cannot hold {captions.PROMPT_PLACEHOLDER}. Connect this or tile_caption_instruction, never both. Unconnected leaves the tags kind off."}),
-                "tile_tags_with_prompt_instruction": ("STRING", {"forceInput": True, "tooltip": f"Text placed before the tags question when prompt is connected. It must hold {captions.PROMPT_PLACEHOLDER}, where the prompt goes. Read by the tags kind only. Unconnected sends the tags question alone."}),
+                "prompt_tags_instruction": ("STRING", {"forceInput": True, "tooltip": f"The question that asks the VL model to list the things the prompt names, once per picture. It must hold {captions.PROMPT_PLACEHOLDER}, where the prompt goes. Every tile checks the listed things. Read by the tags kind when prompt is connected. Unconnected lists no things from the prompt."}),
                 "tile_tags_verification_statement": ("STRING", {"forceInput": True, "tooltip": f"The statement each candidate tag is scored true or false against on its tile. It must hold {captions.TAG_PLACEHOLDER}, where the tag goes, and a tag is kept at tile_tags_verification_threshold. Read by the tags kind only. Unconnected keeps every candidate unchecked and writes no position terms."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ("CATR_CAPTIONS", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("captions", "tile_texts", "tiles", "prompt_fragments", "tags_listed",
+    RETURN_NAMES = ("captions", "tile_texts", "tiles", "prompt_tags", "tags_listed",
                     "tags_verified", "tags_final")
     FUNCTION = "caption_tiles"
     CATEGORY = "image/upscaling/tile testing"
@@ -796,8 +810,10 @@ class ContextAnchoredTileTestCaptions:
 
     def caption_tiles(self, image, layout, clip, tiles, with_neighbors, position_terms,
                       caption_megapixels, tile_caption_max_tokens, global_style_max_tokens,
-                      tile_tags_verification_threshold, tile_tags_position_threshold, prompt=None, global_style_instruction=None, tile_caption_instruction=None,
-                      tile_tags_instruction=None, tile_tags_with_prompt_instruction=None,
+                      tile_tags_verification_threshold, tile_tags_position_threshold,
+                      prompt_tags_verification_threshold,
+                      prompt=None, global_style_instruction=None, tile_caption_instruction=None,
+                      tile_tags_instruction=None, prompt_tags_instruction=None,
                       tile_tags_verification_statement=None, unique_id=None):
         # ---- inputs. Every rejection here runs before the first model call.
         if image.shape[0] != 1:
@@ -814,13 +830,14 @@ class ContextAnchoredTileTestCaptions:
             "global_style_instruction": global_style_instruction,
             "tile_caption_instruction": tile_caption_instruction,
             "tile_tags_instruction": tile_tags_instruction,
-            "tile_tags_with_prompt_instruction": tile_tags_with_prompt_instruction,
+            "prompt_tags_instruction": prompt_tags_instruction,
             "tile_tags_verification_statement": tile_tags_verification_statement,
         }
         texts = {name: value if _is_on(value) else "" for name, value in sockets.items()}
         run_preset = _socket_preset(texts, prompt, tile_caption_max_tokens,
                                     global_style_max_tokens, caption_megapixels,
-                                    tile_tags_verification_threshold, tile_tags_position_threshold)
+                                    tile_tags_verification_threshold, tile_tags_position_threshold,
+                                    prompt_tags_verification_threshold)
         is_tags = run_preset.kind == captions.TILE_TEXT_TAGS
         all_tiles = layout.layout.tiles
         columns = layout.layout.sol_x.n
