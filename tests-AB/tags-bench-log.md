@@ -191,3 +191,24 @@ base+fast holds the baseline's items, so its rows are the baseline's accuracy.
   one picture stage of 1 to 3 s, once per picture. An 8K grid of 24 tiles: 167 -> 42 s.
 - Remaining ideas, not tried: one packed pass for the six strips (about 0.3 s per tile) and a
   batched decode over several tiles.
+
+### 11. Thing check packing (`probe_thing_pack.py`): keep packing
+
+A review flagged that the thing check packs each tile's new tags into one request, so a tag's
+p(other) depends on the tags beside it and on which tiles were cache hits. The probe replays every
+recorded prod run's packs against one tag per request.
+
+| Measure | Value |
+|---|---|
+| Tags | 1225 |
+| Median p(other) change | 0.001 |
+| 99th percentile change | 0.12 |
+| Largest change | 0.21 |
+| Verdicts that flip at 0.9 | 7 (0.6%) |
+| Thing check time, packed | 43 s |
+| Thing check time, one tag per request | 258 s (210 ms per tag) |
+
+- Every flip is a tag packed scoring keeps and single scoring drops. The judged ones are correct
+  ("red flags" yes, "tapestry" yes, "green eyes" unsure).
+- Single scoring costs 6 times the thing check time and drops correct tags, so the packed check
+  stays.
