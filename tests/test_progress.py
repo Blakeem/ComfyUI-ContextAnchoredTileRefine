@@ -742,3 +742,17 @@ def test_the_caption_ledger_is_one_open_segment_sized_by_caption_segment(
     assert ledger.total == scaled(units)
     assert ledger.value == scaled(units)
     assert ledger.unique_id == NODE_ID
+
+
+@pytest.mark.parametrize(("kind", "word"), [
+    (captions.TILE_TEXT_CAPTION, "captioning"),
+    (captions.TILE_TEXT_TAGS, "tagging"),
+])
+def test_the_captions_line_names_the_pass_the_preset_runs(comfy_stubs, prompt_server, kind, word):
+    # Both kinds share the CAPTIONS segment, and a tags run must not read "captioning".
+    ledger = progress.build_caption_ledger(a_preset("captions", kind=kind), 3, unique_id=NODE_ID)
+    for index in range(1, 4):
+        ledger.caption_done(index, 3)
+    ledger.finish()
+
+    assert texts(prompt_server) == [f"{word} 1/3", f"{word} 2/3", f"{word} 3/3", ""]

@@ -564,3 +564,10 @@ def test_sub_layout_matches_the_harness_block_rule(wl, wcap, hl, hcap):
         assert (sub.layout.sol_x, sub.layout.sol_y) == (ref_sx, ref_sy)
         assert sub.layout == reference
         assert sub.region == _reference_block_region(lay, block)
+
+
+def test_solve_layout_is_the_two_axis_solves_and_one_build():
+    sx = grid.solve_axis(2000, 1536, 32, 32, axis="width")
+    sy = grid.solve_axis(1400, 1024, 32, 32, axis="height")
+
+    assert grid.solve_layout(2000, 1400, 1536, 1024, 32, 32) == grid.build_layout(2000, 1400, sx, sy, 32, 32)

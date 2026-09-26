@@ -8,8 +8,8 @@ Render nodes, any one value can be swapped for a text node without editing the f
 `ContextAnchoredTileTestLayout` solves the production grid for the size the image will have
 AFTER upscaling and draws that grid over a preview, so the tile count and every tile's number
 are visible before the upscale is spent. The solve is `sync._prepare_run`'s own: the target
-size rounded up to a multiple of 8 on each axis, then the two `grid.solve_axis` calls and the
-one `grid.build_layout` call, so what the overlay shows is what the engine will sample.
+size rounded up to a multiple of 8 on each axis, then the one `grid.solve_layout` call, so
+what the overlay shows is what the engine will sample.
 
 `ContextAnchoredTileTestUpscale` runs the production upscale stage as a node of its own. That
 is what buys the chain its caching: ComfyUI holds the upscaled canvas, and a downstream re-run
@@ -306,11 +306,7 @@ class ContextAnchoredTileTestLayout:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "The image the chain starts from, before any upscale."}),
-                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "The upscale multiplier. The optional upscale_model runs first when one is connected."}),
-                "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": node.MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
-                "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": node.MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Pixels around each tile that are frozen and shown to the model as context, then cropped away."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Overlapped context that is diffused from both sides and then blended. It anchors the tiles to each other, like context_anchor anchors each tile to its surroundings."}),
+                **node._upscale_geometry("The upscale multiplier. The grid is solved for the size the image has after this upscale."),
             },
         }
 
@@ -336,8 +332,6 @@ class ContextAnchoredTileTestLayout:
         # on, so the grid drawn here is the grid the engine will sample.
         target_width, target_height = upscale.scale_target(source_width, source_height, upscale_by)
         canvas_width, canvas_height = grid.round8_up(target_width), grid.round8_up(target_height)
-        sx = grid.solve_axis(canvas_width, max_tile_width, context_anchor, context_overlap, axis="width")
-        sy = grid.solve_axis(canvas_height, max_tile_height, context_anchor, context_overlap, axis="height")
         test_layout = TestLayout(
             upscale_by=upscale_by,
             max_tile_width=max_tile_width,
@@ -346,7 +340,8 @@ class ContextAnchoredTileTestLayout:
             context_overlap=context_overlap,
             source_size=(source_width, source_height),
             target_size=(target_width, target_height),
-            layout=grid.build_layout(canvas_width, canvas_height, sx, sy, context_anchor, context_overlap),
+            layout=grid.solve_layout(canvas_width, canvas_height, max_tile_width, max_tile_height,
+                                     context_anchor, context_overlap),
         )
 
         # ---- output
@@ -497,6 +492,24 @@ def _check_score(name, value):
             "between 0 and 1, or link it from a Tile Test: Settings node whose preset carries it.")
 
 
+def _caption_megapixels_error(value):
+    # The widget's own range cannot express "0 or at least VL_INPUT_MIN_MEGAPIXELS".
+    if value == 0 or captions.VL_INPUT_MIN_MEGAPIXELS <= value <= vl.PICTURE_CAP_MEGAPIXELS:
+        return None
+    return (
+        "caption_megapixels must be 0, which reads the picture's own size, or between "
+        f"{captions.VL_INPUT_MIN_MEGAPIXELS} and {vl.PICTURE_CAP_MEGAPIXELS}. Got {value}.")
+
+
+def _check_caption_megapixels(value):
+    # A linked value reaches VALIDATE_INPUTS as None, so the rule runs again here.
+    error = _caption_megapixels_error(value)
+    if error is not None:
+        raise ValueError(
+            f"{CAPTIONS_NODE}: {error} Set it in that range, or link it from a Tile Test: "
+            "Settings node.")
+
+
 def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_tokens,
                    caption_megapixels, verification_threshold, position_threshold,
                    prompt_verification_threshold):
@@ -504,6 +517,7 @@ def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_toke
     # text encoder costs minutes to reach the same rejection.
     kind = _text_kind(texts)
     style = texts["global_style_instruction"]
+    _check_caption_megapixels(caption_megapixels)
     vision = replace(captions.load_settings().vision, caption_megapixels=caption_megapixels)
     if style:
         _check_budget("global_style_max_tokens", global_style_max_tokens)
@@ -561,14 +575,6 @@ def _tiles_to_caption(layout, tiles, with_neighbors):
     return named, tuple(captioned)
 
 
-def _tag_texts(run):
-    # (style, written) in generate_tag_set's shape and by its rule, so a style row that wrote
-    # no text reaches Tile Test: Render as no style at all.
-    style = list(run.style_texts)
-    written = [[trace.text for trace in rows] for rows in run.tiles]
-    return (style if any(style) else []), written
-
-
 # --- the Captions node's text outputs, written as Markdown for Preview as Text's Markdown
 # mode. Pure functions over the tags traces, one picture row.
 
@@ -581,6 +587,8 @@ NO_TAG_STAGES = ("The caption kind has no tag stages, and connecting `tile_tags_
                  "place of `tile_caption_instruction` runs them.")
 VERIFICATION_OFF = "off, `tile_tags_verification_statement` is not connected"
 ORIGIN_NAMES = {"prompt": "prompt", "both": "prompt and VL model", "model": "VL model"}
+# prompt_tags_verification_threshold steps by 0.0001, so the verification scores need 4 digits.
+SCORE_DIGITS = 4
 
 # Model text is escaped so that it shows as written. A tag such as <think> would otherwise be
 # removed by the frontend's HTML sanitizer, and a line starting with "-" would become a list.
@@ -588,8 +596,11 @@ _MARKDOWN_CHARACTERS = re.compile(r"([\\`*_\[\]<>|~])")
 _LINE_START_MARKER = re.compile(r"^(\s*)(?:([#+=-])|(\d+)([.)]))")
 
 
-def _p(value):
-    return f"{value:.2f}"
+def _p(value, digits=2):
+    # Truncated, not rounded, so a shown score never reaches a threshold its row fell below.
+    # The inner round absorbs float error such as 0.29 * 100 == 28.999999999999996.
+    scale = 10 ** digits
+    return f"{math.floor(round(value * scale, 6)) / scale:.{digits}f}"
 
 
 def _escaped(line):
@@ -670,10 +681,10 @@ def _verified_block(header, trace, threshold, prompt_threshold):
     ordered = [row for row in rows if row[2] != "model"] + [row for row in rows if row[2] == "model"]
     table = [(ORIGIN_NAMES[origin],
               "kept" if p >= (prompt_threshold if origin == "prompt" else threshold) else "dropped",
-              _p(p), _escaped(item)) for item, p, origin in ordered]
-    left_out = [f"- {_escaped(name)}, {reason}" for name, reason in trace.dropped] or ["None."]
+              _p(p, SCORE_DIGITS), _escaped(item)) for item, p, origin in ordered]
+    left_out = ", ".join(f"{_escaped(name)} ({reason})" for name, reason in trace.dropped) or "none"
     return _section(header, [_table(("Source", "Result", "Score", "Tag"), table),
-                             "**Left out before verification**", "\n".join(left_out)])
+                             f"**Left out before verification:** {left_out}"])
 
 
 def _unchecked_block(header, trace):
@@ -688,9 +699,9 @@ def _verified_debug(preset, headers, traces):
     threshold = preset.tile_tags_verification_threshold
     prompt_threshold = preset.prompt_tags_verification_threshold
     sentence = ("Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag "
-                f"the VL model listed is kept at {_p(threshold)} or above "
+                f"the VL model listed is kept at {_p(threshold, SCORE_DIGITS)} or above "
                 "(`tile_tags_verification_threshold`), and a prompt tag it did not list at "
-                f"{prompt_threshold} or above (`prompt_tags_verification_threshold`).")
+                f"{_p(prompt_threshold, SCORE_DIGITS)} or above (`prompt_tags_verification_threshold`).")
     return _debug_text(VERIFIED_TITLE, sentence, [_verified_block(header, trace, threshold, prompt_threshold)
                                                   for header, trace in zip(headers, traces, strict=True)])
 
@@ -703,37 +714,43 @@ def _placement(item, term, unplaced):
     return f"kept at {term}"
 
 
-def _positions(trace, positions_off, threshold):
-    if positions_off:
-        return [f"**Positions:** {positions_off}"]
-    header = ("Tag", "Result", *(f"{word.capitalize()} row" for word in tags.ROW_WORDS),
-              *(f"{word.capitalize()} column" for word in tags.COLUMN_WORDS))
-    rows = [(_escaped(item), _placement(item, term, trace.unplaced), *(_p(p) for p in strips))
+def _axis_cell(strips, threshold):
+    # Bold marks a strip that holds the tag, the same rule tags.axis_word applies.
+    return ", ".join(f"**{_p(p)}**" if p >= threshold else _p(p) for p in strips)
+
+
+def _positions_table(trace, threshold):
+    header = ("Tag", "Result", f"Rows ({', '.join(tags.ROW_WORDS)})",
+              f"Columns ({', '.join(tags.COLUMN_WORDS)})")
+    rows = [(_escaped(item), _placement(item, term, trace.unplaced),
+             _axis_cell(strips[:3], threshold), _axis_cell(strips[3:], threshold))
             for item, strips, term in zip(trace.kept, trace.strips, trace.terms, strict=True)]
-    return [f"**Positions.** A strip holds a tag at {_p(threshold)} or above "
-            "(`tile_tags_position_threshold`). A tag gets a term on each axis where exactly one "
-            "strip holds it.", _table(header, rows)]
+    return _table(header, rows)
 
 
-def _final_block(header, trace, positions_off, threshold):
+def _final_block(header, trace, positions_on, threshold):
     subsets = [item for item in trace.verified if item not in trace.kept]
+    table = [_positions_table(trace, threshold)] if positions_on else []
     return _section(header, [f"**Dropped as a subset of a longer kept tag:** {_tag_list(subsets)}",
-                             *_positions(trace, positions_off, threshold),
-                             "**Tile text**", _quote(trace.text)])
+                             *table, "**Tile text**", _quote(trace.text)])
 
 
 def _final_debug(preset, headers, traces, locate):
+    threshold = preset.tile_tags_position_threshold
     positions_off = ""
     if not preset.tile_tags_verification_statement:
         positions_off = VERIFICATION_OFF
     elif not locate:
         positions_off = "off, `position_terms` is off"
-    sentence = ("A kept tag that is part of a longer kept tag is dropped. Each remaining tag is "
-                "scored on six strips of the tile, three rows and three columns. A tag no strip "
-                "holds is dropped. On each axis where exactly one strip holds a tag, that strip "
-                "names the tag's position term. The tags with their terms make the tile text.")
-    threshold = preset.tile_tags_position_threshold
-    return _debug_text(FINAL_TITLE, sentence, [_final_block(header, trace, positions_off, threshold)
+    positions = (f"Positions are {positions_off}. The remaining tags make the tile text."
+                 if positions_off else
+                 "Each remaining tag is scored on six strips of the tile, three rows and three "
+                 f"columns. A strip holds a tag at {_p(threshold)} or above "
+                 "(`tile_tags_position_threshold`). A tag no strip holds is dropped. On each axis "
+                 "where exactly one strip holds a tag, that strip names the tag's position term. "
+                 "The tags with their terms make the tile text.")
+    sentence = f"A kept tag that is part of a longer kept tag is dropped. {positions}"
+    return _debug_text(FINAL_TITLE, sentence, [_final_block(header, trace, not positions_off, threshold)
                                                for header, trace in zip(headers, traces, strict=True)])
 
 
@@ -808,15 +825,9 @@ class ContextAnchoredTileTestCaptions:
     def VALIDATE_INPUTS(s, caption_megapixels=None):
         # Naming a widget here disables ComfyUI's own min and max check for it (node.py's
         # VALIDATE_INPUTS states the rule), so the settings file's entire rule is re-checked.
-        # The widget's own range cannot express "0 or at least VL_INPUT_MIN_MEGAPIXELS".
-        if caption_megapixels is None or caption_megapixels == 0:
+        if caption_megapixels is None:
             return True
-        if not captions.VL_INPUT_MIN_MEGAPIXELS <= caption_megapixels <= vl.PICTURE_CAP_MEGAPIXELS:
-            return (
-                "caption_megapixels must be 0, which reads the picture's own size, or between "
-                f"{captions.VL_INPUT_MIN_MEGAPIXELS} and {vl.PICTURE_CAP_MEGAPIXELS}. Got "
-                f"{caption_megapixels}.")
-        return True
+        return _caption_megapixels_error(caption_megapixels) or True
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
@@ -871,7 +882,7 @@ class ContextAnchoredTileTestCaptions:
             if is_tags:
                 tag_run = tags.generate_tag_trace(
                     clip, padded, chosen, run_preset, progress=ledger, locate=position_terms)
-                style, written = _tag_texts(tag_run)
+                style, written = tags.tag_texts(tag_run)
                 debug = _tags_debug(run_preset, headers, tag_run, position_terms)
             else:
                 style, written = captions.generate_caption_set(clip, padded, chosen, run_preset,
@@ -901,6 +912,12 @@ def _run_preset(surface, canvas_tokens, crop_tokens):
     # The settings file's block with the two widgets written over its [vision] table, so a
     # token count can be tried without editing the file. Both counts at 0 is what the file
     # itself rejects at load, and it is rejected here for the same reason.
+    # A linked value bypasses the widget's min and max.
+    for name, value in (("canvas_tokens", canvas_tokens), ("crop_tokens", crop_tokens)):
+        if not 0 <= value <= vl.MAX_VISION_TOKENS:
+            raise ValueError(
+                f"Tile Test: Render was given {name} {value}, and it must be between 0 and "
+                f"{vl.MAX_VISION_TOKENS}. Set {name} in that range.")
     if canvas_tokens == 0 and crop_tokens == 0:
         raise ValueError(
             "Tile Test: Render was given canvas_tokens 0 and crop_tokens 0. A tile needs vision "
@@ -980,7 +997,7 @@ def _clip_rect(rect, image):
 
 def _cut(image, rect):
     x0, y0, x1, y1 = rect
-    return image[:, y0:y1, x0:x1, :3].contiguous()
+    return image[:, y0:y1, x0:x1, :3].clone()
 
 
 def _region_mask(sub, image):
@@ -1049,9 +1066,6 @@ class ContextAnchoredTileTestRender:
 
     @classmethod
     def INPUT_TYPES(s):
-        # Lazy import: this module's scope stays comfy-free (pinned by a subprocess test).
-        import comfy.samplers
-
         vision = captions.load_settings().vision
         return {
             "required": {
@@ -1060,14 +1074,9 @@ class ContextAnchoredTileTestRender:
                 "model": ("MODEL", {"tooltip": "The diffusion model that denoises each tile."}),
                 "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). There is no positive prompt input, since each tile is conditioned on the image itself."}),
                 "vae": ("VAE", {"tooltip": "The VAE that encodes and decodes each tile."}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Noise is drawn once for the entire canvas and then sliced per tile, so a tile keeps the noise the full run would have given it."}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m"}),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform"}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
-                "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                **node._sampling_widgets(),
                 "anchor_source": node._anchor_source(),
-                "surface": (list(captions.VLM_SURFACES), {"default": captions.VLM_METHOD_VISION, "tooltip": "What fills every tile's positive. The two caption surfaces need Tile Test: Captions connected."}),
+                "surface": (list(captions.VLM_SURFACES), {"default": captions.VLM_METHOD_VISION_CAPTIONS, "tooltip": "What fills every tile's positive. The two caption surfaces need Tile Test: Captions connected. The VL nodes use the vision tokens and captions surface by default."}),
                 "canvas_tokens": ("INT", {"default": vision.canvas_tokens, "min": 0, "max": vl.MAX_VISION_TOKENS, "tooltip": "Vision rows a tile takes from one encode of the entire image. 0 turns that source off."}),
                 "crop_tokens": ("INT", {"default": vision.crop_tokens, "min": 0, "max": vl.MAX_VISION_TOKENS, "tooltip": "Vision rows a tile takes from the encode of its own crop. 0 turns that source off."}),
                 "tiles": ("STRING", {"default": "", "tooltip": "Comma separated tile numbers, as Tile Test: Layout labels them. Empty renders the entire canvas as one run."}),
@@ -1084,6 +1093,12 @@ class ContextAnchoredTileTestRender:
     OUTPUT_IS_LIST = (True, True)
     FUNCTION = "render_tiles"
     CATEGORY = "image/upscaling/tile testing"
+
+    @classmethod
+    def VALIDATE_INPUTS(s, sampler_name=None):
+        # The production nodes' queue-time sampler check, so a sampler the engine cannot time is
+        # named before the text encoder and the diffusion model load.
+        return node.check_sampler(sampler_name)
 
     def render_tiles(self, image, layout, model, clip, vae, seed, sampler_name, scheduler, steps,
                      cfg, denoise, anchor_source, surface, canvas_tokens, crop_tokens, tiles,

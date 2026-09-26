@@ -1,6 +1,6 @@
 # Context-Anchored Tile Refine, project guide
 
-ComfyUI custom node package, three production nodes plus a four node testing chain
+ComfyUI custom node package, three production nodes plus a five node testing chain
 (`testing.py`) over ONE tile geometry and TWO engines: the base
 node's raster path (`sampling._refine_tiles`) and the VL nodes' synchronized path (`sync.py`
 over `stepper.py`), which since 1.6.0 is the only VL path. They refine an
@@ -296,8 +296,8 @@ without that doc's temporal design.
   clouds), larger the more canvas rows it gets (70 rows at 0.79 MP grew two towers, 165 rows
   at 2 MP a skyline), and the crop rows of that tile hold only sky and cancel the demand.
   About 100 crop rows do that without redrawing a content tile, where 200 swirl the tile's
-  own subject and 768 gouge it, so the shipped 165 canvas and 100 crop tokens are the judged
-  point. A 3x3 NEIGHBORHOOD WINDOW encode (2026-09-01 to 2026-09-02) sat between the two and
+  own subject and 768 gouge it, so 165 canvas and 100 crop tokens were the judged point, and
+  the owner ships `crop_tokens` 110 (9aa6385). A 3x3 NEIGHBORHOOD WINDOW encode (2026-09-01 to 2026-09-02) sat between the two and
   failed like the canvas slice, so it was removed, not flagged off. A/B-settled (AB26-AB36):
   vision rows are positionally exact and demand-free, and ANY text (user prompt, generated
   style, captions) re-admits phantom objects in proportion to its volume, so there is no
@@ -339,24 +339,23 @@ without that doc's temporal design.
   `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
   a new or renamed preset needs a restart, while a preset's own wording is re-read per run by
   `resolve_method` so tuning a prompt does not. Each `[presets.<label>]` block adds ONE option
-  per caption surface, grouped by preset and in file order, every one read `"<surface>
-  (<label>)"`, the FIRST preset (the DEFAULT) included since 2026-09-16 (before that its two
-  options carried no label, which hid which preset the default was). The bare strings
-  `"captions"` / `"vision tokens and captions"` are what a pre-preset workflow saved: the
-  selector no longer offers them, `method_surface` accepts them, `resolve_method` routes them
-  to the first preset, and the VL nodes' `VALIDATE_INPUTS` names `vlm_method` so core's
-  combo-list check never rejects them. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
+  per caption surface, grouped by preset and in file order. The FIRST preset (the DEFAULT)
+  offers the bare strings `"vision tokens and captions"` / `"captions"` (435de90), and every
+  other preset reads `"<surface> (<label>)"`. The first preset's labeled form, which a workflow
+  saved between db1f462 and 435de90 holds, is not offered: `resolve_method` resolves it by its
+  label and the VL nodes' `VALIDATE_INPUTS` names `vlm_method` so core's combo-list check never
+  rejects it. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
   THE PROMPT INPUT (2026-09-16): an instruction may carry `PROMPT_PLACEHOLDER` (`{PROMPT}`),
   which `with_prompt(preset, prompt)` fills by literal replace (never str.format, a prompt can
   hold braces) into BOTH instructions, stripping the widget's trailing newline; a placeholder
   met by a blank prompt raises there, naming the preset, the key and the input, and
   `generate_caption_set` runs `_check_prompt_filled` first so a direct caller that skipped
   `with_prompt` never captions with the literal placeholder. The prompt reaches the VL model's
-  question only, never the DiT. The FIRST shipped preset is `prompted`, the owner's wording
-  under test (quotes the prompt, holds the caption to the crop, no style caption), so the
-  default options now REQUIRE the prompt socket connected; `standard` is second, whose wording
-  and budgets are the pre-settings-file constants character for character
-  (`RICH_GROUPED_INSTRUCTION`, 768 tokens). The caption
+  question only, never the DiT. settings.toml ships ONE preset, `tags` (see the tags.py
+  bullet), whose prompt question is skipped when the prompt is blank, so the default options
+  never require the prompt socket. The caption presets (`prompted`, `standard`, `artwork` and
+  the grounded pair) live in `settings.user.example.toml`, which the nodes never read. A
+  caption preset holding `{PROMPT}` still requires the prompt socket connected. The caption
   picture size is the `[vision]` table's `caption_megapixels`, ONE size for the tile caption
   and the style caption since 2026-09-02 (a user's own copy still carrying the two per-preset
   `*_megapixels` keys fails with a message naming the move), shipped at
@@ -411,6 +410,35 @@ without that doc's temporal design.
   on the production upscale node needs (minutes on a 24 tile grid) and what keeps the pure
   suite's zero-picture call counts true. `clear_caption_cache()` is the reset, and an autouse
   conftest fixture calls it before every test.
+- `context_anchored_tile_refine/tags.py`: the TAGS tile text (`tile_text = "tags"`), the one
+  preset settings.toml ships since 1.8.0 (the caption presets live in
+  `settings.user.example.toml`). PICTURE PASS: the style caption, then, when the prompt is
+  non-blank AND `prompt_tags_instruction` is set, ONE text-only greedy generate listing the
+  prompt's physical things, a tag kept only when every content word shares a plural form with a
+  prompt word (`grounded` over `_word_forms`, the list stopped after `UNGROUNDED_STREAK` 2
+  ungrounded tags in a row). PER TILE: propose (`clip.generate` over the crop at
+  `VL_MAX_PIXELS` 1 MP, stopped at `MAX_PROPOSED_TAGS` 25 complete tags, never reads the
+  prompt, so a long prompt never lengthens a tile's reply), merge model-first (cap
+  `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK (one text-only
+  `ChoiceQuestion` per distinct tag, answers shared across the run in `known_things`, dropped at
+  p(other) >= `THING_THRESHOLD` 0.9), verify (the noul `tile_tags_verification_statement` on the
+  tile, 0.9 for model and both, `prompt_tags_verification_threshold` 0.9999 for prompt-only,
+  since a prompt tag the tile lacks passes 0.9 as a near name for what is there), `drop_subsets`,
+  locate (six strips at `STRIP_MEGAPIXELS` 0.25, a tag no strip holds dropped, a term only on an
+  axis where exactly ONE strip holds it). The thing check stays PACKED on purpose:
+  `tests-AB/probe_thing_pack.py` measured one tag per request at 6x the time, with every flip a
+  correct tag dropped. SPEED at identical output: `skip_resident_loads` (an instance patch of
+  `clip.load_model` while the CLIP is resident, restored in finally) and `shared_vision_encode`
+  (one vision tower pass per tile for propose and verify, through logit_classifier's PRIVATE
+  `_determinism`, one logged warning per session when it is missing). CUDA GRAPH decode stays
+  ON: `captions.clip_generate` runs `comfy.model_prefetch.cleanup_prefetch_queues()` after EVERY
+  generate, because core keeps each decoder layer's captured graph bound to the freed KV cache
+  of the last generate (core issue #16441) and a second generate in one node replays it against
+  freed memory. Results cache in `_TAG_CACHE` (a `captions.ClipBoundCache`) keyed by the picture
+  digest, the preset wording and thresholds, the prompt and `_tuning()`. TECH DEBT: the load skip
+  and the vision share belong in logit_classifier's `ComfyClipBackend`, with a floor bump. Bench
+  and log: `tests-AB/ab_tags_bench.py`, `tests-AB/tags-bench-log.md`. torch + stdlib at module
+  scope, comfy and logit_classifier lazy, so a missing library fails with its pip command.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
@@ -460,9 +488,12 @@ without that doc's temporal design.
   ATTRIBUTE only; the known escape is sd.py:360's module-level binding under CLIP hook
   scheduling. **Stdlib only at module scope — no torch either**; comfy is lazy (subprocess
   test pins all three).
-- `context_anchored_tile_refine/testing.py`: the TILE TESTING CHAIN (2026-09-03), four nodes
+- `context_anchored_tile_refine/testing.py`: the TILE TESTING CHAIN (2026-09-03), five nodes
   that are not production nodes and say so in each docstring, `Tile Test: Layout` /
-  `Upscale` / `Captions` / `Render` in `image/upscaling/tile testing`. Built so the owner can
+  `Upscale` / `Captions` / `Render` plus `Tile Test: Settings` in
+  `image/upscaling/tile testing`. The Settings node outputs every value of one settings file
+  preset, one output per key in `SETTINGS_OUTPUTS` order, later keys APPENDED because saved
+  links are positional. Built so the owner can
   tune tiles, prompts and token counts without upscaling again: ComfyUI re-executes a node only
   when an input, a widget or IS_CHANGED changed, so the chain puts the seed on the Render node
   ONLY and the upscale and the captions come from cache across a re-roll. LAYOUT (`TestLayout`,
@@ -472,15 +503,16 @@ without that doc's temporal design.
   drawing over an area-resampled preview capped at `OVERLAY_MEGAPIXELS` (a preview, never
   sampled) with the crop, overlap and core rects and a `"{index} r{row}c{col}"` label per tile.
   The Upscale node is `upscale.prepare_upscaled` at the layout's multiplier and is OPTIONAL (an
-  already upscaled image at `upscale_by` 1.0 skips it). The Captions node runs
-  `captions.generate_caption_set` over the PADDED canvas from a `preset`: a settings file
-  preset IGNORES the three instruction widgets (so a trial wording stays in them), and the
-  `CUSTOM_PRESET` option (`"custom instructions"`, appended after the file's labels, and a
-  file preset of that name is refused at INPUT_TYPES) builds a `captions.Preset` from
-  `tile_instruction` (required non-empty), `style_instruction` (empty = no style caption) and
-  `max_tokens` (required above 0, both budgets), and `prompt` fills `{PROMPT}` in either
-  through the same `captions.with_prompt`. `style_caption` off and `caption_megapixels`
-  apply to both (0 reads the crop's own size). `tiles` (csv, same parser as the Render node's,
+  already upscaled image at `upscale_by` 1.0 skips it). The Captions node is SOCKET-DRIVEN:
+  every instruction is an optional STRING socket, on when connected and non-blank, wired from
+  the Settings node or a text node. `tile_caption_instruction` runs the caption kind
+  (`captions.generate_caption_set`) and `tile_tags_instruction` the tags kind
+  (`tags.generate_tag_trace`), exactly one on, both over the PADDED canvas, and `prompt` fills
+  `{PROMPT}` through `captions.with_prompt`. The budget, `caption_megapixels` and threshold
+  widgets are linkable, so the node re-checks each range itself (a linked value skips core's
+  min and max). `position_terms` off skips the strip locate. Four more outputs,
+  `prompt_tags`, `tags_listed`, `tags_verified` and `tags_final`, print every tags stage per
+  tile. `tiles` (csv, same parser as the Render node's,
   `_parse_tile_numbers(text, count, node_name)`) captions the named tiles, plus their
   bordering tiles from `grid.neighborhood` when `with_neighbors` is on, since a block run at
   the Render node conditions every lane; empty captions every tile. It returns `TestCaptions`
@@ -488,8 +520,8 @@ without that doc's temporal design.
   tile, each the tile's OWN caption, the `style` caption apart (None when the run asked for
   none), the named `tiles`, the target size, the grid shape and every crop rect, so the Render
   node rejects captions written for another grid; its `__str__` is the Markdown listing,
-  the style once under a `Style caption` heading above the tiles, the same for a file preset
-  and the custom option, because core's Preview as Text falls back to `str()`), that listing
+  the style once under a `Style caption` heading above the tiles, because core's Preview as
+  Text falls back to `str()`), that listing
   as `text`, and the
   named tiles as a csv `tiles` STRING for the Render node's `tiles` input. EVERY text output
   is Markdown for Preview as Text's Markdown mode (frontend `marked`, GFM, then DOMPurify):

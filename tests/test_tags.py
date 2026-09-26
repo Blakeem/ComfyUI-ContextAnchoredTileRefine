@@ -7,6 +7,7 @@ library (its tags helpers and question types), so no comfy install and no model 
 """
 import dataclasses
 import importlib.metadata
+import logging
 import re
 import sys
 import types
@@ -656,13 +657,22 @@ def test_the_prompt_tags_keep_only_tags_whose_every_word_is_a_prompt_word_and_st
 
 
 def test_a_tag_is_grounded_when_every_content_word_is_a_prompt_word_up_to_a_plural_ending():
-    prompt_stems = tags._word_stems("Two tall towers, a city of berries")
+    prompt_words = tags.prompt_forms("Two tall towers, a city of berries")
 
-    assert tags.grounded("the tower", prompt_stems)
-    assert tags.grounded("tall towers of a city", prompt_stems)
-    assert tags.grounded("berry", prompt_stems)
-    assert not tags.grounded("red tower", prompt_stems)
-    assert not tags.grounded("the", prompt_stems)
+    assert tags.grounded("the tower", prompt_words)
+    assert tags.grounded("tall towers of a city", prompt_words)
+    assert tags.grounded("berry", prompt_words)
+    assert not tags.grounded("red tower", prompt_words)
+    assert not tags.grounded("the", prompt_words)
+
+
+@pytest.mark.parametrize(("singular", "plural"), [
+    ("tree", "trees"), ("house", "houses"), ("glass", "glasses"), ("dress", "dresses"),
+])
+def test_an_e_final_or_s_final_noun_is_grounded_in_either_number(singular, plural):
+    # One cut per word stems "trees" to "tre" and "tree" to "tree", so neither side matched.
+    assert tags.grounded(singular, tags.prompt_forms(f"a picture of {plural}"))
+    assert tags.grounded(plural, tags.prompt_forms(f"a picture of a {singular}"))
 
 
 def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_run(classifier):
@@ -1019,6 +1029,27 @@ def test_the_guard_passes_while_the_dist_metadata_reports_0_1_0(monkeypatch):
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
 
     tags.check_tags_ready(FakeTagClip())
+
+
+def test_a_library_without_the_determinism_window_skips_the_shared_encode_with_one_warning(
+        monkeypatch, caplog):
+    def preprocess_embed(embed, device):
+        return embed
+
+    transformer = types.SimpleNamespace(preprocess_embed=preprocess_embed)
+    clip = types.SimpleNamespace(cond_stage_model=types.SimpleNamespace(
+        clip="qwen", qwen=types.SimpleNamespace(transformer=transformer)))
+    monkeypatch.setitem(sys.modules, "logit_classifier.backends._torch_window", None)
+    tags._warn_unshared_vision_encode.cache_clear()
+
+    with caplog.at_level(logging.WARNING, logger=tags.logger.name):
+        for _ in range(2):
+            with tags.shared_vision_encode(clip):
+                assert transformer.preprocess_embed is preprocess_embed
+
+    (record,) = caplog.records
+    assert "_determinism" in record.getMessage()
+    assert "one extra vision tower pass per tile" in record.getMessage()
 
 
 def test_a_missing_library_fails_before_any_generate(classifier, monkeypatch):

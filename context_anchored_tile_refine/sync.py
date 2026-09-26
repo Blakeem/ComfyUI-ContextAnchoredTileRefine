@@ -33,9 +33,9 @@ counterpart here (stepper.py runs the stock sampler function end to end).
               so neither has anything left to correct.
 
 REGION (mask) PATH: `refine_sync(mask=...)` crops to the mask bbox plus `context_anchor`
-(sampling's own `_mask_bbox` / `_expand_snap_clamp`), runs stages L..D over THAT crop with
-every lane's denoise mask intersected with the region gate, and composites the crop back
-through the shipped 1px anti-aliased edge (`sampling._aa_alpha`) — no feather at the mask
+(`sampling.refine_masked_region`, the raster path's own wrapper), runs stages L..D over THAT
+crop with every lane's denoise mask intersected with the region gate, and composites the crop
+back through the shipped 1px anti-aliased edge — no feather at the mask
 boundary (CLAUDE.md prime directive 3), and every pixel the edge weights at 0 stays
 byte-identical to the input. The conditioning still reads the WHOLE image: the pre-pass gets
 the pre-crop image plus the bbox origin as offsets, so a region tile slices its true place in
@@ -73,6 +73,7 @@ from .progress import (
     W_ENCODE_CAPTION_TEXT,
     W_ENCODE_TILE,
     caption_segment,
+    caption_status_word,
     vision_encode_units,
 )
 
@@ -241,23 +242,8 @@ def check_preconditions(model_patcher, sigmas, anchor_source):
             f"or use anchor_source '{ANCHOR_SOURCE_IMAGE}'.")
 
 
-def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, batch_index=0):
-    # ONE canvas-wide draw, sliced per lane: per-lane draws would give every same-shaped tile
-    # identical noise, and slices are spatially anchored so overlapping windows agree. The
-    # dummy mirrors vae.encode's latent layout exactly — a video-family VAE (latent_dim 3,
-    # e.g. Krea 2's Wan VAE) encodes an image batch to a 5-D [B,C,1,h,w] latent — and is drawn
-    # at the FULL batch with row batch_index selected, so a picture inside refine_image's
-    # picture loop keeps the noise it would have drawn in one shared call (prepare_noise draws
-    # a SINGLE randn over the whole latent size). The identical contract as
-    # sampling._refine_tiles:751-762, deliberately: a picture must not change noise because it
-    # was refined by a different engine.
-    latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
-    draw_batch = batch_size if batch_size > 1 else batch
-    dummy = torch.zeros((draw_batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
-    canvas_noise = noise.generate_noise({"samples": dummy})
-    if batch_size > 1:
-        canvas_noise = canvas_noise[batch_index:batch_index + 1]
-    return canvas_noise
+# The raster path draws through the same function, so a picture keeps its noise across engines.
+build_canvas_noise = sampling.build_canvas_noise
 
 
 def _check_given_captions(tile_captions, preset, n_tiles, rows, progress):
@@ -325,7 +311,8 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
     if tile_captions is None:
         caption_units, n_captions = caption_segment(preset, n_tiles, rows)
         if progress is not None:
-            progress.open(CAPTIONS, caption_units, chunks=n_captions)
+            progress.open(CAPTIONS, caption_units, chunks=n_captions,
+                          status_word=caption_status_word(preset))
         if preset.kind == captions.TILE_TEXT_TAGS:
             style_texts, tag_texts = tags.generate_tag_set(vl_clip, source, tiles, preset,
                                                            batch_size, batch_index, progress=progress,
@@ -354,6 +341,8 @@ def build_lane_guiders(guider, tile_positives):
     # conds, loaded_models) and tears it down in outer_sample's finally, so N in-flight
     # sample() calls on ONE guider clobber each other. A shallow copy shares the model patcher
     # (deliberately — one model, one GPU stream) and gets its OWN original_conds map.
+    # It also needs its own model_options, because core's outer_sample stores the per-run
+    # multi-GPU thread pool there and interleaved lanes would overwrite each other's pool.
     #
     # strip_control is load-bearing, not tidiness: each tile's positive is a fresh vision
     # slice that carries no control chain, so a control left on the caller's NEGATIVE would
@@ -378,6 +367,8 @@ def build_lane_guiders(guider, tile_positives):
                 "Context-Anchored Tile Refine (sync): copying this guider did not carry a dict "
                 "'original_conds', so its lanes cannot be given their own tile conditioning. "
                 "The sync engine needs a CFGGuider-compatible guider.")
+        if isinstance(getattr(guider, "model_options", None), dict):
+            lane_guider.model_options = dict(guider.model_options)
         swapped_conds = dict(stripped_conds)
         swapped_conds["positive"] = positive
         lane_guider.original_conds = swapped_conds
@@ -463,18 +454,11 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     padded, (height, width) = sampling.pad_image_to_multiple(pixels)
     batch, canvas_h, canvas_w = int(padded.shape[0]), int(padded.shape[1]), int(padded.shape[2])
 
-    # ---- process. Region gate at LATENT resolution, the raster path's rule verbatim
-    # (sampling._refine_tiles): pad the pixel mask onto the /8 canvas with constant 0 (the
-    # padded strip is always cropped away), then cover-downsample by 8 with max_pool2d — NOT
-    # avg+threshold — so every pixel with region == 1 lands in a DIFFUSED latent cell; else a
-    # subject-edge pixel would be frozen yet composited back. Over-cover is harmless: the
-    # extra diffused cells fall outside the mask and the anti-aliased composite discards them.
-    # No pixel-resolution copy is kept, unlike the raster path: this engine has no DC match to
-    # gate, because both sides of every band decode ONE latent.
+    # ---- process. The pixel-resolution gate is dropped, unlike the raster path: this engine
+    # has no DC match to gate, because both sides of every band decode ONE latent.
     region_latent = None
     if region_pixel is not None:
-        region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
-        region_latent = (torch.nn.functional.max_pool2d(region_padded[:, None].float(), 8) > 0).float()[:, 0]
+        _region_padded, region_latent = sampling.region_gates(region_pixel, canvas_h, canvas_w)
 
     # The grid is solved ONCE and layout.tiles is what BOTH the conditioning pre-pass and the
     # lanes below read, so a tile's positive can never be sliced for a different rect than the
@@ -482,9 +466,8 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     # which is that same one solve seen from one caller further up.
     budget_tiles = None
     if layout is None:
-        sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, axis="width")
-        sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, axis="height")
-        layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
+        layout = grid.solve_layout(canvas_w, canvas_h, max_tile_width, max_tile_height,
+                                   context_anchor, context_overlap)
     else:
         layout, budget_tiles = _override_layout(layout, canvas_w, canvas_h, context_anchor,
                                                 context_overlap)
@@ -790,12 +773,7 @@ def decode_composite(vae, model, canvas, padded, layout, progress=None):
         # lanes' `x` lives there), and process_latent_out is the exact inverse comfy applies
         # to every sampler result on the way out (samplers.py:1238).
         raw_window = model.process_latent_out(canvas[..., rect.y0:rect.y1, rect.x0:rect.x1])
-        decoded = vae.decode(raw_window)
-        if decoded.ndim == 5:
-            # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]; fold T into the batch
-            # exactly as core's VAEDecode node does. T is 1 by construction (the run's
-            # noise/latent shape check pins one latent row per image), so this is a view.
-            decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
+        decoded = sampling.fold_decoded_frames(vae.decode(raw_window))
         # .to(): under --gpu-only the decode lands on the GPU intermediate device while the
         # canvas stays on the input device; a no-op when they already match.
         decoded = decoded.to(result.device)
@@ -933,36 +911,19 @@ def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_
                               preset=preset, tile_captions=tile_captions, layout=layout,
                               noise_fields=noise_fields)
 
-    # Region path. Harden a soft input at 0.5 — a fractional denoise mask would leave the
-    # under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
-    mask_bin = mask >= 0.5
-    bbox = sampling._mask_bbox(mask_bin)
-    if bbox is None:
-        # Empty mask: nothing to refine, and (unlike the input) a clone is a safe no-op. RGB-
-        # narrowed like every sampled path, so the output channel count never depends on the
-        # mask's content.
-        return image[..., :3].clone()
-    height, width = int(image.shape[1]), int(image.shape[2])
-    y0, y1, x0, x1 = sampling._expand_snap_clamp(bbox, context_anchor, height, width)
-
     # ---- process
-    sub_image = image[:, y0:y1, x0:x1, :]
-    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    # The conditioning still reads the WHOLE image: the pre-pass encodes `image` and offsets
-    # every region tile's rect by the bbox origin, so a masked refine stays globally informed
-    # instead of only seeing its own crop.
-    refined_sub = _refine_canvas(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width,
-                                 max_tile_height, context_anchor, context_overlap, vl_clip,
-                                 vlm_method=vlm_method, anchor_source=anchor_source,
-                                 batch_size=batch_size, batch_index=batch_index,
-                                 region_pixel=sub_mask, vl_context=(image, x0, y0),
-                                 progress=progress, preset=preset, tile_captions=tile_captions,
-                                 layout=layout, noise_fields=noise_fields)
+    def refine_crop(sub_image, sub_mask, crop_box):
+        # The conditioning still reads the WHOLE image: the pre-pass encodes `image` and offsets
+        # every region tile's rect by the bbox origin, so a masked refine stays globally
+        # informed instead of only seeing its own crop.
+        y0, _y1, x0, _x1 = crop_box
+        return _refine_canvas(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width,
+                              max_tile_height, context_anchor, context_overlap, vl_clip,
+                              vlm_method=vlm_method, anchor_source=anchor_source,
+                              batch_size=batch_size, batch_index=batch_index,
+                              region_pixel=sub_mask, vl_context=(image, x0, y0),
+                              progress=progress, preset=preset, tile_captions=tile_captions,
+                              layout=layout, noise_fields=noise_fields)
 
-    # ---- output. Narrow to RGB: the crop comes back 3-channel (a 4-channel input's alpha is
-    # dropped exactly as on the no-mask path), so the composite and the output stay 3-channel.
-    rgb = image[..., :3]
-    out = rgb.clone()
-    aa = sampling._aa_alpha(sub_mask)[..., None]
-    out[:, y0:y1, x0:x1, :] = aa * refined_sub + (1.0 - aa) * rgb[:, y0:y1, x0:x1, :]
-    return out
+    # ---- output
+    return sampling.refine_masked_region(image, mask, context_anchor, refine_crop)

@@ -247,6 +247,14 @@ def build_layout(W, H, sx, sy, ctx, overlap=0):
     )
 
 
+def solve_layout(W, H, cap_w, cap_h, ctx, overlap=0):
+    # The production solve, in one place, so both engines and the Layout test node cannot
+    # drift apart on the grid a canvas gets.
+    sx = solve_axis(W, cap_w, ctx, overlap, axis="width")
+    sy = solve_axis(H, cap_h, ctx, overlap, axis="height")
+    return build_layout(W, H, sx, sy, ctx, overlap)
+
+
 def neighborhood(layout, index):
     # The 3x3 range of columns and rows around one tile, clamped to the grid, as the inclusive
     # bounds sub_layout takes.

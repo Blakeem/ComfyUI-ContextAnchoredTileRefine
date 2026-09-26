@@ -180,6 +180,27 @@ def test_non_oom_error_is_not_retried(comfy_stubs):
     assert len(comfy_stubs["tiled_scale_calls"]) == 1
 
 
+class RgbOnlyUpscaleModel(FakeUpscaleModel):
+    """A spandrel model's first conv: it rejects any input that is not 3 channels."""
+
+    def __call__(self, samples):
+        if samples.shape[1] != 3:
+            raise RuntimeError(f"expected input to have 3 channels, but got {samples.shape[1]}")
+        return super().__call__(samples)
+
+
+def test_an_rgba_image_upscales_its_rgb_through_the_model_and_its_alpha_bilinear(comfy_stubs):
+    # Core's ImageUpscaleWithModel splits the alpha off, so a 4-channel IMAGE must not reach
+    # the model's first conv.
+    image = torch.rand(1, 64, 48, 4)
+    model = RgbOnlyUpscaleModel(scale=2, patcher=FakePatcher())
+
+    out = upscale._upscale_with_model(model, image)
+
+    assert out.shape == (1, 128, 96, 4)
+    assert comfy_stubs["common_upscale_calls"] == [((1, 1, 64, 48), 96, 128, "bilinear", "disabled")]
+
+
 # --- the OOM tile-halving retry -----------------------------------------------------
 
 def test_oom_halves_the_tile_until_it_fits(comfy_stubs):
@@ -314,7 +335,7 @@ BLOCK_CELLS = (4, 16, 8, 24)
 
 
 class FakeVAE:
-    """The two attributes sync.build_canvas_noise reads off a VAE: the latent channel count,
+    """The two attributes sampling.build_canvas_noise reads off a VAE: the latent channel count,
     and latent_dim 3 for a video-family VAE, which encodes an image batch to a 5-D latent."""
 
     def __init__(self, latent_dim=2, latent_channels=4):

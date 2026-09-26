@@ -654,3 +654,31 @@ def test_the_preset_override_rides_the_picture_loop(comfy_stubs, monkeypatch):
                           context_anchor=0, context_overlap=0, vl_clip=object(), preset=preset)
 
     assert [call["preset"] for call in sync_calls] == [preset] * 3
+
+
+def test_both_engines_draw_canvas_noise_through_one_function():
+    from context_anchored_tile_refine import sync
+
+    assert sync.build_canvas_noise is sampling.build_canvas_noise
+
+
+def test_region_gates_pad_to_the_canvas_and_cover_every_region_pixel():
+    region = torch.zeros(1, 12, 20)
+    region[0, 9, 17] = 1.0
+
+    padded, latent = sampling.region_gates(region, 16, 24)
+
+    assert padded.shape == (1, 16, 24)
+    assert torch.equal(padded[:, :12, :20], region)
+    assert not bool(padded[:, 12:].any()) and not bool(padded[:, :, 20:].any())
+    expected = torch.zeros(1, 2, 3)
+    expected[0, 1, 2] = 1.0
+    assert torch.equal(latent, expected)
+
+
+def test_fold_decoded_frames_folds_time_into_the_batch_and_leaves_4d_alone():
+    video = torch.arange(2 * 1 * 4 * 6 * 3, dtype=torch.float32).reshape(2, 1, 4, 6, 3)
+    image = torch.zeros(1, 4, 6, 3)
+
+    assert torch.equal(sampling.fold_decoded_frames(video), video.reshape(2, 4, 6, 3))
+    assert sampling.fold_decoded_frames(image) is image

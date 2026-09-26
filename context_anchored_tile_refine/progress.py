@@ -103,6 +103,14 @@ def caption_segment(preset, n_tiles, rows):
     tile_units = K_TAG_TILE if preset.kind == captions.TILE_TEXT_TAGS else K_CAPTION
     return tile_chunks * tile_units + style_chunks * K_CAPTION, tile_chunks + style_chunks
 
+
+def caption_status_word(preset):
+    # The CAPTIONS segment's status word. Both kinds share the segment, so the line names the
+    # pass the preset runs.
+    from . import captions
+
+    return "tagging" if preset.kind == captions.TILE_TEXT_TAGS else "captioning"
+
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text
 # consumer cannot drift apart.
@@ -238,7 +246,8 @@ class Ledger:
         self._chunks = 1          # sub-divisions of the open entry (one per caption)
         self._chunk_index = 0     # which sub-division is in progress
         self._chunk_base = None   # this segment's offset into a run-wide caption counter
-        self._value = 0           # last EMITTED value, in scaled integer units
+        self._status_word = "captioning"  # the CAPTIONS line's verb, set at every open
+        self._value = 0          # last EMITTED value, in scaled integer units
         self._total = 0
         self.unique_id = unique_id
         self.segments = []        # the plan entries opened, in order (name, units)
@@ -264,7 +273,7 @@ class Ledger:
 
     # ---- segments ------------------------------------------------------------------------
 
-    def open(self, name, units=None, chunks=1):
+    def open(self, name, units=None, chunks=1, status_word="captioning"):
         """Close whatever is open and open the plan's next `name` entry at `units`.
 
         The cursor WALKS to that entry, dropping any planned entry the run skipped (an
@@ -285,6 +294,7 @@ class Ledger:
         self._chunks = max(int(chunks), 1)
         self._chunk_index = 0
         self._chunk_base = None
+        self._status_word = status_word
         self.segments.append(self._plan[self._cursor])
         self._emit()
 
@@ -462,9 +472,10 @@ class Ledger:
                     # A previous picture already reported run-wide counters: anticipate the
                     # next index, so the count never appears to restart at a picture
                     # boundary ("captioning 3/6", not "captioning 1/3").
-                    return f"captioning {min(self.chunks[0] + 1, self.chunks[1])}/{self.chunks[1]}"
-                return f"captioning 1/{self._chunks}"
-            return f"captioning {self.chunks[0]}/{self.chunks[1]}"
+                    return (f"{self._status_word} "
+                            f"{min(self.chunks[0] + 1, self.chunks[1])}/{self.chunks[1]}")
+                return f"{self._status_word} 1/{self._chunks}"
+            return f"{self._status_word} {self.chunks[0]}/{self.chunks[1]}"
         if name == SAMPLING:
             # Percent of THIS segment, moved once per completed model eval (the stepper's
             # on_eval tick — n_tiles ticks per sigma step, so the percent walks in ~1%
@@ -540,5 +551,5 @@ def build_caption_ledger(preset, n_tiles, unique_id=None):
     caption."""
     units, chunks = caption_segment(preset, n_tiles, 1)
     ledger = Ledger(((CAPTIONS, units),), unique_id=unique_id)
-    ledger.open(CAPTIONS, units, chunks=chunks)
+    ledger.open(CAPTIONS, units, chunks=chunks, status_word=caption_status_word(preset))
     return ledger

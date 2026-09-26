@@ -20,7 +20,7 @@ from test_captions import FakeCaptionClip
 from test_tags import PROMPT_TAGS, PROPOSE, VERIFY, FakeClassifier, FakeTagClip, calls_of, strip_requests
 
 from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
-from context_anchored_tile_refine.node import ContextAnchoredTileRefine
+from context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileUpscaleVL
 from context_anchored_tile_refine.testing import (
     ContextAnchoredTileTestCaptions,
     ContextAnchoredTileTestLayout,
@@ -412,6 +412,16 @@ def test_a_linked_budget_below_one_is_refused_naming_it(comfy_stubs, name):
 
     with pytest.raises(ValueError, match=rf"was given {name} 0.*budget of 1 token or more"):
         _caption(clip, global_style_instruction="name the medium", **{name: 0})
+    assert clip.generate_calls == []
+
+
+@pytest.mark.parametrize("value", [2.5, 1e-7])
+def test_a_linked_caption_size_outside_the_range_is_refused_before_any_request(comfy_stubs, value):
+    # Core hands VALIDATE_INPUTS None for a linked value, so the rule runs again at execution.
+    clip = _asking_clip()
+
+    with pytest.raises(ValueError, match=rf"Tile Test: Captions: caption_megapixels must be 0.*Got {value}\."):
+        _caption(clip, caption_megapixels=value)
     assert clip.generate_calls == []
 
 
@@ -809,17 +819,16 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 
     tile = ("| Source | Result | Score | Tag |\n"
             "|---|---|---|---|\n"
-            "| prompt and VL model | kept | 0.95 | moon |\n"
-            "| prompt | dropped | 0.95 | lantern |\n"
-            "| VL model | kept | 0.95 | red apple |\n"
-            "| VL model | dropped | 0.20 | wooden spoon |\n"
-            "| VL model | kept | 0.95 | apple |\n\n"
-            "**Left out before verification**\n\n"
-            "- objects, category noun")
+            "| prompt and VL model | kept | 0.9500 | moon |\n"
+            "| prompt | dropped | 0.9500 | lantern |\n"
+            "| VL model | kept | 0.9500 | red apple |\n"
+            "| VL model | dropped | 0.2000 | wooden spoon |\n"
+            "| VL model | kept | 0.9500 | apple |\n\n"
+            "**Left out before verification:** objects (category noun)")
     assert result.verified == (
         f"{testing.VERIFIED_TITLE}\n"
         "Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag the VL "
-        "model listed is kept at 0.90 or above (`tile_tags_verification_threshold`), and a prompt "
+        "model listed is kept at 0.9000 or above (`tile_tags_verification_threshold`), and a prompt "
         "tag it did not list at 0.9999 or above (`prompt_tags_verification_threshold`).\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
@@ -828,23 +837,21 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_text(tag_classifier):
     _clip, result = _tag_run()
 
-    strips = "0.95 | 0.95 | 0.95 | 0.95 | 0.95 | 0.95"
+    axis = "**0.95**, **0.95**, **0.95**"
     tile = ("**Dropped as a subset of a longer kept tag:** apple\n\n"
-            "**Positions.** A strip holds a tag at 0.90 or above (`tile_tags_position_threshold`). "
-            "A tag gets a term on each axis where exactly one strip holds it.\n\n"
-            "| Tag | Result | Top row | Center row | Bottom row | Left column | Center column | "
-            "Right column |\n"
-            "|---|---|---|---|---|---|---|---|\n"
-            f"| red apple | kept with no term | {strips} |\n"
-            f"| moon | kept with no term | {strips} |\n\n"
+            "| Tag | Result | Rows (top, center, bottom) | Columns (left, center, right) |\n"
+            "|---|---|---|---|\n"
+            f"| red apple | kept with no term | {axis} | {axis} |\n"
+            f"| moon | kept with no term | {axis} | {axis} |\n\n"
             "**Tile text**\n\n"
             "> red apple, moon")
     assert result.final == (
         f"{testing.FINAL_TITLE}\n"
         "A kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on "
-        "six strips of the tile, three rows and three columns. A tag no strip holds is dropped. "
-        "On each axis where exactly one strip holds a tag, that strip names the tag's position "
-        "term. The tags with their terms make the tile text.\n\n"
+        "six strips of the tile, three rows and three columns. A strip holds a tag at 0.90 or "
+        "above (`tile_tags_position_threshold`). A tag no strip holds is dropped. On each axis "
+        "where exactly one strip holds a tag, that strip names the tag's position term. The tags "
+        "with their terms make the tile text.\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
 
@@ -856,11 +863,25 @@ def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
     _clip, loose_prompt = _tag_run(prompt_tags_verification_threshold=0.9)
 
     assert strict_verify.written.captions == (("",),) * 2
-    assert "| VL model | dropped | 0.95 | red apple |" in strict_verify.verified
+    assert "| VL model | dropped | 0.9500 | red apple |" in strict_verify.verified
     assert strict_strips.written.captions == (("",),) * 2
     assert "| red apple | dropped, no strip holds it |" in strict_strips.final
     assert loose_prompt.written.captions == (("red apple, moon, lantern",),) * 2
-    assert "| prompt | kept | 0.95 | lantern |" in loose_prompt.verified
+    assert "| prompt | kept | 0.9500 | lantern |" in loose_prompt.verified
+
+
+def test_a_shown_score_is_truncated_so_it_never_reaches_a_threshold_its_row_fell_below():
+    # Rounding would print 1.00 beside dropped for 0.99985 and 0.90 without bold for 0.8999.
+    verified = SimpleNamespace(candidates=("lantern",), scores=(0.99985,), origins=("prompt",), dropped=())
+    final = SimpleNamespace(verified=("lantern",), kept=("lantern",), terms=("top",), unplaced=(),
+                            strips=((0.95, 0.8999, 0.2, 0.8999, 0.8999, 0.8999),), text="lantern top")
+
+    assert testing._verified_block("### Tile", verified, 0.9, 0.9999) == (
+        "### Tile\n\n| Source | Result | Score | Tag |\n|---|---|---|---|\n"
+        "| prompt | dropped | 0.9998 | lantern |\n\n"
+        "**Left out before verification:** none")
+    assert ("| lantern | kept at top | **0.95**, 0.89, 0.20 | 0.89, 0.89, 0.89 |"
+            in testing._final_block("### Tile", final, True, 0.9))
 
 
 @pytest.mark.parametrize(("name", "value"), [
@@ -882,8 +903,12 @@ def test_position_terms_off_makes_no_strip_request_and_says_so(tag_classifier):
 
     assert strip_requests(tag_classifier) == []
     assert result.written.captions == (("red apple, moon",),) * 2
-    assert ("**Positions:** off, `position_terms` is off\n\n"
+    assert ("A kept tag that is part of a longer kept tag is dropped. Positions are off, "
+            "`position_terms` is off. The remaining tags make the tile text.\n\n") in result.final
+    assert ("### Tile 0, row 0, column 0\n\n"
+            "**Dropped as a subset of a longer kept tag:** apple\n\n"
             "**Tile text**\n\n> red apple, moon") in result.final
+    assert "| Tag |" not in result.final
 
 
 @pytest.mark.parametrize("value", [None, " "])
@@ -897,8 +922,9 @@ def test_verification_off_keeps_every_candidate_unchecked_and_says_so(tag_classi
         "candidate was scored.")
     assert ("### Tile 0, row 0, column 0\n\n"
             "**Kept unchecked (5):** red apple, moon, wooden spoon, apple, lantern") in result.verified
-    assert ("**Positions:** off, `tile_tags_verification_statement` is not "
-            "connected") in result.final
+    assert ("Positions are off, `tile_tags_verification_statement` is not connected. The "
+            "remaining tags make the tile text.") in result.final
+    assert "| Tag |" not in result.final
 
 
 def test_model_text_is_escaped_so_that_markdown_shows_it_as_written():
@@ -1485,6 +1511,14 @@ def test_the_render_node_rejects_both_token_counts_at_zero(comfy_stubs, monkeypa
         _render(monkeypatch, canvas_tokens=0, crop_tokens=0)
 
 
+@pytest.mark.parametrize(("name", "value"), [("crop_tokens", -1), ("canvas_tokens", vl.MAX_VISION_TOKENS + 1)])
+def test_the_render_node_rejects_a_linked_token_count_outside_its_range(comfy_stubs, monkeypatch, name, value):
+    # A linked value bypasses the widget's min and max.
+    with pytest.raises(ValueError, match=rf"was given {name} {value}, and it must be between 0 and "
+                                         rf"{vl.MAX_VISION_TOKENS}"):
+        _render(monkeypatch, **{name: value})
+
+
 def test_a_caption_surface_with_no_captions_connected_is_rejected(comfy_stubs, monkeypatch):
     with pytest.raises(ValueError, match=r"'captions' surface with no captions connected"):
         _render(monkeypatch, surface=captions.VLM_METHOD_CAPTIONS)
@@ -1536,7 +1570,55 @@ def test_the_surface_widget_offers_exactly_the_engines_own_surfaces(comfy_stubs)
     widget = ContextAnchoredTileTestRender.INPUT_TYPES()["required"]["surface"]
 
     assert widget[0] == list(captions.VLM_SURFACES)
-    assert widget[1]["default"] == captions.VLM_METHOD_VISION
+    # The VL nodes' own default surface, so a fresh node wired to Tile Test: Captions reads them.
+    assert widget[1]["default"] == captions.VLM_METHOD_VISION_CAPTIONS
+
+
+# The input order of the three nodes that share widget definitions, as it was before they
+# shared them. The frontend restores widgets_values positionally, so any move here shifts a
+# saved workflow's values.
+SHARED_WIDGET_NODE_ORDERS = {
+    ContextAnchoredTileUpscaleVL: (
+        ["image", "model", "clip", "vae", "seed", "sampler_name", "scheduler", "steps", "cfg",
+         "denoise", "upscale_by", "max_tile_width", "max_tile_height", "context_anchor",
+         "context_overlap", "anchor_source", "vlm_method"],
+        ["upscale_model", "negative", "prompt"]),
+    ContextAnchoredTileTestLayout: (
+        ["image", "upscale_by", "max_tile_width", "max_tile_height", "context_anchor",
+         "context_overlap"],
+        []),
+    ContextAnchoredTileTestRender: (
+        ["image", "layout", "model", "clip", "vae", "seed", "sampler_name", "scheduler", "steps",
+         "cfg", "denoise", "anchor_source", "surface", "canvas_tokens", "crop_tokens", "tiles",
+         "with_neighbors"],
+        ["captions", "negative"]),
+}
+
+
+@pytest.mark.parametrize("node_class", list(SHARED_WIDGET_NODE_ORDERS), ids=lambda cls: cls.__name__)
+def test_the_shared_widget_nodes_keep_their_input_order(comfy_stubs, node_class):
+    required, optional = SHARED_WIDGET_NODE_ORDERS[node_class]
+    input_types = node_class.INPUT_TYPES()
+
+    assert list(input_types["required"]) == required
+    assert list(input_types.get("optional", {})) == optional
+
+
+def test_the_layout_upscale_by_tooltip_names_no_upscale_model():
+    # Tile Test: Layout has no upscale_model input, so its tooltip must not point at one.
+    tooltip = ContextAnchoredTileTestLayout.INPUT_TYPES()["required"]["upscale_by"][1]["tooltip"]
+
+    assert "upscale_model" not in tooltip
+
+
+def test_the_render_node_rejects_an_unsupported_sampler_at_queue_time():
+    # The production nodes' own message, returned before any model loads.
+    message = ContextAnchoredTileTestRender.VALIDATE_INPUTS(sampler_name="dpm_fast")
+
+    assert message == ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(sampler_name="dpm_fast")
+    assert message.startswith("Context-Anchored Tile Refine (VL): sampler 'dpm_fast' is not supported")
+    assert ContextAnchoredTileTestRender.VALIDATE_INPUTS(sampler_name="dpmpp_2m") is True
+    assert ContextAnchoredTileTestRender.VALIDATE_INPUTS(sampler_name=None) is True
 
 
 def test_the_token_widgets_default_to_the_settings_files_own_values(comfy_stubs):

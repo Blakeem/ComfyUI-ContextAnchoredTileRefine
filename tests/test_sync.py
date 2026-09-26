@@ -513,6 +513,22 @@ def test_lane_guiders_share_the_model_patcher(comfy_stubs, vl_clip):
     assert all(lane.guider.model_patcher is guider.model_patcher for lane in run.lanes)
 
 
+def test_each_lane_guider_owns_its_model_options(comfy_stubs):
+    # Core's outer_sample stores the per-run multi-GPU thread pool in model_options, so a
+    # shared dict lets one lane overwrite another lane's pool.
+    guider = SyncGuider()
+    guider.model_options = {"transformer_options": {}}
+    positives = [[{"cross_attn": torch.full((1, 1, 8), float(i))}] for i in range(2)]
+
+    first, second = sync.build_lane_guiders(guider, positives)
+    first.model_options["multigpu_thread_pool"] = object()
+
+    assert first.model_options is not second.model_options
+    assert all(lane.model_options is not guider.model_options for lane in (first, second))
+    assert "multigpu_thread_pool" not in guider.model_options
+    assert "multigpu_thread_pool" not in second.model_options
+
+
 def test_control_on_the_negative_never_reaches_a_lane(comfy_stubs, vl_clip):
     # The strip_control regression (conds.py:129-137): each tile's positive is a fresh vision
     # slice carrying no control chain, so a control left on the negative would steer the uncond
@@ -1686,9 +1702,9 @@ def test_preset_picture_and_the_pre_pass_agree_on_the_vision_units(comfy_stubs, 
     totals = []
     real_open = ledger.open
 
-    def recording_open(name, units=None, chunks=1):
+    def recording_open(name, units=None, chunks=1, **kwargs):
         before = ledger.total
-        real_open(name, units, chunks)
+        real_open(name, units, chunks, **kwargs)
         totals.append((name, before, ledger.total))
 
     monkeypatch.setattr(ledger, "open", recording_open)
@@ -1721,9 +1737,9 @@ def test_the_caption_segment_and_the_preset_agree_on_the_style_caption(comfy_stu
     totals = []
     real_open = ledger.open
 
-    def recording_open(name, units=None, chunks=1):
+    def recording_open(name, units=None, chunks=1, **kwargs):
         before = ledger.total
-        real_open(name, units, chunks)
+        real_open(name, units, chunks, **kwargs)
         totals.append((name, before, ledger.total))
 
     monkeypatch.setattr(ledger, "open", recording_open)
@@ -1939,7 +1955,7 @@ def test_a_layout_override_skips_the_grid_solve(comfy_stubs, vl_clip, monkeypatc
     def unsolved(*args, **kwargs):
         raise AssertionError("the grid must not be re-solved when a layout is handed in")
 
-    monkeypatch.setattr(grid, "solve_axis", unsolved)
+    monkeypatch.setattr(grid, "solve_layout", unsolved)
 
     run = prepare_with(vl_clip, layout=layout)
 
@@ -2222,9 +2238,9 @@ def test_the_tag_segment_and_the_preset_agree_on_its_size(comfy_stubs, vl_clip, 
     totals = []
     real_open = ledger.open
 
-    def recording_open(name, units=None, chunks=1):
+    def recording_open(name, units=None, chunks=1, **kwargs):
         before = ledger.total
-        real_open(name, units, chunks)
+        real_open(name, units, chunks, **kwargs)
         totals.append((name, before, ledger.total, chunks))
 
     monkeypatch.setattr(ledger, "open", recording_open)

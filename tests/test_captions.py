@@ -514,6 +514,8 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
      r"preset 'tagged' in .* carries unknown keys \['tile_caption_instruction'\] for tile_text 'tags'"),
     (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', "tile_tags_instruction = 3"),
      "preset 'tagged' key tile_tags_instruction in .* must be of type str"),
+    (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', 'tile_tags_instruction = "  "'),
+     r"preset 'tagged' in .* has an empty tile_tags_instruction"),
     (TAGS_SETTINGS.replace("global_style_max_tokens = 512", "global_style_max_tokens = 0"),
      "preset 'tagged' key global_style_max_tokens in .* between 1 and 4096"),
     (TAGS_SETTINGS.replace("{PROMPT}", "the prompt"),
@@ -550,36 +552,6 @@ def test_a_broken_tags_preset_is_a_named_hard_error(tmp_path, content, message):
     path.write_text(content)
 
     with pytest.raises(RuntimeError, match=message):
-        captions.load_settings(path)
-
-
-@pytest.mark.parametrize(("old", "new"), [
-    ("propose_instruction", "tile_tags_instruction"),
-    ("verify_statement", "tile_tags_verification_statement"),
-])
-def test_an_old_tags_key_name_fails_naming_its_new_name_and_the_file(tmp_path, old, new):
-    # The rename is checked before the missing-key check, so the message names the rename.
-    path = tmp_path / "settings.user.toml"
-    path.write_text(TAGS_SETTINGS.replace(f"{new} = ", f"{old} = "))
-
-    with pytest.raises(RuntimeError, match=rf"preset 'tagged' in .*settings\.user\.toml carries a tags "
-                                           rf"key under its old name \({old} is now {new}\)\. Rename the "
-                                           r"key in settings\.user\.toml"):
-        captions.load_settings(path)
-
-
-@pytest.mark.parametrize("old", ["prompt_anchor", "tile_tags_with_prompt_instruction"])
-def test_a_replaced_tags_key_fails_naming_the_keys_to_copy_in_its_place(tmp_path, old):
-    # A user's own copy from before the replacement also lacks the threshold key, and the
-    # replacement is checked first, so the message names the fix rather than a missing key.
-    path = tmp_path / "settings.user.toml"
-    path.write_text(TAGS_SETTINGS.replace("prompt_tags_instruction = ", f"{old} = ")
-                    .replace("prompt_tags_verification_threshold = 0.95\n", ""))
-
-    with pytest.raises(RuntimeError, match=rf"preset 'tagged' in .*settings\.user\.toml carries a tags "
-                                           rf"key this version replaced \({old} by prompt_tags_instruction\)\. "
-                                           r".*copy prompt_tags_instruction and "
-                                           r"prompt_tags_verification_threshold from settings\.toml"):
         captions.load_settings(path)
 
 
@@ -1037,7 +1009,7 @@ def test_a_bfloat16_picture_is_cached_rather_than_raising():
 
 def test_the_oldest_entry_is_evicted_past_the_bound(monkeypatch):
     # The cache is bounded so a long session cannot grow it without limit.
-    monkeypatch.setattr(captions, "CAPTION_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(captions._CAPTION_CACHE, "entries", 2)
     clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
     picture = torch.zeros(1, 8, 8, 3)
 
@@ -1046,7 +1018,7 @@ def test_the_oldest_entry_is_evicted_past_the_bound(monkeypatch):
     captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 0))
     captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 2))
 
-    assert captions.CAPTION_CACHE_ENTRIES == 2
+    assert captions._CAPTION_CACHE.entries == 2
     assert len(clip.generate_calls) == 4          # the third request evicted scope ("tile", 0)
 
 

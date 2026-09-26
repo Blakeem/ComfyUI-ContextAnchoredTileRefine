@@ -50,6 +50,12 @@
 # The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
 #
+# TILE TEXT
+# tile_text sets what each tile's text is written from. "caption" asks the VL model one
+# question about the tile and uses its answer. "tags" lists the things in the tile and keeps
+# the ones the VL model confirms. A block without tile_text is "caption".
+# settings.user.example.toml carries the caption presets.
+#
 # KEYS PER PRESET
 # tile_caption_instruction   What the VL model is asked about each tile's own crop. The
 #                            answer becomes that tile's conditioning text.
@@ -58,7 +64,7 @@
 #                            sits far above the visible answer length. The answer stops at
 #                            this many tokens at most, and the VL model sets the length
 #                            below that.
-# global_style_instruction   What the VL model is asked about the whole image, once per
+# global_style_instruction   What the VL model is asked about the entire image, once per
 #                            picture. The answer is placed on top of every tile caption so
 #                            that all tiles follow one style description. Use "" to skip it.
 # global_style_max_tokens    Generation budget for the style answer. Same rules as

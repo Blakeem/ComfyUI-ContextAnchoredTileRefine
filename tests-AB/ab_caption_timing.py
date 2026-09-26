@@ -153,7 +153,7 @@ def instrument(clock, clip, tags, captions, lc_tags, backend_cls):
             clock.forwards.append((clock.stages[-1], kind, length))
         return result
 
-    undo.append(wrap(tags, "style_line", staged("style caption")))
+    undo.append(wrap(captions, "style_caption", staged("style caption")))
     undo.append(wrap(tags, "fragment_style_p", staged("fragment sort")))
     undo.append(wrap(tags, "propose", staged("propose")))
     undo.append(wrap(tags, "_verify_scores", staged("verify")))

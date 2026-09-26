@@ -6,7 +6,7 @@ Two entry points run one pass. `generate_tag_trace` returns every stage's result
 the engine's, and reads only the texts from that run, as `(style_texts, tile_texts)` in the
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
-    picture pass   the style caption (captions.generate_caption), which is the style line
+    picture pass   the style caption (captions.style_caption), which is the style line
                    alone, then the prompt tags: one text-only generate lists the physical
                    things the prompt names, and the thing check keeps the ones that are
                    things. They join every tile's candidates. The prompt reaches no other
@@ -26,16 +26,17 @@ Every constant below was measured in the Logit Tagger's harnesses or in tests-AB
 scope is torch and stdlib only. comfy and logit_classifier are imported inside functions, so
 a missing library fails with its pip command (a subprocess test pins the comfy half).
 """
-import hashlib
+import functools
 import importlib
+import logging
 import re
-import weakref
-from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from . import captions
 from .grid import Rect
+
+logger = logging.getLogger(__name__)
 
 # Core only resizes a VL image above 12.8 MP. The Logit Tagger's tests-AB/ab_tagger.py fit a
 # 42 candidate verify pass beside a 1 MP picture, and tests-AB/ab_tile_tags.py ran at 1 MP.
@@ -198,6 +199,15 @@ def skip_resident_loads(clip):
             del clip.load_model
 
 
+@functools.cache
+def _warn_unshared_vision_encode():
+    # A library rename would otherwise cost a tower pass per tile with nothing in the log.
+    logger.warning(
+        "Context-Anchored Tile Refine (VL): logit_classifier.backends._torch_window has no "
+        "_determinism. The tags pass encodes each tile picture twice, once for propose and once "
+        "for verify, which costs one extra vision tower pass per tile.")
+
+
 @contextmanager
 def shared_vision_encode(clip):
     """One vision tower pass per picture tensor for the duration, so the propose generate and
@@ -205,7 +215,7 @@ def shared_vision_encode(clip):
 
     The encode runs inside logit_classifier's determinism window, where the verify request
     always ran it, so the verify scores keep their values. That window is a private helper of
-    the library, and a library without it skips the sharing."""
+    the library, and a library without it skips the sharing with one warning per session."""
     import torch
 
     transformer = _transformer(clip)
@@ -214,6 +224,7 @@ def shared_vision_encode(clip):
         from logit_classifier.backends._torch_window import _determinism
     except ImportError:
         _determinism = None
+        _warn_unshared_vision_encode()
     cache = {}
 
     if not callable(original) or _determinism is None:
@@ -356,22 +367,28 @@ def propose(clip, picture, preset):
     return text
 
 
-def _word_stems(text):
-    # Lowercase words with a plural ending cut, so "towers" and "tower" match.
-    stems = set()
+def _word_forms(text):
+    # Each lowercase word mapped to itself plus every plural ending cut. One cut per word would
+    # stem "trees" to "tre" and leave "tree" whole, so the two sides match through their forms.
+    forms = {}
     for word in re.findall(r"[a-z0-9]+", text.lower()):
-        for suffix, ending in (("ies", "y"), ("es", ""), ("s", "")):
+        candidates = {word}
+        for suffix, ending in (("s", ""), ("es", ""), ("ies", "y")):
             if word.endswith(suffix) and len(word) > len(suffix) + 2:
-                word = word[:-len(suffix)] + ending
-                break
-        stems.add(word)
-    return stems
+                candidates.add(word[:-len(suffix)] + ending)
+        forms[word] = candidates
+    return forms
 
 
-def grounded(tag, prompt_stems):
-    """Whether every content word of `tag` is a word of the prompt."""
-    words = _word_stems(tag) - _STOP_WORDS
-    return bool(words) and words <= prompt_stems
+def prompt_forms(prompt):
+    """Every form of every prompt word, the set `grounded` matches a tag against."""
+    return set().union(*_word_forms(prompt).values())
+
+
+def grounded(tag, prompt_words):
+    """Whether every content word of `tag` shares a form with a word of the prompt."""
+    content = [forms for word, forms in _word_forms(tag).items() if word not in _STOP_WORDS]
+    return bool(content) and all(forms & prompt_words for forms in content)
 
 
 def prompt_tags_question(preset):
@@ -389,12 +406,12 @@ def list_prompt_tags(clip, preset):
     whose every word is a word of the prompt."""
     from logit_classifier.tags import drop_unfinished_tag, parse_candidates, repeated_block
 
-    prompt_stems = _word_stems(preset.prompt)
+    prompt_words = prompt_forms(preset.prompt)
 
     def ungrounded_or_repeating(tags):
         streak = 0
         for tag in reversed(tags):
-            if grounded(tag, prompt_stems):
+            if grounded(tag, prompt_words):
                 break
             streak += 1
         return streak >= UNGROUNDED_STREAK or bool(repeated_block(tags))
@@ -404,7 +421,7 @@ def list_prompt_tags(clip, preset):
                                      max_length=PROMPT_TAGS_MAX_TOKENS)
     reply = clip.decode(ids)
     text = drop_unfinished_tag(reply) if len(ids) >= PROMPT_TAGS_MAX_TOKENS else reply
-    return reply, tuple(tag for tag in parse_candidates(text) if grounded(tag, prompt_stems))
+    return reply, tuple(tag for tag in parse_candidates(text) if grounded(tag, prompt_words))
 
 
 def merge_trace(proposed, prompt_tags):
@@ -585,20 +602,11 @@ class TagRun:
     tiles: tuple
 
 
-def style_line(clip, row, preset, scope):
-    """One picture row's style line: its cleaned style caption, read through
-    captions.generate_caption and never the tag cache."""
-    vl_input = captions.resample_for_vl(
-        row, captions.caption_budget_pixels(preset.vision.caption_megapixels, row))
-    return captions.clean_caption(captions.generate_caption(
-        clip, vl_input, preset.style_instruction, preset.style_max_tokens, thinking=True, scope=scope))
-
-
 # The tags pass is greedy and its requests deterministic, so a seed re-roll that re-executes
 # the node would otherwise pay every propose and verify again, as captions.generate_caption's
 # cache explains for captions.
 TAG_CACHE_ENTRIES = 512
-_TAG_CACHE = OrderedDict()
+_TAG_CACHE = captions.ClipBoundCache(TAG_CACHE_ENTRIES)
 
 
 def clear_tag_cache():
@@ -615,11 +623,8 @@ def _tuning():
 
 
 def _tag_cache_key(picture, preset, scope):
-    # float32 because bfloat16 has no numpy dtype. A picture of None keys a text-only request.
-    digest = ()
-    if picture is not None:
-        pixels = picture.contiguous().cpu().float().numpy().tobytes()
-        digest = (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
+    # A picture of None keys a text-only request.
+    digest = () if picture is None else captions.picture_digest(picture)
     wording = (preset.tile_tags_instruction, preset.prompt_tags_instruction,
                preset.tile_tags_verification_statement, preset.tile_tags_verification_threshold,
                preset.prompt_tags_verification_threshold, preset.tile_tags_position_threshold,
@@ -628,17 +633,11 @@ def _tag_cache_key(picture, preset, scope):
 
 
 def _cached(key, clip, compute):
-    # The weak reference keeps an unloaded CLIP from living on in the cache and keeps its text
-    # from reaching a different model.
-    entry = _TAG_CACHE.get(key)
-    if entry is not None and entry[0]() is clip:
-        _TAG_CACHE.move_to_end(key)
-        return entry[1]
+    stored = _TAG_CACHE.get(key, clip)
+    if stored is not None:
+        return stored
     value = compute()
-    _TAG_CACHE[key] = (weakref.ref(clip), value)
-    _TAG_CACHE.move_to_end(key)
-    while len(_TAG_CACHE) > TAG_CACHE_ENTRIES:
-        _TAG_CACHE.popitem(last=False)
+    _TAG_CACHE.put(key, clip, value)
     return value
 
 
@@ -703,7 +702,8 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
                     "a row would carry another row's style.")
             comfy.model_management.throw_exception_if_processing_interrupted()
             for b in range(batch):
-                style_texts[b] = style_line(clip, style_canvas[b:b + 1], preset, ("style", b, batch_index))
+                style_texts[b] = captions.style_caption(clip, style_canvas[b:b + 1], preset,
+                                                        ("style", b, batch_index))
                 advance()
 
         for tile in tiles:
@@ -734,6 +734,12 @@ def generate_tag_set(clip, source, tiles, preset, batch_size=1, batch_index=0, p
     ledger and this pass agree."""
     run = generate_tag_trace(clip, source, tiles, preset, batch_size, batch_index, progress,
                              style_source, locate=True)
+    return tag_texts(run)
+
+
+def tag_texts(run):
+    """A TagRun's texts as (style_texts, tile_texts), in `generate_tag_set`'s shape. A run whose
+    style rows wrote no text returns empty `style_texts`, so no tile carries a blank style line."""
     style_texts = list(run.style_texts)
     tile_texts = [[trace.text for trace in row_traces] for row_traces in run.tiles]
 

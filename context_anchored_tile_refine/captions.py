@@ -220,20 +220,6 @@ _TAGS_PROMPT_FREE_KEYS = ("tile_tags_instruction", "tile_tags_verification_state
 _TAGS_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "prompt_tags_verification_threshold",
                         "tile_tags_position_threshold")
 
-# The tags keys' names before the release, so a user's own copy that still carries one fails
-# with its new name rather than with a missing key.
-_RENAMED_TAGS_KEYS = {
-    "propose_instruction": "tile_tags_instruction",
-    "verify_statement": "tile_tags_verification_statement",
-}
-
-# Tags keys whose job moved to a new key with different wording, so a user's own copy that
-# still carries one fails with what to copy in its place.
-_REPLACED_TAGS_KEYS = {
-    "prompt_anchor": "prompt_tags_instruction",
-    "tile_tags_with_prompt_instruction": "prompt_tags_instruction",
-}
-
 # Per-preset keys this version no longer reads: the caption picture size moved to the
 # [vision] table on 2026-09-02, one size for both caption surfaces. Named so a user's own
 # copy from before then fails with the fix, not with "unknown key".
@@ -358,20 +344,6 @@ def _check_preset(path, label, block):
             f"{TILE_TEXT_CAPTION!r}.")
     keys = _PRESET_KEYS[kind]
     given = set(block) - {"tile_text"}
-    renamed = [old for old in _RENAMED_TAGS_KEYS if old in given] if kind == TILE_TEXT_TAGS else []
-    if renamed:
-        names = ", ".join(f"{old} is now {_RENAMED_TAGS_KEYS[old]}" for old in renamed)
-        raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries a tags key "
-            f"under its old name ({names}). Rename the key in {path.name} and keep its value.")
-    replaced = [old for old in _REPLACED_TAGS_KEYS if old in given] if kind == TILE_TEXT_TAGS else []
-    if replaced:
-        names = ", ".join(f"{old} by {_REPLACED_TAGS_KEYS[old]}" for old in replaced)
-        raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} carries a tags key this "
-            f"version replaced ({names}). The prompt no longer goes into the tile question. It is "
-            "asked once per picture for the things it names. Remove the old key and copy "
-            f"prompt_tags_instruction and prompt_tags_verification_threshold from {SETTINGS_NAME}.")
     missing = sorted(set(keys) - given)
     if missing:
         raise RuntimeError(
@@ -398,6 +370,11 @@ def _check_preset(path, label, block):
                 f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} must be "
                 f"of type {expected.__name__}, got {type(block[key]).__name__}.")
     if kind == TILE_TEXT_TAGS:
+        if not block["tile_tags_instruction"].strip():
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): preset {label!r} in {path} has an empty "
+                "tile_tags_instruction. The tags kind needs a question that asks for the things "
+                "in each tile.")
         for key, placeholder in _TAGS_PLACEHOLDERS.items():
             if placeholder not in block[key]:
                 raise RuntimeError(
@@ -820,7 +797,36 @@ def _tokenize_images(clip, text, image, **kwargs):
 # question, the budget and the CLIP, so the stored text is what a second pass would write.
 # Hashing a 0.79 megapixel float32 picture takes a few milliseconds, far below one VLM token.
 CAPTION_CACHE_ENTRIES = 512
-_CAPTION_CACHE = OrderedDict()
+
+
+class ClipBoundCache:
+    """A least recently used store of values bound to the CLIP that wrote them, capped at
+    `entries`. A stored value is never None, so `get` returns None for a miss."""
+
+    def __init__(self, entries):
+        self.entries = entries
+        self._store = OrderedDict()
+
+    def get(self, key, clip):
+        # The entry holds a weak reference, so a CLIP the user has unloaded is never kept alive
+        # by the cache and its stale value is never served to a different model.
+        entry = self._store.get(key)
+        if entry is None or entry[0]() is not clip:
+            return None
+        self._store.move_to_end(key)
+        return entry[1]
+
+    def put(self, key, clip, value):
+        self._store[key] = (weakref.ref(clip), value)
+        self._store.move_to_end(key)
+        while len(self._store) > self.entries:
+            self._store.popitem(last=False)
+
+    def clear(self):
+        self._store.clear()
+
+
+_CAPTION_CACHE = ClipBoundCache(CAPTION_CACHE_ENTRIES)
 
 
 def clear_caption_cache():
@@ -828,30 +834,13 @@ def clear_caption_cache():
     _CAPTION_CACHE.clear()
 
 
-def _caption_cache_key(vl_input, instruction, max_length, thinking, scope):
+def picture_digest(picture):
+    """A cache key part for a picture tensor: the sha256 of its pixels, its dtype and its shape."""
     # float32 because bfloat16 has no numpy dtype and .numpy() raises on it, while
     # resample_for_vl keeps whatever dtype the IMAGE arrived with. The dtype and shape ride
     # alongside so two pictures that share a byte pattern in different layouts stay apart.
-    pixels = vl_input.contiguous().cpu().float().numpy().tobytes()
-    return (hashlib.sha256(pixels).hexdigest(), str(vl_input.dtype), tuple(vl_input.shape),
-            instruction, max_length, thinking, scope)
-
-
-def _caption_cache_read(key, clip):
-    # The entry holds a weak reference, so a CLIP the user has unloaded is never kept alive
-    # by the cache and its stale text is never served to a different model.
-    entry = _CAPTION_CACHE.get(key)
-    if entry is None or entry[0]() is not clip:
-        return None
-    _CAPTION_CACHE.move_to_end(key)
-    return entry[1]
-
-
-def _caption_cache_write(key, clip, text):
-    _CAPTION_CACHE[key] = (weakref.ref(clip), text)
-    _CAPTION_CACHE.move_to_end(key)
-    while len(_CAPTION_CACHE) > CAPTION_CACHE_ENTRIES:
-        _CAPTION_CACHE.popitem(last=False)
+    pixels = picture.contiguous().cpu().float().numpy().tobytes()
+    return (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
 
 
 def clip_generate(clip, tokens, **kwargs):
@@ -890,8 +879,8 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
             "vlm_methods need a vision-language text encoder with a text-generation head "
             "(Krea 2 family). Use vlm_method 'vision tokens' with any other CLIP.")
 
-    key = _caption_cache_key(vl_input, instruction, max_length, thinking, scope)
-    stored = _caption_cache_read(key, clip)
+    key = (picture_digest(vl_input), instruction, max_length, thinking, scope)
+    stored = _CAPTION_CACHE.get(key, clip)
     if stored is not None:
         return stored
 
@@ -911,8 +900,15 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
         raise RuntimeError(
             "Context-Anchored Tile Refine (VL): caption generation returned an empty answer "
             "after every fallback.")
-    _caption_cache_write(key, clip, text)
+    _CAPTION_CACHE.put(key, clip, text)
     return text
+
+
+def style_caption(clip, row, preset, scope):
+    """One picture row's cleaned style caption, read at the [vision] table's caption size."""
+    vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
+    return clean_caption(generate_caption(clip, vl_input, preset.style_instruction,
+                                          preset.style_max_tokens, thinking=True, scope=scope))
 
 
 def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=0,
@@ -983,12 +979,7 @@ def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=
                 "caption or a row would carry another row's style.")
         comfy.model_management.throw_exception_if_processing_interrupted()
         for b in range(batch):
-            row = style_canvas[b:b + 1]
-            vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
-            text = generate_caption(clip, vl_input, preset.style_instruction,
-                                    preset.style_max_tokens, thinking=True,
-                                    scope=("style", b, batch_index))
-            style_texts.append(clean_caption(text))
+            style_texts.append(style_caption(clip, style_canvas[b:b + 1], preset, ("style", b, batch_index)))
             done += 1
             if pbar is None:
                 progress.caption_done(done, total)

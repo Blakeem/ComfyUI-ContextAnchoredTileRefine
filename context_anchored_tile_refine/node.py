@@ -39,6 +39,52 @@ def _prompt():
     return ("STRING", {"forceInput": True, "tooltip": "Optional. The prompt the image was made from, as a text link. Connect the positive prompt's text. With the tags preset it anchors the words the VL model tags each tile with, and its phrases are checked against each tile and kept where they are seen. In a caption preset it fills {PROMPT} in the instructions, and a preset with {PROMPT} needs it connected. It reaches the VL model only, never the diffusion model."})
 
 
+def _sampling_widgets():
+    # The six sampling widgets of the Upscale (VL) node and Tile Test: Render, defined once so
+    # the two nodes cannot drift. The combo keeps core's entire sampler list so saved workflows
+    # restore unchanged, and VALIDATE_INPUTS rejects the names the engine cannot time. Lazy
+    # imports: node.py's module scope stays comfy-free (pinned by a subprocess test).
+    import comfy.samplers
+
+    from . import stepper
+
+    return {
+        "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Noise is drawn once for the entire image and then sliced for each tile."}),
+        "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m", "tooltip": f"The synchronized tile engine supports these samplers: {', '.join(stepper.SUPPORTED_SAMPLERS)}. Any other sampler is rejected."}),
+        "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform", "tooltip": "How the noise levels are spaced across the steps."}),
+        "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "The number of sampling steps each tile runs at any denoise value."}),
+        "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01, "tooltip": "How strongly each tile follows its positive conditioning over the negative."}),
+        "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The fraction of the noise schedule each tile runs, where 0 samples nothing and returns the image unrefined."}),
+    }
+
+
+def _upscale_geometry(upscale_by_tooltip):
+    # upscale_by and the four tile-geometry widgets of the Upscale (VL) node, defined once so
+    # Tile Test: Layout solves the grid from the same widgets. The tooltip is the caller's,
+    # since only one of the two nodes has an upscale_model input. The base node's 1024
+    # defaults and mask-aware tooltips differ on purpose and are not built here.
+    return {
+        "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": upscale_by_tooltip}),
+        "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
+        "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
+        "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Pixels around each tile that are frozen and shown to the model as context, then cropped away."}),
+        "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Overlapped context that is diffused from both sides and then blended. It anchors the tiles to each other, like context_anchor anchors each tile to its surroundings."}),
+    }
+
+
+def check_sampler(sampler_name=None):
+    # Queue-time twin of the engine's intake check, so an unsupported sampler is named before
+    # the upscale model pass and the text encoder load. Naming sampler_name in VALIDATE_INPUTS
+    # turns off core's combo-list check, and the helper rejects every name outside its table.
+    # Returns True or the message VALIDATE_INPUTS hands the frontend.
+    if sampler_name is None:
+        return True
+    from . import stepper
+
+    message = stepper.unsupported_sampler_message(sampler_name)
+    return True if message is None else message
+
+
 def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
     # The /8 and range rules for the four tile-geometry widgets, in ONE place: the production
     # nodes and the tile testing nodes both solve the same grid, so a rule that lived in only
@@ -113,7 +159,7 @@ class ContextAnchoredTileRefine:
     CATEGORY = "image/upscaling"
 
     @classmethod
-    def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None, vlm_method=None):
+    def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None, vlm_method=None, sampler_name=None):
         # Naming widgets here disables ComfyUI's default min/max validation for them,
         # so ranges are re-checked alongside the /8 constraint (widget step is UI-only;
         # API-submitted workflows can send arbitrary INTs, and all derived geometry
@@ -126,7 +172,8 @@ class ContextAnchoredTileRefine:
         # queue. captions.method_surface accepts it and resolve_method routes it to the
         # first preset. The SURFACE is all that is checked here — a label naming an absent
         # preset is named by resolve_method, which reads the file the run will actually use.
-        # This is None on the base node, which offers no such widget.
+        # This is None on the base node, which offers no such widget. sampler_name is None on
+        # every node but the Upscale (VL) node.
         if vlm_method is not None:
             from . import captions
 
@@ -134,6 +181,9 @@ class ContextAnchoredTileRefine:
                 captions.method_surface(vlm_method)
             except ValueError as error:
                 return str(error)
+        sampler_check = check_sampler(sampler_name)
+        if sampler_check is not True:
+            return sampler_check
         return check_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
@@ -158,8 +208,8 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     writes a tile's caption (captions.with_prompt). ControlNet is ignored on this node (the
     per-tile positive carries no control chain); use the base Context-Anchored Tile Refine
     node for control.
-    vlm_method picks WHICH surface fills that positive: the vision rows (default), a
-    per-tile VLM caption of the tile's own crop, or both (see captions.py).
+    vlm_method picks WHICH surface fills that positive: the vision rows, a per-tile VLM
+    caption of the tile's own crop, or both (default, see captions.py).
     With a mask, the canvas rows come from the FULL image, so a masked refine stays aware
     of its surroundings.
     """
@@ -230,32 +280,20 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     `prompt` input fills {PROMPT} in the caption preset's instructions instead, so it
     reaches the VL model's question and never the DiT. The optional negative is the one
     text channel that still applies.
-    vlm_method picks WHICH surface fills that positive: the vision rows (default), a
-    per-tile VLM caption of the tile's own crop, or both (see captions.py).
+    vlm_method picks WHICH surface fills that positive: the vision rows, a per-tile VLM
+    caption of the tile's own crop, or both (default, see captions.py).
     """
 
     @classmethod
     def INPUT_TYPES(s):
-        # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
-        import comfy.samplers
-
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "The image to upscale and then refine."}),
                 "model": ("MODEL", {"tooltip": "The diffusion model that denoises each tile."}),
-                "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). There is no positive prompt input, since each tile is conditioned on the image itself."}),
+                "clip": ("CLIP", {"tooltip": "Must be a vision-language text encoder (Krea 2 family). It writes each tile's conditioning from the image. The prompt input reaches only this encoder, never the diffusion model."}),
                 "vae": ("VAE", {"tooltip": "The VAE that encodes and decodes each tile."}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "Noise is drawn once for the entire image and then sliced for each tile."}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "dpmpp_2m"}),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform"}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
-                "denoise": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "upscale_by": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 8.0, "step": 0.01, "tooltip": "The upscale multiplier. The optional upscale_model runs first when one is connected."}),
-                "max_tile_width": ("INT", {"default": 1536, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the width the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest width the model supports."}),
-                "max_tile_height": ("INT", {"default": 2048, "min": 256, "max": MAX_RESOLUTION, "step": 8, "tooltip": "Hard cap on the height the model ever sees per sampled crop, including the context_overlap and context_anchor rings. Set to the largest height the model supports."}),
-                "context_anchor": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Pixels around each tile that are frozen and shown to the model as context, then cropped away."}),
-                "context_overlap": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8, "tooltip": "Overlapped context that is diffused from both sides and then blended. It anchors the tiles to each other, like context_anchor anchors each tile to its surroundings."}),
+                **_sampling_widgets(),
+                **_upscale_geometry("The upscale multiplier. The optional upscale_model runs first when one is connected."),
                 # Last, never beside the ring it describes: the frontend restores a saved
                 # workflow's widgets_values POSITIONALLY, so a widget added mid-list shifts
                 # every value after it. Past the end of a legacy array the restore loop stops

@@ -66,7 +66,7 @@
 #                            sits far above the visible answer length. The answer stops at
 #                            this many tokens at most, and the VL model sets the length
 #                            below that.
-# global_style_instruction   What the VL model is asked about the whole image, once per
+# global_style_instruction   What the VL model is asked about the entire image, once per
 #                            picture. The answer is placed on top of every tile caption so
 #                            that all tiles follow one style description. Use "" to skip it.
 # global_style_max_tokens    Generation budget for the style answer. Same rules as

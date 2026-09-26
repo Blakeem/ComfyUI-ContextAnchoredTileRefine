@@ -42,7 +42,7 @@ The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models,
 | [`context_overlap`](#context-rings) | all | Width of the band neighboring tiles share. 0 gives hard seams. Smooth gradients need more and detailed scenes need less. |
 | [`anchor_source`](#anchor-source) | VL | The context ring shows either the unmodified input for maximum fidelity, or the in-progress result so that flawed content can be repaired. |
 | [`vlm_method`](#conditioning-on-the-vl-nodes) | VL | What the model is told about each tile. Adding captions repairs flawed content during upscale. |
-| [`prompt`](#caption-presets) | VL | The prompt the image was made from. The caption presets that ask for it read it when they write each tile's caption. |
+| [`prompt`](#tile-tags) | VL | The prompt the image was made from. The VL model reads it to name each tile's contents, and the diffusion model never reads it. |
 | [`mask`](#masked-refine) | Refine, Refine (VL) | Refines only the masked region and leaves everything outside it untouched. |
 | `clip` | VL | The vision-language encoder that builds all tile conditioning. Tested only with Qwen3-VL as used by Krea 2. |
 
@@ -58,6 +58,12 @@ Search for "Context-Anchored Tile Refine" in ComfyUI Manager, or clone into your
 git clone https://github.com/blakeem/ComfyUI-ContextAnchoredTileRefine
 ```
 
+A clone also needs the one Python dependency, [logit-classifier](https://pypi.org/project/logit-classifier/). ComfyUI Manager installs it for you. After a clone, run this in ComfyUI's Python environment from the node's folder:
+
+```
+pip install -r requirements.txt
+```
+
 ## The nodes
 
 ### Tile Refine
@@ -70,7 +76,7 @@ The base node works with most diffusion models. Upscale the image first and feed
 
 ![Context-Anchored Tile Refine (VL)](vl-refine-node.png)
 
-The VL node adds vision conditioning to the base node and is built for Krea 2. Inputs are the base node's plus `clip`, the two VL selects and `prompt`. No positive prompt is needed, since each tile's conditioning is built from the image itself (see [Conditioning on the VL nodes](#conditioning-on-the-vl-nodes)). The guider's positive prompt is ignored and its negative still applies. `prompt` takes the prompt the image was made from. Connect the positive prompt's text to it, since the default caption preset requires it (see [Caption presets](#caption-presets)). Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. A `mask` is supported and keeps the global view (see [Masked refine](#masked-refine)).
+The VL node adds vision conditioning to the base node and is built for Krea 2. Inputs are the base node's plus `clip`, the two VL selects and `prompt`. No positive prompt is needed, since each tile's conditioning is built from the image itself (see [Conditioning on the VL nodes](#conditioning-on-the-vl-nodes)). The guider's positive prompt is ignored and its negative still applies. `prompt` takes the prompt the image was made from. Connect the positive prompt's text to it so that each tile can confirm the things the prompt names (see [Tile tags](#tile-tags)). Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. A `mask` is supported and keeps the global view (see [Masked refine](#masked-refine)).
 
 ### Tile Upscale (VL)
 
@@ -160,13 +166,19 @@ Each tile is assigned vision tokens from two encodes of the image. The first enc
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The same VL model writes a short description of each tile from that tile's crop alone, and the description is used as that tile's prompt. Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no vision encode is built. Captions are stored for the session, keyed by the crop, the question and the budget, so a run at a new seed skips the caption pass while the same CLIP stays loaded.
+Each tile's text is used alone as that tile's prompt. The default preset writes the text as [tile tags](#tile-tags). A caption preset has the same VL model write a short description of each tile from that tile's crop alone (see [Caption presets](#caption-presets)). Naming content removes ambiguity, so artifacts and mushy areas in the source are repaired toward the named thing. The cost scales with tile count and no vision encode is built. Tile texts are stored for the session, keyed by the crop and the preset, so a run at a new seed skips the text pass while the same CLIP stays loaded.
 
 #### Vision tokens and captions
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The default method combines the tile's vision tokens and its own caption in a single conditioning. The vision tokens keep the tile faithful to the picture and at the right scale. The caption names what is there and adds detail. The cost is one small encode plus one caption per tile.
+The default method combines the tile's vision tokens and its own text in a single conditioning. The vision tokens keep the tile faithful to the picture and at the right scale. The text names what is there and adds detail. The cost is one small encode plus one text pass per tile.
+
+#### Tile tags
+
+*Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
+
+The default preset writes each tile's text as tags with their positions, such as `red car bottom-left`. The VL model lists the things it sees in the tile. When `prompt` is connected, the VL model also lists the physical things the prompt names, once per image, and every tile checks them. Each candidate is then scored with a true or false statement on the tile, and only the confirmed tags are kept. A tag from the prompt that the tile's own list lacks needs a near certain score. Six strips of the tile, three rows and three columns, give each tag its position, and a tag that no strip holds is dropped. The scoring reads the VL model's answer probabilities through [logit-classifier](https://pypi.org/project/logit-classifier/). A long prompt adds one pass per image and never lengthens a tile's pass. The thresholds live in `settings.toml`.
 
 #### Vision settings
 
@@ -178,15 +190,15 @@ The `[vision]` table at the top of `settings.toml` sets how each tile's conditio
 
 *Nodes: [Tile Refine (VL)](#tile-refine-vl) | [Tile Upscale (VL)](#tile-upscale-vl)*
 
-The prompts behind both caption methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per caption method to `vlm_method`, named with its label in parentheses. The first block is the default preset. Three ship. `prompted` is the default. It holds each caption to the crop and quotes the image's prompt, so a caption names what the prompt names. `standard` is the wording every caption method asked before 2026-08-21, with no style caption. `artwork` holds placement and demographics and carries one medium to every tile.
+The questions behind both text methods live in `settings.toml` in the node's folder. Each `[presets.<label>]` block there adds one option per text method to `vlm_method`. The first block is the default, and its options carry no label. Every other block's options carry its label in parentheses. One preset ships, `tags`, which writes [tile tags](#tile-tags) and one style caption for the entire image. `settings.user.example.toml` carries more presets that write captions instead, such as `prompted`, `standard` and `artwork`. Copy a block from it into your own `settings.user.toml` to use one. The header of each file documents every key.
 
-A preset holds four keys. `tile_caption_instruction` is what the VL model is asked about each tile. `global_style_instruction` is asked about the entire image once per picture, and the answer is placed on top of every tile caption so that all tiles follow one style description. Set it to `""` to skip the style caption. Each of the two has a `_max_tokens` budget for the answer.
+In a caption preset, `tile_caption_instruction` is what the VL model is asked about each tile. In every preset, `global_style_instruction` is asked about the entire image once per picture, and the answer is placed on top of every tile's text so that all tiles follow one style description. Set it to `""` to skip the style caption.
 
-An instruction may hold `{PROMPT}`. The VL nodes and the Captions node write their `prompt` input in its place before the VL model reads the instruction, so the caption can follow the prompt the image was made from. The diffusion model still reads the caption and never the prompt. A preset without `{PROMPT}` ignores the `prompt` input. A preset with it stops the run with an error when `prompt` is not connected or is empty. A workflow saved before the presets existed holds the bare `captions` or `vision tokens and captions` option, which runs on the first block, so it now needs `prompt` connected. Pick the `(standard)` option to keep the earlier wording.
+An instruction may hold `{PROMPT}`. The VL nodes and the Captions node write their `prompt` input in its place before the VL model reads the instruction. The diffusion model still reads the tile text and never the prompt. A preset without `{PROMPT}` ignores the `prompt` input. A caption preset with it stops the run with an error when `prompt` is not connected or is empty. The `tags` preset skips its prompt question when `prompt` is empty.
 
 Copy `settings.toml` to `settings.user.toml` and edit the copy. The nodes read `settings.user.toml` whenever it exists, and a node update never replaces it. Editing a preset's wording applies on the next run, and the nodes re-run when the file changes even when no widget changed. Adding or renaming a preset changes the selector, so it needs a ComfyUI restart.
 
-Four test nodes ship for writing and testing caption prompts. They are not production nodes. `Tile Test: Layout`, `Tile Test: Upscale`, `Tile Test: Captions` and `Tile Test: Render` chain in that order and run the engine the VL nodes run. The Captions node writes its captions from a settings file preset or from its own instruction widgets, so a trial wording needs no file edit. The Render node renders the tiles you name and holds the seed, so a new seed never upscales or captions the image again.
+Five test nodes ship for tuning tiles and presets. They are not production nodes. `Tile Test: Layout`, `Tile Test: Upscale`, `Tile Test: Captions` and `Tile Test: Render` chain in that order and run the engine the VL nodes run. `Tile Test: Settings` outputs every value of one preset. The Captions node takes each instruction as a text input, so a trial wording wired from a text node needs no file edit. Its text outputs show every stage of the tags pass for each tile, as Markdown for the Markdown mode of Preview as Text, which needs Nodes 2.0 turned on. The Render node renders the tiles you name and holds the seed, so a new seed never upscales or captions the image again.
 
 ### Regions, batches, and control
 
@@ -213,7 +225,7 @@ The `guider` input takes any guider, including NAG for models without negative p
 - [Krea 2 8K upscale workflow](Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
 - [Krea 2 refine workflow](Krea%202%20(refine).json)
 - [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)
-- [Tile test chain workflow](VL%208k%20upscale%20-%20Test.json) (the four Tile Test nodes)
+- [Tile test chain workflow](VL%208k%20upscale%20-%20Test.json) (the five Tile Test nodes)
 
 ## License
 
