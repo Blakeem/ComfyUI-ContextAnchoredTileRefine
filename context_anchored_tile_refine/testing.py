@@ -681,31 +681,51 @@ def _tile_header(index, columns):
 
 
 def _prompt_tags_debug(preset, run):
-    sentence = ("The VL model lists the things the prompt names, a listed tag with a word the "
-                "prompt lacks is dropped, and the thing check drops a tag at p(other) "
-                f"{_p(tags.THING_THRESHOLD)} or above. The kept tags join every tile's candidates.")
+    settings = tags.tag_settings(preset)
+    sentence = (f"A prompt the VL model scores below {_p(settings.english_threshold)} on "
+                f'"{settings.language_question}" is translated to English first. The VL model lists the '
+                "things the English text names, a listed tag with a word the English text lacks is "
+                f"dropped, and the thing check drops a tag at p(other) {_p(settings.thing_threshold)} or "
+                "above. The kept tags join every tile's candidates.")
+    translation = []
+    rows = []
+
     if run.prompt is None:
         reason = "No prompt is connected." if not preset.prompt else "`prompt_tags_instruction` is not connected."
         return _debug_text(PROMPT_TAGS_TITLE, sentence, [_section("### Prompt", [reason])])
-    pairs = zip(run.prompt.listed, run.prompt.p_other, strict=True)
-    rows = [("kept" if tags.is_thing(p) else "dropped", _p(p), _escaped(tag)) for tag, p in pairs]
+    if run.prompt.text != preset.prompt:
+        translation = [_section("### English translation", [_quote(run.prompt.text)])]
+    rows = [("kept" if tag in run.prompt.tags else "dropped", _p(p), _escaped(tag))
+            for tag, p in zip(run.prompt.listed, run.prompt.p_other, strict=True)]
     return _debug_text(PROMPT_TAGS_TITLE, sentence, [
-        _section("### Question sent to the VL model once per picture", [_quote(tags.prompt_tags_question(preset))]),
+        *translation,
+        _section("### Question sent to the VL model once per picture",
+                 [_quote(tags.prompt_tags_question(preset, run.prompt.text))]),
         _section("### VL model reply", [_quote(run.prompt.reply)]),
         _section("### Listed tags", [_table(("Result", "p(other)", "Tag"), rows)])])
 
 
-def _listed_block(header, trace):
-    return _section(header, ["**VL model reply**", _quote(trace.reply),
-                             f"**Tags parsed from the reply ({len(trace.proposed)}):** {_tag_list(trace.proposed)}"])
+def _listed_block(header, trace, fallback_question):
+    replies = ["**VL model reply**", _quote(trace.reply)]
+    parsed_from = "the reply"
+
+    if trace.echo_reply is not None:
+        replies = ["**VL model reply**", _quote(trace.echo_reply), "**Fallback question**", _quote(fallback_question),
+                   "**VL model reply to the fallback question**", _quote(trace.reply)]
+        parsed_from = "the fallback reply"
+    return _section(header, [*replies, f"**Tags parsed from {parsed_from} ({len(trace.proposed)}):** "
+                                       f"{_tag_list(trace.proposed)}"])
 
 
 def _listed_debug(preset, headers, traces):
+    fallback_question = tags.tag_settings(preset).echo_fallback_instruction
     sections = [_section("### Question sent to the VL model for every tile", [_quote(preset.tile_tags_instruction)])]
-    sections.extend(_listed_block(header, trace) for header, trace in zip(headers, traces, strict=True))
+    sections.extend(_listed_block(header, trace, fallback_question)
+                    for header, trace in zip(headers, traces, strict=True))
     return _debug_text(LISTED_TITLE, "The VL model is asked the question below about each tile, "
                        f"its list is stopped after {tags.MAX_PROPOSED_TAGS} tags, and its reply is "
-                       "split into tags.", sections)
+                       "split into tags. A reply with no tag besides category nouns is replaced by "
+                       "the reply to a fallback question.", sections)
 
 
 def _verified_block(header, trace, threshold, prompt_threshold):
@@ -833,7 +853,7 @@ class ContextAnchoredTileTestCaptions:
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the picture the VL model reads for every caption this node writes, the tile captions and the style caption. Use 0 for the picture's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels. The tags kind reads it for the style caption only, since its tags questions read a fixed copy of about 1 megapixel. Can take the caption_megapixels output of Tile Test: Settings."}),
                 "tile_caption_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for each tile caption, which also covers the model's hidden reasoning turn. Read by the caption kind and ignored by the tags kind. Can take the tile_caption_max_tokens output of Tile Test: Settings."}),
                 "global_style_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for the style caption, which also covers the model's hidden reasoning turn. Read when global_style_instruction is connected. Can take the global_style_max_tokens output of Tile Test: Settings."}),
-                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
                 "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
                 "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
             },

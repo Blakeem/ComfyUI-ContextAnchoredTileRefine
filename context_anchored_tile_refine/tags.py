@@ -7,24 +7,26 @@ the engine's, and reads only the texts from that run, as `(style_texts, tile_tex
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
     picture pass   the style caption (captions.style_caption), which is the style line
-                   alone, then the prompt tags (logit_classifier.toolkit's prompt_tags): one
-                   text-only generate lists the physical things the prompt names, and the
-                   thing check keeps the ones that are things. They join every tile's
-                   candidates. The prompt reaches no other question, so a long prompt never
-                   lengthens a tile's reply.
+                   alone, then the prompt tags (logit_classifier.toolkit's prompt_tags): the
+                   language question, a translation when the prompt is not English, one
+                   text-only generate listing the physical things its English text names, and
+                   the thing check, which keeps the ones that are things. They join every
+                   tile's candidates. The prompt reaches no tile question, so a long prompt
+                   never lengthens a tile's reply.
     per tile row   the toolkit's tag_picture on a 1 MP copy of the crop: propose (stopped
-                   after MAX_PROPOSED_TAGS tags), merge (the model's tags first, then the prompt
-                   tags, category nouns and repeats dropped), thing check, verify (the model's
-                   tags at the verification threshold and a prompt tag the model did not list
-                   at the prompt tags threshold) and clean (drop_subsets). Then this module's
-                   locate (the verification statement on three horizontal and three vertical
-                   strips of the full-resolution crop, a tag present on no strip dropped) and
-                   render ("<item> <term>"). An empty verification statement skips verify and
-                   locate and keeps every candidate.
+                   after MAX_PROPOSED_TAGS tags, asked once more with the fallback question
+                   when the reply names only category nouns), merge (the model's tags first,
+                   then the prompt tags, category nouns and repeats dropped), thing check,
+                   verify (the model's tags at the verification threshold and a prompt tag the
+                   model did not list at the prompt tags threshold) and clean (drop_subsets).
+                   Then this module's locate (the verification statement on three horizontal
+                   and three vertical strips of the full-resolution crop, a tag present on no
+                   strip dropped) and render ("<item> <term>"). An empty verification
+                   statement skips verify and locate and keeps every candidate.
 
 `tag_settings` hands the toolkit this pack's values. Every constant below was measured in the
-Logit Tagger's harnesses or in tests-AB, and the 2026-09-25 changes in tests-AB/ab_tags_bench.py
-(log: tests-AB/tags-bench-log.md). Module scope is torch and stdlib only. comfy and
+Logit Tagger's harnesses or in tests-AB, the later ones in tests-AB/ab_tags_bench.py (log:
+tests-AB/tags-bench-log.md). Module scope is torch and stdlib only. comfy and
 logit_classifier are imported inside functions, so a missing library fails with its pip command
 (a subprocess test pins the comfy half).
 """
@@ -100,8 +102,8 @@ def build_classifier(clip):
 
 
 def tag_settings(preset):
-    """The toolkit's TagSettings for a tags preset: its wordings and thresholds, and this
-    module's budgets, caps and thing check."""
+    """The toolkit's TagSettings for a tags preset: its wordings and thresholds, this module's
+    budgets, caps and thing check, and the toolkit's language gate and echo fallback."""
     from logit_classifier.toolkit.comfyui import TagSettings
 
     return TagSettings(
@@ -122,12 +124,10 @@ def tag_settings(preset):
         thing_criteria=tuple(THING_CRITERIA.items()),
         thing_threshold=THING_THRESHOLD,
         thing_check="all",
-        # The Logit Tagger measured the language gate, the echo fallback, score order and the
-        # head-noun rule, and this pack's bench has not, so the pass keeps the stages it judged.
+        # The head-noun rule kept "stone" beside "stone walls" and "castle" beside "stone castle
+        # tower", 0.03 wrong or vague tags per tile (tests-AB/tags-bench-log.md, section 12).
         subsets_rule="words",
         order="proposed",
-        language_question=None,
-        echo_fallback_instruction=None,
     )
 
 
@@ -135,13 +135,9 @@ def _statements(items, statement):
     return [statement.replace(captions.TAG_PLACEHOLDER, item) for item in items]
 
 
-def is_thing(p_other):
-    return p_other < THING_THRESHOLD
-
-
-def prompt_tags_question(preset):
-    """prompt_tags_instruction with the prompt in place of its placeholder."""
-    return preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, preset.prompt)
+def prompt_tags_question(preset, text):
+    """prompt_tags_instruction with `text`, the prompt's English text, in place of its placeholder."""
+    return preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, text)
 
 
 def strip_rects(height, width):
@@ -208,11 +204,13 @@ def render_tags(items, terms):
 
 @dataclass(frozen=True)
 class PromptTrace:
-    """The prompt tags of one picture. `reply` is the VL model's list as written, cut back to its
-    last whole tag when it fills the budget, `listed` its tags whose every word is a word of the
-    prompt, `p_other` each listed tag's thing check score, and `tags` the listed tags the thing
-    check keeps, which join every tile's candidates."""
+    """The prompt tags of one picture. `text` is the English text the listing read, the prompt
+    or its translation. `reply` is the VL model's list as written, cut back to its last whole tag
+    when it fills the budget, `listed` its tags whose every word is a word of `text`, `p_other`
+    each listed tag's thing check score, and `tags` the listed tags the thing check keeps, which
+    join every tile's candidates."""
 
+    text: str
     reply: str
     listed: tuple
     p_other: tuple
@@ -221,13 +219,16 @@ class PromptTrace:
 
 @dataclass(frozen=True)
 class TileTrace:
-    """One tile row's stages. `origins` names where each candidate came from and `dropped`
-    what the merge and the thing check left out and why. `scores` holds None per candidate
-    when verify is off. `strips` holds per kept item its six strip probabilities in
-    `strip_rects` order, and `unplaced` the kept items no strip holds, which the text leaves
-    out. With locate off every `strips` entry is (), every term "" and `unplaced` empty."""
+    """One tile row's stages. `echo_reply` is the first propose reply when it named only
+    category nouns and the fallback question's reply replaced it, else None. `origins` names
+    where each candidate came from and `dropped` what the merge and the thing check left out and
+    why. `scores` holds None per candidate when verify is off. `strips` holds per kept item its
+    six strip probabilities in `strip_rects` order, and `unplaced` the kept items no strip holds,
+    which the text leaves out. With locate off every `strips` entry is (), every term "" and
+    `unplaced` empty."""
 
     reply: str
+    echo_reply: str | None
     proposed: tuple
     candidates: tuple
     origins: tuple
@@ -263,7 +264,8 @@ def trace_tile(clip, classifier, crop, picture, preset, prompt_tags, known_thing
         unplaced = tuple(item for item, p in zip(kept, strips, strict=True)
                          if on_no_strip(p, position_threshold))
     placed = [(item, term) for item, term in zip(kept, terms, strict=True) if item not in unplaced]
-    return TileTrace(reply=trace.reply, proposed=trace.proposed, candidates=trace.candidates,
+    return TileTrace(reply=trace.reply, echo_reply=trace.echo_reply, proposed=trace.proposed,
+                     candidates=trace.candidates,
                      origins=trace.origins, dropped=trace.dropped, scores=trace.scores,
                      verified=trace.verified, kept=kept, strips=strips, terms=terms, unplaced=unplaced,
                      text=render_tags([item for item, _ in placed], [term for _, term in placed]))
@@ -313,8 +315,8 @@ def _prompt_trace(clip, classifier, preset, known_things):
     from logit_classifier.toolkit.comfyui import prompt_tags
 
     listing = prompt_tags(clip, classifier, preset.prompt, tag_settings(preset), known_things)
-    return PromptTrace(reply=listing.reply, listed=listing.listed, p_other=listing.p_other,
-                       tags=listing.tags)
+    return PromptTrace(text=listing.text, reply=listing.reply, listed=listing.listed,
+                       p_other=listing.p_other, tags=listing.tags)
 
 
 def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0, progress=None,

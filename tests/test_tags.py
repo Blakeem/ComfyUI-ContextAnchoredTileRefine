@@ -64,16 +64,20 @@ def open_toolkit(monkeypatch, fake):
 
 class FakeTagClip:
     """Duck-typed VL clip. A chat-templated request with a picture is a propose and answers
-    with `proposal`, one without a picture is the prompt tags request and answers with
-    `prompt_tags_reply`, and anything else is the style caption and answers with
-    `style_answer`. generate returns `proposal_tokens` ids for a propose, which is what the
-    budget check reads."""
+    with `proposal`, or `fallback_proposal` when set and asked the fallback question. One
+    without a picture is the translate request when it holds the translate instruction and
+    answers with `translation`, else the prompt tags request and answers with
+    `prompt_tags_reply`. Anything else is the style caption and answers with `style_answer`.
+    generate returns `proposal_tokens` ids for a propose, which is what the budget check reads."""
 
     def __init__(self, proposal="red apple, wooden table", style_answer="<think>hm</think>Oil painting.",
-                 proposal_tokens=5, image_tokens=True, rejects_images=False, prompt_tags_reply=""):
+                 proposal_tokens=5, image_tokens=True, rejects_images=False, prompt_tags_reply="",
+                 translation="", fallback_proposal=None):
         self.proposal = proposal
+        self.fallback_proposal = fallback_proposal
         self.style_answer = style_answer
         self.prompt_tags_reply = prompt_tags_reply
+        self.translation = translation
         self.proposal_tokens = proposal_tokens
         self.image_tokens = image_tokens
         self.rejects_images = rejects_images
@@ -100,27 +104,57 @@ class FakeTagClip:
         kind = "style"
         if text.startswith("<|im_start|>"):
             kind = "propose" if image is not None else "prompt tags"
+        if kind == "prompt tags" and translate_instruction_start() in text:
+            kind = "translate"
+        answer = {"propose": self.proposal, "prompt tags": self.prompt_tags_reply, "translate": self.translation,
+                  "style": self.style_answer}[kind]
+        if kind == "propose" and self.fallback_proposal is not None and text == fallback_text():
+            answer = self.fallback_proposal
         self.generate_calls.append({"text": text, "image": image, "kind": kind,
                                     "propose": kind == "propose", **kwargs})
         handle = len(self.generate_calls)
-        self._answers[handle] = {"propose": self.proposal, "prompt tags": self.prompt_tags_reply,
-                                 "style": self.style_answer}[kind]
+        self._answers[handle] = answer
         return [handle] * (self.proposal_tokens if kind == "propose" else 3)
 
     def decode(self, token_ids, skip_special_tokens=True):
         return self._answers[token_ids[0]]
 
 
+def toolkit_defaults():
+    from logit_classifier.toolkit.comfyui import TagSettings
+
+    return TagSettings()
+
+
+def language_question():
+    return toolkit_defaults().language_question
+
+
+def translate_text(prompt):
+    return chat_text(toolkit_defaults().translate_instruction.replace("{PROMPT}", prompt))
+
+
+def translate_instruction_start():
+    return toolkit_defaults().translate_instruction.split("{PROMPT}")[0]
+
+
+def fallback_text():
+    return chat_text(toolkit_defaults().echo_fallback_instruction, image=True)
+
+
 class FakeClassifier:
     """Scripted classifier: `noul(statement)` answers every noul and `other(tag)` the p("other")
-    of every thing check, 0.0 (a thing) by default. `noul_at(statement, picture)`, when set,
-    answers the nouls in place of `noul`, so a test can script each strip. Every request is
-    recorded with its statements and its picture. `nouls` is the library's own, so the
-    statements are packed into requests as a real classifier packs them."""
+    of every thing check, 0.0 (a thing) by default. The language question gets `english`, so a
+    prompt reads as English unless a test says otherwise. `noul_at(statement, picture)`, when
+    set, answers the other nouls in place of `noul`, so a test can script each strip. Every
+    request is recorded with its statements and its picture. `nouls` is the library's own, so
+    the statements are packed into requests as a real classifier packs them."""
 
-    def __init__(self, noul=None, other=None):
-        self.noul = noul if noul is not None else (lambda text: 0.95)
+    def __init__(self, noul=None, other=None, english=1.0):
+        # 0.9995 passes the shipped verify and position thresholds and misses the prompt-only one.
+        self.noul = noul if noul is not None else (lambda text: 0.9995)
         self.other = other if other is not None else (lambda tag: 0.0)
+        self.english = english
         self.noul_at = None
         self.requests = []
 
@@ -143,6 +177,8 @@ class FakeClassifier:
                 p = self.other(tag)
                 answers[qid] = ChoiceAnswer(choice="other" if p >= 0.5 else "thing", confidence=max(p, 1.0 - p),
                                             probabilities={"thing": 1.0 - p, "other": p})
+            elif question.instructions == language_question():
+                answers[qid] = NoulAnswer(noul=self.english)
             elif self.noul_at is not None:
                 answers[qid] = NoulAnswer(noul=self.noul_at(question.instructions, image))
             else:
@@ -187,12 +223,20 @@ def is_strip(request):
     return abs(height * width - budget) / budget < 0.01
 
 
+def is_language(request):
+    return request["texts"] == [language_question()]
+
+
+def language_requests(classifier):
+    return [request for request in nouls(classifier) if is_language(request)]
+
+
 def strip_requests(classifier):
-    return [request for request in nouls(classifier) if is_strip(request)]
+    return [request for request in nouls(classifier) if not is_language(request) and is_strip(request)]
 
 
 def verify_requests(classifier):
-    return [request for request in nouls(classifier) if not is_strip(request)]
+    return [request for request in nouls(classifier) if not is_language(request) and not is_strip(request)]
 
 
 # --- the result shape and the render stage ---------------------------------------------
@@ -274,6 +318,28 @@ def test_the_prompt_is_asked_once_per_picture_text_only_and_never_in_the_propose
     assert asked["do_sample"] is False
     assert asked["max_length"] == tags.PROMPT_TAGS_MAX_TOKENS == 256
     assert "thinking" not in with_prompt.tokenize_calls[0]
+    assert language_requests(classifier) == [
+        {"kind": "noul", "texts": [language_question()], "image": None, "state": "a cat {on} a mat"}]
+    assert calls_of(with_prompt, "translate") == []
+
+
+def test_a_prompt_the_language_question_scores_below_the_threshold_is_listed_from_its_translation(classifier):
+    classifier.english = 0.1
+    translation = "a moon above a lantern"
+    clip = FakeTagClip(proposal="red apple", translation=translation, prompt_tags_reply="moon, lantern")
+    preset = a_tags_preset(prompt="une lune au-dessus d'une lanterne")
+
+    tag_run = run_trace(clip, preset)
+
+    (translate,) = calls_of(clip, "translate")
+    assert translate["text"] == translate_text(preset.prompt)
+    assert translate["image"] is None
+    assert translate["max_length"] == toolkit_defaults().translate_max_tokens
+    (asked,) = calls_of(clip, "prompt tags")
+    assert asked["text"] == chat_text(tags.prompt_tags_question(preset, translation))
+    # Both tags are grounded in the translation's words, which the prompt lacks.
+    assert tag_run.prompt == tags.PromptTrace(text=translation, reply="moon, lantern", listed=("moon", "lantern"),
+                                              p_other=(0.0, 0.0), tags=("moon", "lantern"))
 
 
 def test_the_pass_restores_the_clips_own_load_model(classifier):
@@ -360,11 +426,11 @@ def test_the_merge_drops_category_nouns_articles_and_repeats(classifier):
 
 
 def test_the_verify_keeps_items_at_the_threshold_and_asks_one_packed_request_per_tile_row(classifier):
-    classifier.noul = lambda text: {statement("red apple"): 0.9, statement("wooden table"): 0.89}[text]
+    classifier.noul = lambda text: {statement("red apple"): 0.999, statement("wooden table"): 0.9989}[text]
 
     _style, tile_texts = run(FakeTagClip(), a_tags_preset(), tiles=(TILE_A, TILE_B))
 
-    assert a_tags_preset().tile_tags_verification_threshold == 0.9
+    assert a_tags_preset().tile_tags_verification_threshold == 0.999
     assert tile_texts == [["red apple"], ["red apple"]]
     assert len(verify_requests(classifier)) == 2
 
@@ -387,7 +453,7 @@ def test_the_clean_stage_drops_a_kept_subset_after_verify(classifier):
 
 
 def test_a_subset_survives_when_its_superset_fails_verify(classifier):
-    classifier.noul = lambda text: 0.1 if text == statement("hanging dried herbs") else 0.9
+    classifier.noul = lambda text: 0.1 if text == statement("hanging dried herbs") else 0.9995
     clip = FakeTagClip(proposal="herbs, hanging dried herbs, jar")
 
     _style, tile_texts = run(clip, a_tags_preset())
@@ -416,7 +482,7 @@ def test_an_initialism_in_the_prompt_tags_reaches_the_candidates_whole(classifie
 
 
 def test_a_prompt_tag_the_model_did_not_list_needs_the_prompt_threshold(classifier):
-    scores = {"red apple": 0.9, "lantern": 0.95, "moon": 0.9999, "boat": 0.9998}
+    scores = {"red apple": 0.999, "lantern": 0.9995, "moon": 0.9999, "boat": 0.9998}
     classifier.noul = lambda text: scores[text.removeprefix(statement(""))]
     clip = FakeTagClip(proposal="red apple, lantern", prompt_tags_reply="lantern, moon, boat")
     prompt = "a lantern, the moon and a boat"
@@ -460,12 +526,12 @@ def strip_of(picture):
 
 def scripted_strips(presence, whole=None):
     """noul_at answering each item's ((top, center, bottom), (left, center, right)) presence,
-    and `whole[item]` (default 0.95) on the verify picture."""
+    and `whole[item]` (default 0.9995) on the verify picture."""
     def noul_at(text, picture):
         item = text.removeprefix(statement(""))
         kind, index = strip_of(picture)
         if kind == "whole":
-            return (whole or {}).get(item, 0.95)
+            return (whole or {}).get(item, 0.9995)
         return presence[item][0 if kind == "row" else 1][index]
     return noul_at
 
@@ -580,7 +646,7 @@ def test_locate_off_drops_no_tag_for_its_strips(classifier, monkeypatch):
 
 
 def test_six_strip_requests_per_tile_row_pack_every_kept_item_at_the_strip_size(classifier, comfy_stubs):
-    classifier.noul = lambda text: 0.1 if text == statement("wooden table") else 0.9
+    classifier.noul = lambda text: 0.1 if text == statement("wooden table") else 0.9995
 
     run(FakeTagClip(), a_tags_preset(), tiles=(TILE_A, TILE_B), source=torch.rand(2, 16, 32, 3))
 
@@ -629,7 +695,7 @@ def test_the_prompt_tags_keep_only_tags_whose_every_word_is_a_prompt_word_and_st
     assert trace.listed == trace.tags == ("red lantern", "wet cobblestones", "moon", "lanterns")
     assert [int(token) for token in clip.transformer.feed] == [8]
     assert "sample_token" not in vars(clip.transformer)
-    assert clip.tokenize_calls == [chat_text(tags.prompt_tags_question(preset))]
+    assert clip.tokenize_calls == [chat_text(tags.prompt_tags_question(preset, preset.prompt))]
     assert clip.generate_calls == [{"do_sample": False, "max_length": tags.PROMPT_TAGS_MAX_TOKENS}]
 
 
@@ -652,7 +718,7 @@ def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_
                         locate=False)
 
     assert tags.THING_THRESHOLD == 0.9
-    assert tag_run.prompt == tags.PromptTrace(reply="moon, night", listed=("moon", "night"),
+    assert tag_run.prompt == tags.PromptTrace(text="the moon at night", reply="moon, night", listed=("moon", "night"),
                                               p_other=(0.0, 0.95), tags=("moon",))
     for trace in (row[0] for row in tag_run.tiles):
         assert trace.candidates == ("red apple", "wooden table", "moon")
@@ -675,9 +741,11 @@ def test_the_style_line_is_the_style_caption_alone_with_a_prompt(classifier):
     (style_call,) = calls_of(clip, "style")
     assert style_call["max_length"] == 128
     assert next(call for call in clip.tokenize_calls if call["text"] == "Name the style.")["thinking"] is True
-    # No request reads the whole style picture: one verify on the tile, then its six strips.
+    # No request reads the whole style picture: the language question reads the prompt alone,
+    # then one verify on the tile and its six strips.
+    assert [request["image"] for request in language_requests(classifier)] == [None]
     assert len(verify_requests(classifier)) == 1
-    assert len(nouls(classifier)) == 1 + 6
+    assert len(nouls(classifier)) == 1 + 1 + 6
 
 
 def test_the_style_caption_alone_is_the_style_line_without_a_prompt(classifier):
@@ -694,7 +762,8 @@ def test_the_style_stages_read_the_style_source(classifier, monkeypatch):
     run(clip, a_tags_preset(prompt="masterpiece", style="Name the style."), style_source=style_source)
 
     assert calls_of(clip, "style")[0]["image"].shape == (1, 40, 48, 3)
-    assert all(request["image"].shape != (1, 40, 48, 3) for request in nouls(classifier))
+    assert all(request["image"] is None or request["image"].shape != (1, 40, 48, 3)
+               for request in nouls(classifier))
 
 
 def test_a_prompt_without_a_style_instruction_writes_no_style_line(classifier):
@@ -785,12 +854,13 @@ def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
 
     trace = tag_run.tiles[0][0]
     assert trace.reply == TRACE_PROPOSAL
+    assert trace.echo_reply is None
     assert trace.proposed == ("moon", "objects", "a red apple", "red apple", "herbs", "hanging dried herbs",
                               "wooden table", "night")
     assert trace.candidates == ("moon", "red apple", "herbs", "hanging dried herbs", "wooden table")
     assert trace.origins == ("both", "model", "model", "model", "model")
     assert trace.dropped == (("objects", "category noun"), ("red apple", "repeat"), ("night", "not a thing"))
-    assert trace.scores == (0.95, 0.95, 0.95, 0.95, 0.2)
+    assert trace.scores == (0.9995, 0.9995, 0.9995, 0.9995, 0.2)
     assert trace.verified == ("moon", "red apple", "herbs", "hanging dried herbs")
     assert trace.kept == ("moon", "red apple", "hanging dried herbs")
     assert trace.strips == tuple(rows + columns for rows, columns in
@@ -798,7 +868,20 @@ def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     assert trace.terms == ("top-right", "bottom", "")
     assert trace.text == "moon top-right, red apple bottom, hanging dried herbs"
     assert tag_run.style_texts == ("",)
-    assert tag_run.prompt == tags.PromptTrace(reply="moon", listed=("moon",), p_other=(0.0,), tags=("moon",))
+    assert tag_run.prompt == tags.PromptTrace(text="the moon", reply="moon", listed=("moon",), p_other=(0.0,),
+                                              tags=("moon",))
+
+
+def test_a_reply_of_only_category_nouns_is_replaced_by_the_fallback_reply(classifier):
+    clip = FakeTagClip(proposal="objects, people", fallback_proposal="red apple, jar")
+
+    tag_run = run_trace(clip, a_tags_preset())
+
+    assert [call["text"] for call in propose_calls(clip)] == [PROPOSE_TEXT, fallback_text()]
+    trace = tag_run.tiles[0][0]
+    assert (trace.echo_reply, trace.reply, trace.proposed) == ("objects, people", "red apple, jar",
+                                                               ("red apple", "jar"))
+    assert trace.text == "red apple, jar"
 
 
 def test_locate_off_makes_no_strip_request_and_writes_no_term(classifier):
@@ -824,7 +907,8 @@ def test_the_run_records_the_style_caption_and_the_prompt_tags(classifier):
                              a_tags_preset(prompt=prompt, style="Name the style."))
     without_caption = run_trace(FakeTagClip(prompt_tags_reply=reply), a_tags_preset(prompt=prompt))
 
-    prompt_tags = tags.PromptTrace(reply=reply, listed=("moon", "city"), p_other=(0.0, 0.95), tags=("moon",))
+    prompt_tags = tags.PromptTrace(text=prompt, reply=reply, listed=("moon", "city"), p_other=(0.0, 0.95),
+                                   tags=("moon",))
     assert with_caption.style_texts == ("Oil painting.",)
     assert with_caption.prompt == prompt_tags
     assert without_caption.style_texts == ("",)
@@ -1010,7 +1094,10 @@ def test_every_tuning_value_is_the_measured_one():
 
 
 def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with():
+    from logit_classifier.toolkit.comfyui import TagSettings
+
     preset = captions.resolve_method(captions.VLM_METHOD_CAPTIONS)
+    defaults = TagSettings()
 
     settings = tags.tag_settings(preset)
 
@@ -1018,7 +1105,7 @@ def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with
     assert settings.propose_instruction == preset.tile_tags_instruction
     assert settings.prompt_tags_instruction == preset.prompt_tags_instruction
     assert settings.verify_statement == "This image visibly contains {TAG}"
-    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.9, 0.9999)
+    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.999, 0.9999)
     assert (settings.propose_cap, settings.merge_cap) == (25, 64)
     assert settings.category_nouns == tags.CATEGORY_NOUNS
     assert (settings.propose_max_tokens, settings.prompt_tags_max_tokens) == (128, 256)
@@ -1027,8 +1114,11 @@ def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with
     assert settings.thing_criteria == tuple(tags.THING_CRITERIA.items())
     assert settings.thing_threshold == 0.9
     assert (settings.thing_check, settings.subsets_rule, settings.order) == ("all", "words", "proposed")
-    assert settings.language_question is None
-    assert settings.echo_fallback_instruction is None
+    # The language gate and the echo fallback are the toolkit's, as the Logit Tagger measured them.
+    assert (settings.language_question, settings.english_threshold, settings.translate_instruction,
+            settings.translate_max_tokens) == (defaults.language_question, defaults.english_threshold,
+                                               defaults.translate_instruction, defaults.translate_max_tokens)
+    assert settings.echo_fallback_instruction == defaults.echo_fallback_instruction
     # A Preset built in code, or by the Captions node without the socket, carries "".
     unlisted = dataclasses.replace(preset, prompt_tags_instruction="")
     assert tags.tag_settings(unlisted).prompt_tags_instruction == "{PROMPT}"

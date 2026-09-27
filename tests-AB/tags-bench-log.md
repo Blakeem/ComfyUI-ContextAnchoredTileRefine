@@ -30,6 +30,9 @@ scene's full tile count times the mean tile time.
 
 ## Log
 
+Sections 1 to 9 ran arms that 7d46f34 removed from the bench, since they called names later
+commits removed. b966325 holds them.
+
 ### 1. Baseline (the committed tags pass, 508a13d)
 
 | Prompt | Correct per tile | Precision | Wrong | Vague | Position right | Seconds per tile | 8K grid seconds |
@@ -100,7 +103,8 @@ graphs on.
 
 ### 6. Offline filters on the recorded runs
 
-- Verify threshold 0.99 or 0.999: removes few wrong tags and many correct ones. Rejected.
+- Verify threshold 0.99 or 0.999: removes few wrong tags and many correct ones. Rejected on the
+  int8 encoder. Section 12 adopts 0.999 on the fp8 encoder.
 - Style sort (p(style) >= 0.9) on every tag: small gain. Superseded by the concreteness choice.
 - Concreteness choice, a text-only "is this one physical thing" question per tag string:
   the first wording also dropped "red moon", "green cliffs", "army of soldiers" and "lights".
@@ -212,3 +216,39 @@ recorded prod run's packs against one tag per request.
   ("red flags" yes, "tapestry" yes, "green eyes" unsure).
 - Single scoring costs 6 times the thing check time and drops correct tags, so the packed check
   stays.
+
+### 12. fp8 encoder: verify threshold 0.999
+
+The owner uses `qwen3vl_4b_fp8_scaled.safetensors` from 2026-09-27 on, and the bench defaults to it.
+Arm prod-fp8 runs the prod pass on it. Seven arms change one stage each, run by
+`ab_tags_fp8_arms.py` at 5b2ea54, before the pass moved to the library toolkit. Six blind judges
+graded the new items with 69 stored verdicts mixed in, and agreed with 64 of them.
+`ab_tags_paired.py` scores each arm against prod-fp8 tile by tile over both sets (69 tile and prompt
+units), with 95% bootstrap intervals.
+
+| Arm | Change | Correct per tile | Wrong | Vague | Correct vs prod-fp8 | Wrong and vague vs prod-fp8 |
+|---|---|---|---|---|---|---|
+| prod-fp8 | none | 12.80 | 0.33 | 0.33 | | |
+| fp8-hn | head-noun subsets rule | 13.01 | 0.35 | 0.35 | +0.22 [+0.10, +0.35] | +0.03 [0.00, +0.07] |
+| fp8-cap40 | propose cap 40, merge cap 80 | 13.67 | 0.43 | 0.33 | +0.87 [+0.39, +1.45] | +0.10 [+0.03, +0.19] |
+| fp8-thingp | thing check on prompt tags only | 12.99 | 0.35 | 1.14 | +0.19 [+0.07, +0.32] | +0.83 [+0.54, +1.16] |
+| fp8-lt | the three above together | 14.17 | 0.46 | 1.17 | +1.38 [+0.84, +2.01] | +0.97 [+0.68, +1.30] |
+| fp8-mp05 | tile picture at 0.5 MP | 13.72 | 0.49 | 0.38 | +0.93 [+0.06, +1.91] | +0.20 [+0.06, +0.35] |
+| fp8-strip05 | strips at 0.5 MP | 12.80 | 0.33 | 0.33 | 0.00 | 0.00 |
+| fp8-q | verify wording "Is there {TAG} in this image?" | 12.52 | 0.32 | 0.28 | -0.28 [-0.49, -0.09] | -0.07 [-0.14, 0.00] |
+| prod-fp8, v0.999 | verify threshold 0.999 | 12.28 | 0.25 | 0.29 | -0.52 [-0.72, -0.33] | -0.13 [-0.22, -0.06] |
+| prod-fp8, v0.9999 | verify threshold 0.9999 | 10.74 | 0.22 | 0.29 | -2.06 [-2.58, -1.57] | -0.16 [-0.25, -0.07] |
+
+- Every change that adds tags adds wrong or vague ones. A lower tile resolution added wrong tags
+  (0.33 to 0.49 per tile), so the 1 MP tile picture stays.
+- Strips at 0.5 MP kept the same items and gave 303 judged position terms against 338, with 3
+  wrong in each, so 0.25 MP stays.
+- The model's own wrong tags ("castle", "sun", "metal floor") score about 1.0 under both verify
+  wordings, so no threshold removes them.
+- The shipped threshold moves to 0.999. It removes one wrong or vague tag per 4 correct ones, and
+  the owner ranks fewer wrong tags above more correct ones. 0.9999 costs 51 correct tags per further
+  one.
+- The language gate and the echo fallback come from the toolkit, as the Logit Tagger measured them.
+  The gate passes an English prompt through untranslated, so its tile text is unchanged.
+- Parity: arm prod-fp8-r2 ran the pass at 7d46f34, on the toolkit, and kept the same reply and the
+  same items on all 69 tile runs.

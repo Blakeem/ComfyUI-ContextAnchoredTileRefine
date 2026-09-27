@@ -152,11 +152,10 @@ TILE_TEXT_CAPTION = "caption"
 TILE_TEXT_TAGS = "tags"
 TILE_TEXT_KINDS = (TILE_TEXT_CAPTION, TILE_TEXT_TAGS)
 
-# The shipped tags thresholds, and the defaults of a tags Preset built in code. On the owner's
-# 8K storm sky tile (2026-09-24) every tag scoring 0.5 to 0.9 on the entire tile, or under 0.9
-# on every strip, was a bay or buildings the tile does not hold, and they grew a skyline in
-# the clouds. At 0.9 the tile rendered its clouds and masts only.
-SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.9
+# The shipped tags thresholds, and the defaults of a tags Preset built in code. On the fp8 encoder, 0.999 over 0.9
+# removed a wrong or vague tile tag per 4 correct ones, and 0.9999 per 51 (tests-AB/tags-bench-log.md, section 12).
+SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.999
+# On the owner's 8K storm sky tile every tag under 0.9 on every strip named a bay or buildings the tile lacks.
 SHIPPED_TAGS_POSITION_THRESHOLD = 0.9
 # A prompt tag the tile's own list lacks passes the verify statement as a near name for what is
 # there ("wooden carriage" for a cart) with whole-tile scores from 0.9 to 0.9999. At 0.9999 the

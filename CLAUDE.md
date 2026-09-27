@@ -412,33 +412,33 @@ without that doc's temporal design.
   conftest fixture calls it before every test.
 - `context_anchored_tile_refine/tags.py`: the TAGS tile text (`tile_text = "tags"`), the one
   preset settings.toml ships since 1.8.0 (the caption presets live in
-  `settings.user.example.toml`). PICTURE PASS: the style caption, then, when the prompt is
-  non-blank AND `prompt_tags_instruction` is set, ONE text-only greedy generate listing the
-  prompt's physical things, a tag kept only when every content word shares a plural form with a
-  prompt word (`grounded` over `_word_forms`, the list stopped after `UNGROUNDED_STREAK` 2
-  ungrounded tags in a row). PER TILE: propose (`clip.generate` over the crop at
-  `VL_MAX_PIXELS` 1 MP, stopped at `MAX_PROPOSED_TAGS` 25 complete tags, never reads the
-  prompt, so a long prompt never lengthens a tile's reply), merge model-first (cap
-  `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK (one text-only
-  `ChoiceQuestion` per distinct tag, answers shared across the run in `known_things`, dropped at
-  p(other) >= `THING_THRESHOLD` 0.9), verify (the noul `tile_tags_verification_statement` on the
-  tile, 0.9 for model and both, `prompt_tags_verification_threshold` 0.9999 for prompt-only,
-  since a prompt tag the tile lacks passes 0.9 as a near name for what is there), `drop_subsets`,
-  locate (six strips at `STRIP_MEGAPIXELS` 0.25, a tag no strip holds dropped, a term only on an
-  axis where exactly ONE strip holds it). The thing check stays PACKED on purpose:
+  `settings.user.example.toml`). The shared stages come from the library's toolkit
+  (`logit_classifier.toolkit.comfyui`, which the Logit Tagger also runs), driven by
+  `tag_settings(preset)`: the preset's wordings and thresholds plus this module's budgets, caps
+  and thing check. PICTURE PASS: the style caption, then, when the prompt is non-blank AND
+  `prompt_tags_instruction` is set, the toolkit's `prompt_tags`: the language gate ("Is this
+  text written in English?", a translate generate only below 0.5), one text-only greedy generate
+  listing the prompt's physical things, a tag kept only when every content word shares a plural
+  form with a word of the English text, the list stopped after `UNGROUNDED_STREAK` 2 ungrounded
+  tags in a row, then the thing check. PER TILE: the toolkit's `tag_picture` over the crop
+  resampled to `VL_MAX_PIXELS` 1 MP: propose (stopped at `MAX_PROPOSED_TAGS` 25 complete tags,
+  never reads the prompt, one echo fallback propose when the reply holds only category nouns),
+  merge model-first (cap `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK
+  (one packed text-only `ChoiceQuestion` per distinct tag, answers shared across the run in
+  `known_things`, dropped at p(other) >= `THING_THRESHOLD` 0.9), verify (the noul
+  `tile_tags_verification_statement`, 0.999 for model and both, `prompt_tags_verification_threshold`
+  0.9999 for prompt-only), `drop_subsets` (words rule), then this module's locate (six strips at
+  `STRIP_MEGAPIXELS` 0.25, a tag no strip holds dropped, a term only on an axis where exactly ONE
+  strip holds it). Every tuning value was measured on the fp8 encoder in
+  `tests-AB/tags-bench-log.md` section 12. The thing check stays PACKED on purpose:
   `tests-AB/probe_thing_pack.py` measured one tag per request at 6x the time, with every flip a
-  correct tag dropped. SPEED at identical output: `skip_resident_loads` (an instance patch of
-  `clip.load_model` while the CLIP is resident, restored in finally) and `shared_vision_encode`
-  (one vision tower pass per tile for propose and verify, through logit_classifier's PRIVATE
-  `_determinism`, one logged warning per session when it is missing). CUDA GRAPH decode stays
-  ON: `captions.clip_generate` runs `comfy.model_prefetch.cleanup_prefetch_queues()` after EVERY
-  generate, because core keeps each decoder layer's captured graph bound to the freed KV cache
-  of the last generate (core issue #16441) and a second generate in one node replays it against
-  freed memory. Results cache in `_TAG_CACHE` (a `captions.ClipBoundCache`) keyed by the picture
-  digest, the preset wording and thresholds, the prompt and `_tuning()`. TECH DEBT: the load skip
-  and the vision share belong in logit_classifier's `ComfyClipBackend`, with a floor bump. Bench
-  and log: `tests-AB/ab_tags_bench.py`, `tests-AB/tags-bench-log.md`. torch + stdlib at module
-  scope, comfy and logit_classifier lazy, so a missing library fails with its pip command.
+  correct tag dropped. The toolkit's `skip_resident_loads`, `shared_vision_encode` and
+  `clip_generate` (CUDA graph decode stays on, core issue #16441) carry the speed. Results cache
+  in `_TAG_CACHE` (a `captions.ClipBoundCache`) keyed by the picture digest, `tag_settings(preset)`
+  (frozen and hashable), the pixel caps, the position words and threshold, the style instruction,
+  the prompt and the scope. Bench and log: `tests-AB/ab_tags_bench.py`,
+  `tests-AB/tags-bench-log.md`. torch + stdlib at module scope, comfy and logit_classifier lazy,
+  so a missing library fails with its pip command.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
@@ -476,7 +476,8 @@ without that doc's temporal design.
   emitted VALUE never decreases and the TOTAL never drops below it — segments re-fit whenever
   a true size arrives (the upscale model's step count, per-picture grids). SEGMENT ORDER
   follows the CODE per `vlm_method` (captions are written BEFORE the conditioning is built).
-  **The shim** is a scoped patch of `comfy.utils.ProgressBar` held around the run: bars core
+  **The shim** is the library toolkit's `routed_progress_bars`, a scoped patch of
+  `comfy.utils.ProgressBar` held around the run: bars core
   constructs inside it (llama.py's per-token bar, sd.py's VAE tiled fallbacks, upscale.py's
   tiled_scale bar) route into the ledger's current segment instead of resetting the display,
   and a NEW inner bar resumes the segment's fill rather than restarting it (the caption retry
@@ -484,10 +485,13 @@ without that doc's temporal design.
   normally against the rules here; it is the deliberate exception, because those bars are
   built inside core functions with no instance to patch and no pbar parameter to pass — the
   ledger's own bar is created from the class captured BEFORE the patch, and the patch is
-  restored in `finally` (`with ledger:`). Its scope is the `comfy.utils.ProgressBar`
+  restored in `finally` (`with ledger:`). Each routed update runs core's interrupt check, since
+  core's bar hook is the only Cancel check inside a generate. The run ends on one status line
+  from the toolkit's `run_outcome`: "done in X s", "cancelled" or "failed", since frontend
+  1.53.6 ignores an empty progress text. Its scope is the `comfy.utils.ProgressBar`
   ATTRIBUTE only; the known escape is sd.py:360's module-level binding under CLIP hook
-  scheduling. **Stdlib only at module scope — no torch either**; comfy is lazy (subprocess
-  test pins all three).
+  scheduling. **Stdlib only at module scope, no torch either**. comfy and the library are lazy
+  (subprocess test pins them), and every VL run needs the library.
 - `context_anchored_tile_refine/testing.py`: the TILE TESTING CHAIN (2026-09-03), five nodes
   that are not production nodes and say so in each docstring, `Tile Test: Layout` /
   `Upscale` / `Captions` / `Render` plus `Tile Test: Settings` in

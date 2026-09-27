@@ -26,8 +26,10 @@ from test_tags import (
     FakeTagClip,
     calls_of,
     chat_text,
+    language_question,
     open_toolkit,
     strip_requests,
+    toolkit_defaults,
 )
 
 from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
@@ -714,16 +716,17 @@ TAG_PROMPT_TAGS = "moon, lantern, oil painting"
 
 @pytest.fixture
 def tag_classifier(comfy_stubs, monkeypatch):
-    fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.95,
+    fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.9995,
                           other=lambda tag: 0.97 if tag == "oil painting" else 0.1)
     open_toolkit(monkeypatch, fake)
     return fake
 
 
-def _tag_run(**overrides):
+def _tag_run(clip=None, **overrides):
     inputs = dict(TAGS_SOCKETS, prompt=TAG_PROMPT)
     inputs.update(overrides)
-    clip = FakeTagClip(proposal=TAG_PROPOSAL, prompt_tags_reply=TAG_PROMPT_TAGS)
+    if clip is None:
+        clip = FakeTagClip(proposal=TAG_PROPOSAL, prompt_tags_reply=TAG_PROMPT_TAGS)
     return clip, _caption(clip, **inputs)
 
 
@@ -765,9 +768,10 @@ def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_cla
 
 
 PROMPT_TAGS_SENTENCE = (
-    "The VL model lists the things the prompt names, a listed tag with a word the prompt lacks is "
-    "dropped, and the thing check drops a tag at p(other) 0.90 or above. The kept tags join every "
-    "tile's candidates.")
+    'A prompt the VL model scores below 0.50 on "Is this text written in English?" is translated to '
+    "English first. The VL model lists the things the English text names, a listed tag with a word "
+    "the English text lacks is dropped, and the thing check drops a tag at p(other) 0.90 or above. "
+    "The kept tags join every tile's candidates.")
 
 
 def test_the_prompt_tags_output_prints_the_question_the_reply_and_each_tag_with_its_thing_check(tag_classifier):
@@ -785,6 +789,29 @@ def test_the_prompt_tags_output_prints_the_question_the_reply_and_each_tag_with_
         "| kept | 0.10 | moon |\n"
         "| kept | 0.10 | lantern |\n"
         "| dropped | 0.97 | oil painting |")
+
+
+def test_the_prompt_tags_output_prints_the_translation_and_asks_from_it(tag_classifier):
+    tag_classifier.english = 0.1
+    clip = FakeTagClip(proposal=TAG_PROPOSAL, prompt_tags_reply=TAG_PROMPT_TAGS, translation=TAG_PROMPT)
+
+    _clip, result = _tag_run(clip, prompt="la lune, une lanterne, une peinture")
+
+    assert result.prompt_tags == (
+        f"{testing.PROMPT_TAGS_TITLE}\n{PROMPT_TAGS_SENTENCE}\n\n"
+        "### English translation\n\n"
+        f"> {TAG_PROMPT}\n\n"
+        "### Question sent to the VL model once per picture\n\n"
+        f"> List the things this prompt names: {TAG_PROMPT}\n\n"
+        "### VL model reply\n\n"
+        f"> {TAG_PROMPT_TAGS}\n\n"
+        "### Listed tags\n\n"
+        "| Result | p(other) | Tag |\n"
+        "|---|---|---|\n"
+        "| kept | 0.10 | moon |\n"
+        "| kept | 0.10 | lantern |\n"
+        "| dropped | 0.97 | oil painting |")
+    assert result.written.captions == (("red apple, moon",),) * 2
 
 
 @pytest.mark.parametrize("prompt", [None, "  "])
@@ -808,6 +835,12 @@ def test_an_unconnected_prompt_tags_instruction_lists_no_things_from_the_connect
     assert result.written.captions == (("red apple, moon",),) * 2
 
 
+LISTED_SENTENCE = (
+    "The VL model is asked the question below about each tile, its list is stopped after 25 tags, and "
+    "its reply is split into tags. A reply with no tag besides category nouns is replaced by the reply "
+    "to a fallback question.")
+
+
 def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its_tags(tag_classifier):
     _clip, result = _tag_run()
 
@@ -815,13 +848,27 @@ def test_the_tags_listed_output_prints_the_question_once_then_each_reply_and_its
             f"> {TAG_PROPOSAL}\n\n"
             "**Tags parsed from the reply (5):** red apple, objects, the moon, wooden spoon, apple")
     assert result.listed == (
-        f"{testing.LISTED_TITLE}\n"
-        "The VL model is asked the question below about each tile, its list is stopped after 25 "
-        "tags, and its reply is split into tags.\n\n"
+        f"{testing.LISTED_TITLE}\n{LISTED_SENTENCE}\n\n"
         "### Question sent to the VL model for every tile\n\n"
         f"> {PROPOSE}\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
+
+
+def test_the_tags_listed_output_prints_the_fallback_question_and_its_reply(tag_classifier):
+    clip = FakeTagClip(proposal="objects, people", fallback_proposal=TAG_PROPOSAL, prompt_tags_reply=TAG_PROMPT_TAGS)
+
+    _clip, result = _tag_run(clip)
+
+    tile = ("**VL model reply**\n\n"
+            "> objects, people\n\n"
+            "**Fallback question**\n\n"
+            f"> {toolkit_defaults().echo_fallback_instruction}\n\n"
+            "**VL model reply to the fallback question**\n\n"
+            f"> {TAG_PROPOSAL}\n\n"
+            "**Tags parsed from the fallback reply (5):** red apple, objects, the moon, wooden spoon, apple")
+    assert result.listed.endswith(f"### Tile 0, row 0, column 0\n\n{tile}\n\n### Tile 1, row 0, column 1\n\n{tile}")
+    assert result.written.captions == (("red apple, moon",),) * 2
 
 
 def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left_out(tag_classifier):
@@ -829,16 +876,16 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 
     tile = ("| Source | Result | Score | Tag |\n"
             "|---|---|---|---|\n"
-            "| prompt and VL model | kept | 0.9500 | moon |\n"
-            "| prompt | dropped | 0.9500 | lantern |\n"
-            "| VL model | kept | 0.9500 | red apple |\n"
+            "| prompt and VL model | kept | 0.9995 | moon |\n"
+            "| prompt | dropped | 0.9995 | lantern |\n"
+            "| VL model | kept | 0.9995 | red apple |\n"
             "| VL model | dropped | 0.2000 | wooden spoon |\n"
-            "| VL model | kept | 0.9500 | apple |\n\n"
+            "| VL model | kept | 0.9995 | apple |\n\n"
             "**Left out before verification:** objects (category noun)")
     assert result.verified == (
         f"{testing.VERIFIED_TITLE}\n"
         "Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag the VL "
-        "model listed is kept at 0.9000 or above (`tile_tags_verification_threshold`), and a prompt "
+        "model listed is kept at 0.9990 or above (`tile_tags_verification_threshold`), and a prompt "
         "tag it did not list at 0.9999 or above (`prompt_tags_verification_threshold`).\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
@@ -847,7 +894,7 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_text(tag_classifier):
     _clip, result = _tag_run()
 
-    axis = "**0.95**, **0.95**, **0.95**"
+    axis = "**0.99**, **0.99**, **0.99**"
     tile = ("**Dropped as a subset of a longer kept tag:** apple\n\n"
             "| Tag | Result | Rows (top, center, bottom) | Columns (left, center, right) |\n"
             "|---|---|---|---|\n"
@@ -867,17 +914,17 @@ def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_tex
 
 
 def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
-    # Every kept tag scores 0.95 on its tile and on every strip.
-    _clip, strict_verify = _tag_run(tile_tags_verification_threshold=0.96)
-    _clip, strict_strips = _tag_run(tile_tags_position_threshold=0.96)
+    # Every kept tag scores 0.9995 on its tile and on every strip.
+    _clip, strict_verify = _tag_run(tile_tags_verification_threshold=0.9996)
+    _clip, strict_strips = _tag_run(tile_tags_position_threshold=0.9996)
     _clip, loose_prompt = _tag_run(prompt_tags_verification_threshold=0.9)
 
     assert strict_verify.written.captions == (("",),) * 2
-    assert "| VL model | dropped | 0.9500 | red apple |" in strict_verify.verified
+    assert "| VL model | dropped | 0.9995 | red apple |" in strict_verify.verified
     assert strict_strips.written.captions == (("",),) * 2
     assert "| red apple | dropped, no strip holds it |" in strict_strips.final
     assert loose_prompt.written.captions == (("red apple, moon, lantern",),) * 2
-    assert "| prompt | kept | 0.9500 | lantern |" in loose_prompt.verified
+    assert "| prompt | kept | 0.9995 | lantern |" in loose_prompt.verified
 
 
 def test_a_shown_score_is_truncated_so_it_never_reaches_a_threshold_its_row_fell_below():
@@ -928,7 +975,9 @@ def test_position_terms_off_makes_no_strip_request_and_says_so(tag_classifier):
 def test_verification_off_keeps_every_candidate_unchecked_and_says_so(tag_classifier, value):
     _clip, result = _tag_run(tile_tags_verification_statement=value)
 
-    assert [request for request in tag_classifier.requests if request["kind"] == "noul"] == []
+    # The prompt tags stage still asks its language question, which reads no tile.
+    assert [request for request in tag_classifier.requests if request["kind"] == "noul"] == [
+        {"kind": "noul", "texts": [language_question()], "image": None, "state": TAG_PROMPT}]
     assert result.written.captions == (("red apple, moon, wooden spoon, lantern",),) * 2
     assert result.verified.split("\n")[2] == (
         "`tile_tags_verification_statement` is not connected, so verification is off and no "
