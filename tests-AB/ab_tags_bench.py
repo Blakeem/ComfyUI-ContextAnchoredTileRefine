@@ -11,15 +11,18 @@ against the same verdicts.
     python tests-AB/ab_tags_bench.py tasks                   # judge task files for unjudged items
     python tests-AB/ab_tags_bench.py merge                   # judge verdicts into judgments.json
     python tests-AB/ab_tags_bench.py report [--arms a,b]     # the table
+    python tests-AB/ab_tags_bench.py export                  # every tile as a PNG, and manifest.json
 """
 
 import argparse
+import hashlib
+import io
+import itertools
 import json
 import math
 import statistics
 import sys
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -30,8 +33,9 @@ BENCH_DIR = REPO_ROOT / "tests-AB" / "cache" / "tags_bench"
 RUNS_DIR = BENCH_DIR / "runs"
 JUDGE_DIR = BENCH_DIR / "judge"
 TILE_DIR = BENCH_DIR / "tiles"
+EXPORT_DIR = BENCH_DIR / "export"
 JUDGMENTS = BENCH_DIR / "judgments.json"
-CLIP_NAME = "qwen3-vl-4b-heretic_int8.safetensors"
+CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 MAX_TILE_WIDTH, MAX_TILE_HEIGHT, CONTEXT_ANCHOR, CONTEXT_OVERLAP = 2048, 1728, 32, 256
 JUDGE_LONG_SIDE = 1536
 
@@ -398,328 +402,12 @@ def arm_baseline(ctx, scene, prompt, canvas, layout):
     return trace_record(run, scene.tiles, per_tile, total)
 
 
-# The prompt terms pass: ONE text-only generate per picture lists the visible things the prompt
-# names, then every tile verifies them, and each tile's own propose never reads the prompt.
-TERMS_TEMPLATE = "<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n"
-TERMS_INSTRUCTION = (
-    "This is a prompt for an image:\n{prompt}\n\n"
-    "List every visible thing the prompt names: objects, people, animals, clothing, materials, "
-    "places and parts of the scene. Use short lowercase noun phrases of one to four words, "
-    "separated by commas. Keep each thing's own descriptive words, such as its color. Leave out "
-    "the image's style, medium, quality, camera, lighting mood and any position words. "
-    "List each thing once. Output only the list."
-)
-# The second wording drops "places" (which invited "florence", "hangar", "forest") and names
-# the non-things a short prompt otherwise lists ("huge", "being built", "attack").
-TERMS_INSTRUCTION_2 = (
-    "This is a prompt for an image:\n{prompt}\n\n"
-    "List the physical things the prompt names that could be pointed at in the image: objects, "
-    "people, animals, plants, clothing, materials, buildings and parts of the scene. Use short "
-    "lowercase noun phrases of one to four words, separated by commas. Keep each thing's own "
-    "descriptive words, such as its color. Leave out places and settings, actions, sizes, moods, "
-    "the image's style, medium, quality, camera and lighting, artist names and position words. "
-    "List each thing once. Output only the list."
-)
-TERMS_MAX_TOKENS = 256
-# Two invented terms in a row end the list: past the prompt's own things the model pads with
-# generic words ("materials", "details") until the budget runs out.
-UNGROUNDED_STREAK = 2
-_STOP_WORDS = frozenset({"a", "an", "the", "of", "with", "and", "in", "on", "at", "to", "for", "by", "from"})
-
-
-def _word_stems(text):
-    import re
-
-    stems = set()
-    for word in re.findall(r"[a-z0-9]+", text.lower()):
-        for suffix in ("ies", "es", "s"):
-            if word.endswith(suffix) and len(word) > len(suffix) + 2:
-                word = word[:-len(suffix)] + ("y" if suffix == "ies" else "")
-                break
-        stems.add(word)
-    return stems
-
-
-def grounded(term, prompt_stems):
-    """Whether every content word of `term` is a word of the prompt, plural or not."""
-    words = _word_stems(term) - _STOP_WORDS
-    return bool(words) and words <= prompt_stems
-
-
-def stop_when(clip, should_stop):
-    """tags.stop_on_repeat's patch with a caller's predicate over the complete tags so far."""
-    from contextlib import contextmanager
-
-    from logit_classifier.tags import complete_tags
-
-    from context_anchored_tile_refine import tags
-
-    @contextmanager
-    def scope():
-        transformer, stop_id = tags._sampler(clip)
-        original = transformer.sample_token
-        history = []
-
-        def watch(*args, **kwargs):
-            token = original(*args, **kwargs)
-            history.append(int(token.reshape(-1)[0]))
-            if should_stop(complete_tags(clip.decode(history))):
-                return token.new_full(token.shape, stop_id)
-            return token
-
-        transformer.sample_token = watch
-        try:
-            yield
-        finally:
-            del transformer.sample_token
-    return scope()
-
-
-def extract_prompt_terms(clip, prompt, instruction=TERMS_INSTRUCTION):
-    """(terms, reply, tokens written): the grounded noun phrases the prompt names."""
-    from logit_classifier.tags import drop_unfinished_tag, parse_candidates, repeated_block
-
-    from context_anchored_tile_refine import captions
-
-    prompt_stems = _word_stems(prompt)
-
-    def should_stop(tags_so_far):
-        streak = 0
-        for tag in reversed(tags_so_far):
-            if grounded(tag, prompt_stems):
-                break
-            streak += 1
-        return streak >= UNGROUNDED_STREAK or bool(repeated_block(tags_so_far))
-
-    tokens = clip.tokenize(TERMS_TEMPLATE.format(instruction=instruction.format(prompt=prompt)))
-    with stop_when(clip, should_stop):
-        ids = captions.clip_generate(clip, tokens, do_sample=False, max_length=TERMS_MAX_TOKENS)
-    reply = clip.decode(ids)
-    text = drop_unfinished_tag(reply) if len(ids) >= TERMS_MAX_TOKENS else reply
-    terms = [t for t in parse_candidates(text) if grounded(t, prompt_stems)]
-    return terms, reply, len(ids)
-
-
-def arm_terms(ctx, scene, prompt, canvas, layout, propose_with_prompt=False):
-    from context_anchored_tile_refine import captions, tags
-
-    preset = shipped_preset(prompt)
-    tile_preset = preset if propose_with_prompt else replace(preset, prompt="")
-    classifier = tags.build_classifier(ctx.clip)
-    ctx.torch.cuda.synchronize()
-    started = time.perf_counter()
-    terms, reply, written, style_p, subjects = [], "", 0, (), ()
-    if prompt.strip():
-        terms, reply, written = extract_prompt_terms(ctx.clip, prompt)
-        style_p = tags.fragment_style_p(classifier, tuple(terms))
-        subjects, _styles = tags.sort_fragments(tuple(terms), style_p)
-    ctx.torch.cuda.synchronize()
-    record = {"picture_ms": round((time.perf_counter() - started) * 1000.0, 1), "tiles": {},
-              "prompt_terms": terms, "subject_terms": list(subjects), "terms_reply": reply,
-              "terms_tokens": written}
-    for index in scene.tiles:
-        crop = layout.tiles[index].crop_rect
-        row = canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :]
-        ctx.torch.cuda.synchronize()
-        started = time.perf_counter()
-        picture = captions.resample_for_vl(row, tags.VL_MAX_PIXELS)
-        trace = tags.trace_tile(ctx.clip, classifier, row, picture, tile_preset, subjects)
-        ctx.torch.cuda.synchronize()
-        record["tiles"][str(index)] = tile_record(trace, (time.perf_counter() - started) * 1000.0)
-    return record
-
-
-# ---------------------------------------------------------------- speed options
-#
-# graphs      measured as arm base+graphs, now production (captions.clip_generate), so every
-#             arm run after it decodes with graphs on.
-# loadskip    clip.load_model skipped while the CLIP is the resident head of the loaded list.
-# vision      one vision encode per picture per tile, shared by propose and verify, computed
-#             inside logit_classifier's determinism window.
-
-
-def _resident(clip):
-    import comfy.model_management as mm
-
-    patcher = clip.patcher
-    head = mm.current_loaded_models
-    return (bool(head) and head[0].model is patcher and patcher.model.device == patcher.load_device
-            and patcher.model.current_weight_patches_uuid == patcher.patches_uuid
-            and patcher.model.model_loaded_weight_memory > 0)
-
-
-@contextmanager
-def load_skip(clip):
-    original = clip.load_model
-
-    def load_model(*args, **kwargs):
-        if _resident(clip):
-            return clip.patcher
-        return original(*args, **kwargs)
-
-    clip.load_model = load_model
-    try:
-        yield
-    finally:
-        del clip.load_model
-
-
-@contextmanager
-def vision_share(clip):
-    import torch
-    from logit_classifier.backends._torch_window import _determinism
-
-    from context_anchored_tile_refine import tags
-
-    model = clip.cond_stage_model
-    transformer = getattr(model, model.clip).transformer
-    original = transformer.preprocess_embed
-    original_trace = tags.trace_tile
-    cache = {}
-
-    def cached(embed, device):
-        data = embed.get("data")
-        if embed.get("type") != "image" or not torch.is_tensor(data):
-            return original(embed, device=device)
-        key = (id(data), tuple(data.shape), data.dtype, str(device))
-        if key not in cache:
-            with _determinism():
-                cache[key] = (data, original(embed, device=device))
-        return cache[key][1]
-
-    def trace_tile(*args, **kwargs):
-        try:
-            return original_trace(*args, **kwargs)
-        finally:
-            cache.clear()
-
-    transformer.preprocess_embed = cached
-    tags.trace_tile = trace_tile
-    try:
-        yield
-    finally:
-        del transformer.preprocess_embed
-        tags.trace_tile = original_trace
-
-
-def with_options(arm, options):
-    def run(ctx, *args):
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            if "loadskip" in options:
-                stack.enter_context(load_skip(ctx.clip))
-            if "vision" in options:
-                stack.enter_context(vision_share(ctx.clip))
-            return arm(ctx, *args)
-    return run
-
-
-PROPOSE_CAP = 25
-THING_THRESHOLD = 0.9
-
-
-def merge_model_first(fragments, proposed, merge_cap):
-    """tags.merge_trace with the model's own tags first, so prompt terms never displace them."""
-    from logit_classifier.tags import normalize_item
-
-    from context_anchored_tile_refine import tags
-
-    index_of, origins, dropped = {}, [], []
-    for origin, items in (("model", proposed), ("prompt", fragments)):
-        for item in items:
-            name = normalize_item(item)
-            index = index_of.get(name)
-            if not name:
-                continue
-            if name in tags.CATEGORY_NOUNS:
-                dropped.append((name, "category noun"))
-            elif index is not None and origin == "prompt" and origins[index] == "model":
-                origins[index] = "both"
-            elif index is not None:
-                dropped.append((name, "repeat"))
-            elif len(index_of) == merge_cap:
-                dropped.append((name, "over the cap"))
-            else:
-                index_of[name] = len(origins)
-                origins.append(origin)
-    return tuple(index_of), tuple(origins), tuple(dropped)
-
-
-def arm_v2(ctx, scene, prompt, canvas, layout, cap=PROPOSE_CAP, criteria=None,
-           terms_instruction=TERMS_INSTRUCTION, merge_cap=None):
-    """The prompt terms pass with the concreteness choice in place of the style sort, applied to
-    the prompt terms and to every tile's candidates before verify, and the propose stopped after
-    `cap` complete tags."""
-    from logit_classifier.tags import repeated_block
-
-    from context_anchored_tile_refine import captions, tags
-
-    criteria = criteria or CONCRETE_CRITERIA_2
-    classifier = tags.build_classifier(ctx.clip)
-    p_other = {}
-
-    def things(items):
-        unknown = tuple(dict.fromkeys(i for i in items if i not in p_other))
-        if unknown:
-            p_other.update(zip(unknown, concrete_p_other(classifier, unknown, criteria), strict=True))
-        return [i for i in items if p_other[i] < THING_THRESHOLD]
-
-    original_merge = tags.merge_trace
-    original_stop = tags.stop_on_repeat
-
-    def merge_trace(fragments, proposed):
-        if merge_cap is None:
-            candidates, origins, dropped = original_merge(fragments, proposed)
-        else:
-            candidates, origins, dropped = merge_model_first(fragments, proposed, merge_cap)
-        kept = set(things(candidates))
-        pairs = [(c, o) for c, o in zip(candidates, origins, strict=True) if c in kept]
-        dropped = dropped + tuple((c, "not a thing") for c in candidates if c not in kept)
-        return tuple(c for c, _o in pairs), tuple(o for _c, o in pairs), dropped
-
-    tags.merge_trace = merge_trace
-    tags.stop_on_repeat = lambda clip: stop_when(clip, lambda t: len(t) >= cap or bool(repeated_block(t)))
-    try:
-        preset = replace(shipped_preset(prompt), prompt="")
-        ctx.torch.cuda.synchronize()
-        started = time.perf_counter()
-        terms, reply, written, subjects = [], "", 0, []
-        if prompt.strip():
-            terms, reply, written = extract_prompt_terms(ctx.clip, prompt, terms_instruction)
-            subjects = things(terms)
-        ctx.torch.cuda.synchronize()
-        record = {"picture_ms": round((time.perf_counter() - started) * 1000.0, 1), "tiles": {},
-                  "prompt_terms": terms, "subject_terms": subjects, "terms_reply": reply,
-                  "terms_tokens": written}
-        for index in scene.tiles:
-            crop = layout.tiles[index].crop_rect
-            row = canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :]
-            ctx.torch.cuda.synchronize()
-            started = time.perf_counter()
-            picture = captions.resample_for_vl(row, tags.VL_MAX_PIXELS)
-            trace = tags.trace_tile(ctx.clip, classifier, row, picture, preset, tuple(subjects))
-            ctx.torch.cuda.synchronize()
-            record["tiles"][str(index)] = tile_record(trace, (time.perf_counter() - started) * 1000.0)
-    finally:
-        tags.merge_trace = original_merge
-        tags.stop_on_repeat = original_stop
-    return record
-
-
+# The shipped pass under the labels of its three recorded runs, which were logged at different
+# commits. A rerun of any label runs today's code into that label's record.
 ARMS = {
     "baseline": arm_baseline,
-    "terms": arm_terms,
-    "terms-prompted": lambda *a: arm_terms(*a, propose_with_prompt=True),
     "base+graphs": arm_baseline,
-    "base+loadskip": with_options(arm_baseline, {"loadskip"}),
-    "base+vision": with_options(arm_baseline, {"vision"}),
-    "base+fast": with_options(arm_baseline, {"loadskip", "vision"}),
-    "terms+fast": with_options(arm_terms, {"loadskip", "vision"}),
     "prod": arm_baseline,
-    "v2": with_options(arm_v2, {"loadskip", "vision"}),
-    "v3": with_options(lambda *a: arm_v2(*a, terms_instruction=TERMS_INSTRUCTION_2, merge_cap=64),
-                       {"loadskip", "vision"}),
 }
 
 
@@ -737,7 +425,7 @@ def cmd_run(args):
     out = RUNS_DIR / f"{args.arm}.json"
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     record = json.loads(out.read_text()) if out.exists() and not args.fresh else {}
-    ctx = Context(clip=ab_models.load_clip(CLIP_NAME, "krea2"), torch=torch)
+    ctx = Context(clip=ab_models.load_clip(args.clip, "krea2"), torch=torch)
 
     for scene in scenes:
         canvas = load_canvas(scene)
@@ -748,7 +436,10 @@ def cmd_run(args):
             tags.clear_tag_cache()
             with torch.inference_mode():
                 result = arm(ctx, scene, scene.prompts[prompt_key], canvas, layout)
+            # Each pass is one node execution in the app, which resets DynamicVRAM's buffers after it.
+            ab_env.end_node_execution()
             result["grid_tiles"] = len(layout.tiles)
+            result["clip"] = args.clip
             record.setdefault(scene.key, {})[prompt_key] = result
             out.write_text(json.dumps(record, indent=1))
             ms = [t["ms"] for t in result["tiles"].values()]
@@ -886,92 +577,23 @@ def format_row(label, c):
             f"{statistics.mean(c['projected_s']):>9.1f}{c['unjudged']:>6}")
 
 
-ITEM_KINDS = BENCH_DIR / "item_kinds.json"
-
-
-# Two text-only choices per item string: the shipped fragment sort (p(style)) and a
-# concreteness choice (p(other)), each stored under its own key in item_kinds.json.
-CONCRETE_QUESTION = 'What does the image tag "{fragment}" name'
-CONCRETE_CRITERIA = {
-    "thing": "one physical thing that could be pointed at in a picture: an object, person, animal, "
-             "plant, body part, garment, material, structure, or a visible substance such as water, "
-             "smoke, fire, clouds or rain",
-    "other": "not one physical thing: a kind of place or a whole scene, a color, a shape or form, "
-             "lighting, a camera or render effect, a style, a mood, a quality or an idea",
-}
-
-
-# The second wording counts landscape features, groups and light sources as things, which the
-# first sent to "other" ("red moon", "green cliffs", "army of soldiers", "lights").
-CONCRETE_CRITERIA_2 = {
-    "thing": "something that could be pointed at in a picture: an object, a person, a group of people "
-             "or animals, an animal, a plant, a body part, a garment, a material, a building, a "
-             "landscape feature such as hills, cliffs, sky, the moon or stars, a light source such as "
-             "lamps, signs or lit windows, or a substance such as water, smoke, fire, clouds or rain",
-    "other": "nothing to point at: a kind of place or a whole scene, a time of day, a color alone, a "
-             "shape or form, lighting in general, a camera or render effect, a style, a mood, a "
-             "quality or an idea",
-}
-CONCRETE_VARIANTS = {"other": CONCRETE_CRITERIA, "other2": CONCRETE_CRITERIA_2}
-
-
-def concrete_p_other(classifier, items, criteria=CONCRETE_CRITERIA):
-    from logit_classifier import ChoiceQuestion, SystemOneRequest
-
-    questions = {f"c{index}": ChoiceQuestion(instructions=CONCRETE_QUESTION.format(fragment=item),
-                                             criteria=criteria)
-                 for index, item in enumerate(items)}
-    response, _diagnostics = classifier.classify(SystemOneRequest(state="", questions=questions))
-    return tuple(response.answers[qid].probabilities["other"] for qid in questions)
-
-
-def cmd_classify_items(_args):
-    """p(style) and p(other) of every item any arm emitted, into item_kinds.json."""
-    ab_env.bootstrap()
-    import ab_models
-    import torch
-
-    from context_anchored_tile_refine import tags
-
-    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {"style": {}, "other": {}}
-    emitted = {item for record in run_records().values() for by_prompt in record.values()
-               for result in by_prompt.values() for tile in result["tiles"].values()
-               for item, _term in tile["items"]}
-    clip = ab_models.load_clip(CLIP_NAME, "krea2")
-    classifier = tags.build_classifier(clip)
-    started = time.perf_counter()
-    with torch.inference_mode():
-        asks = {"style": tags.fragment_style_p,
-                **{name: (lambda c, i, crit=crit: concrete_p_other(c, i, crit))
-                   for name, crit in CONCRETE_VARIANTS.items()}}
-        for name, ask in asks.items():
-            kinds.setdefault(name, {})
-            items = sorted(emitted - set(kinds[name]))
-            for start in range(0, len(items), 64):
-                chunk = tuple(items[start:start + 64])
-                kinds[name].update(zip(chunk, ask(classifier, chunk), strict=True))
-    ITEM_KINDS.write_text(json.dumps(kinds, indent=1, sort_keys=True))
-    print(f"{len(emitted)} items, {time.perf_counter() - started:.1f} s, stored in {ITEM_KINDS}")
-
-
-def filtered(record, spec, kinds):
+def filtered(record, spec):
     """`spec` joined by "&" applies each filter in turn."""
     for part in spec.split("&"):
-        record = filtered_once(record, part, kinds)
+        record = filtered_once(record, part)
     return record
 
 
-def filtered_once(record, spec, kinds):
+def filtered_once(record, spec):
     """The record with each tile's items cut by one offline filter:
     vT  keeps items whose verify score is at least T
-    kT  keeps items whose p(style) is below T
-    cT  keeps items whose p(other) from the concreteness choice is below T
-    dT  the same with the second concreteness wording
     pT  keeps model tags, and prompt-only terms whose verify score is at least T
     nN  keeps prompt-origin items and the model's first N proposed tags (greedy decoding makes a
         propose stopped after N tags write exactly these)"""
     kind, threshold = spec[0], float(spec[1:])
     out = {}
+    if kind not in ("v", "p", "n"):
+        raise SystemExit(f"unknown filter {spec!r}. The filters are vT, pT and nN.")
     for scene_key, by_prompt in record.items():
         for prompt_key, result in by_prompt.items():
             tiles = {}
@@ -981,15 +603,10 @@ def filtered_once(record, spec, kinds):
                 model_order = [c for c, o, _s in candidates if o != "prompt"]
                 if kind == "v":
                     keep = [p for p in tile["items"] if (scores.get(p[0]) or 0.0) >= threshold]
-                elif kind == "k":
-                    keep = [p for p in tile["items"] if kinds["style"].get(p[0], 0.0) < threshold]
                 elif kind == "p":
                     origin = {c: o for c, o, _s in candidates}
                     keep = [p for p in tile["items"]
                             if origin.get(p[0]) != "prompt" or (scores.get(p[0]) or 0.0) >= threshold]
-                elif kind in "cd":
-                    table = kinds["other" if kind == "c" else "other2"]
-                    keep = [p for p in tile["items"] if table.get(p[0], 0.0) < threshold]
                 else:
                     first = set(model_order[:int(threshold)])
                     prompt_items = {c for c, o, _s in candidates if o == "prompt"}
@@ -1003,11 +620,10 @@ def cmd_report(args):
     judgments = load_judgments()
     arms = args.arms.split(",") if args.arms else None
     records = run_records(arms)
-    kinds = json.loads(ITEM_KINDS.read_text()) if ITEM_KINDS.exists() else {"style": {}, "other": {}}
     for spec in (s for s in args.filters.split(",") if s):
         for name in list(records):
             if "@" not in name:
-                records[f"{name}@{spec}"] = filtered(records[name], spec, kinds)
+                records[f"{name}@{spec}"] = filtered(records[name], spec)
     header = (f"{'arm / prompt':<28}{'tiles':>5}{'items':>7}{'yes':>7}{'no':>6}{'vg':>6}{'prec':>7}{'wrong':>7}{'vague':>7}"
               f"{'pos ok':>7}{'pos n':>6}{'s/tile':>8}{'pic s':>8}{'grid s':>9}{'unjdg':>6}")
     print("items, yes, no and vg are per tile. prec = yes / (yes + no + vague). pos ok = right terms of "
@@ -1045,6 +661,56 @@ def cmd_compare(args):
     print(f"{total} tiles: same reply {same_reply}, same items {same_items}")
 
 
+# ---------------------------------------------------------------- export
+
+def export_png_name(scene_key, index):
+    return f"{scene_key}-t{index:02d}.png"
+
+
+def png_bytes(image):
+    """One IMAGE row as a lossless PNG at its own size, 8 bits per channel."""
+    buffer = io.BytesIO()
+    to_pil(image, math.inf).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def export_manifest(sets, digests):
+    """One entry per tile and prompt of every set, so a reader keys a run by `id` and
+    `prompt_name`. `digests` maps each exported PNG's name to its sha256."""
+    entries = []
+    for set_name, (registry, prompt_keys) in sets.items():
+        for scene in registry.values():
+            for index, prompt_name in itertools.product(scene.tiles, prompt_keys):
+                file = export_png_name(scene.key, index)
+                entries.append({"id": f"tiles/{scene.key}-t{index:02d}", "file": file,
+                                "prompt": scene.prompts[prompt_name], "prompt_name": prompt_name,
+                                "scene": scene.key, "tile": index, "set": set_name, "sha256": digests[file]})
+    return entries
+
+
+def cmd_export(_args):
+    """Every tile crop of both sets once, and manifest.json beside them for the Logit Tagger's
+    cross-pack runner."""
+    digests = {}
+
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    for registry, _prompt_keys in SETS.values():
+        for scene in registry.values():
+            canvas = load_canvas(scene)
+            layout = solve_layout(canvas)
+            for index in scene.tiles:
+                name = export_png_name(scene.key, index)
+                r = layout.tiles[index].crop_rect
+                # The face3k canvas is a float tensor, so its 8-bit PNGs round its pixels and a crop
+                # read back from them does not reproduce the recorded face3k runs bit for bit.
+                data = png_bytes(canvas[:, r.y0:r.y1, r.x0:r.x1, :])
+                (EXPORT_DIR / name).write_bytes(data)
+                digests[name] = hashlib.sha256(data).hexdigest()
+    manifest = export_manifest(SETS, digests)
+    (EXPORT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    print(f"{len(digests)} tiles and {len(manifest)} manifest entries in {EXPORT_DIR}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1055,25 +721,26 @@ def parse_args():
     run.add_argument("--scenes", default="")
     run.add_argument("--prompts", default="")
     run.add_argument("--fresh", action="store_true", help="drop the arm's earlier record")
+    run.add_argument("--clip", default=CLIP_NAME, help="the text encoder file in models/text_encoders")
     sub.add_parser("tasks")
     sub.add_parser("merge")
     compare = sub.add_parser("compare")
     compare.add_argument("--a", required=True)
     compare.add_argument("--b", required=True)
-    sub.add_parser("classify-items")
     report = sub.add_parser("report")
     report.add_argument("--arms", default="")
     report.add_argument("--set", choices=sorted(SETS), default="main")
-    report.add_argument("--filters", default="", help="csv of offline filters: vT, kT, cT, nN (see filtered)")
+    report.add_argument("--filters", default="", help="csv of offline filters: vT, pT, nN (see filtered_once)")
+    sub.add_parser("export")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.command == "layouts":
+    if args.command in ("layouts", "export"):
         ab_env.bootstrap()
     {"layouts": cmd_layouts, "run": cmd_run, "tasks": cmd_tasks, "merge": cmd_merge,
-     "report": cmd_report, "compare": cmd_compare, "classify-items": cmd_classify_items}[args.command](args)
+     "report": cmd_report, "compare": cmd_compare, "export": cmd_export}[args.command](args)
 
 
 if __name__ == "__main__":

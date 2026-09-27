@@ -4,10 +4,13 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
 
-def test_loads_via_comfyui_directory_mechanism():
+@pytest.fixture
+def loaded_package():
     # Replicates the 0.3.45 loader (nodes.py:2119-2124): spec from the package's
     # __init__.py, registered in sys.modules BEFORE exec_module so relative imports
     # resolve via the spec's submodule_search_locations.
@@ -17,70 +20,88 @@ def test_loads_via_comfyui_directory_mechanism():
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-
-        node_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
-        vl_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
-        upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
-        test_settings_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestSettings"]
-        test_layout_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestLayout"]
-        test_upscale_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestUpscale"]
-        test_captions_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestCaptions"]
-        test_render_class = module.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestRender"]
-        assert isinstance(node_class, type)
-        assert isinstance(vl_class, type)
-        assert isinstance(upscale_class, type)
-        assert isinstance(test_settings_class, type)
-        assert isinstance(test_layout_class, type)
-        assert isinstance(test_upscale_class, type)
-        assert isinstance(test_captions_class, type)
-        assert isinstance(test_render_class, type)
-        assert {
-            "ContextAnchoredTileRefine": node_class,
-            "ContextAnchoredTileRefineVL": vl_class,
-            "ContextAnchoredTileUpscaleVL": upscale_class,
-            "ContextAnchoredTileTestSettings": test_settings_class,
-            "ContextAnchoredTileTestLayout": test_layout_class,
-            "ContextAnchoredTileTestUpscale": test_upscale_class,
-            "ContextAnchoredTileTestCaptions": test_captions_class,
-            "ContextAnchoredTileTestRender": test_render_class,
-        } == module.NODE_CLASS_MAPPINGS
-        assert module.NODE_DISPLAY_NAME_MAPPINGS.keys() == module.NODE_CLASS_MAPPINGS.keys()
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefine"]
-            == "Context-Anchored Tile Refine"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefineVL"]
-            == "Context-Anchored Tile Refine (VL)"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
-            == "Context-Anchored Tile Upscale (VL)"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestSettings"]
-            == "Tile Test: Settings"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestLayout"]
-            == "Tile Test: Layout"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestUpscale"]
-            == "Tile Test: Upscale"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestCaptions"]
-            == "Tile Test: Captions"
-        )
-        assert (
-            module.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestRender"]
-            == "Tile Test: Render"
-        )
-        assert "NODE_CLASS_MAPPINGS" in module.__all__
-        assert "NODE_DISPLAY_NAME_MAPPINGS" in module.__all__
+        yield module
     finally:
         del sys.modules[module_name]
+
+
+def test_loads_via_comfyui_directory_mechanism(loaded_package):
+    node_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefine"]
+    vl_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileRefineVL"]
+    upscale_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileUpscaleVL"]
+    test_settings_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestSettings"]
+    test_layout_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestLayout"]
+    test_upscale_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestUpscale"]
+    test_captions_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestCaptions"]
+    test_render_class = loaded_package.NODE_CLASS_MAPPINGS["ContextAnchoredTileTestRender"]
+    assert isinstance(node_class, type)
+    assert isinstance(vl_class, type)
+    assert isinstance(upscale_class, type)
+    assert isinstance(test_settings_class, type)
+    assert isinstance(test_layout_class, type)
+    assert isinstance(test_upscale_class, type)
+    assert isinstance(test_captions_class, type)
+    assert isinstance(test_render_class, type)
+    assert {
+        "ContextAnchoredTileRefine": node_class,
+        "ContextAnchoredTileRefineVL": vl_class,
+        "ContextAnchoredTileUpscaleVL": upscale_class,
+        "ContextAnchoredTileTestSettings": test_settings_class,
+        "ContextAnchoredTileTestLayout": test_layout_class,
+        "ContextAnchoredTileTestUpscale": test_upscale_class,
+        "ContextAnchoredTileTestCaptions": test_captions_class,
+        "ContextAnchoredTileTestRender": test_render_class,
+    } == loaded_package.NODE_CLASS_MAPPINGS
+    assert loaded_package.NODE_DISPLAY_NAME_MAPPINGS.keys() == loaded_package.NODE_CLASS_MAPPINGS.keys()
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefine"]
+        == "Context-Anchored Tile Refine"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileRefineVL"]
+        == "Context-Anchored Tile Refine (VL)"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileUpscaleVL"]
+        == "Context-Anchored Tile Upscale (VL)"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestSettings"]
+        == "Tile Test: Settings"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestLayout"]
+        == "Tile Test: Layout"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestUpscale"]
+        == "Tile Test: Upscale"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestCaptions"]
+        == "Tile Test: Captions"
+    )
+    assert (
+        loaded_package.NODE_DISPLAY_NAME_MAPPINGS["ContextAnchoredTileTestRender"]
+        == "Tile Test: Render"
+    )
+    assert "NODE_CLASS_MAPPINGS" in loaded_package.__all__
+    assert "NODE_DISPLAY_NAME_MAPPINGS" in loaded_package.__all__
+
+
+def test_every_node_declares_output_tooltips_and_search_aliases(loaded_package):
+    # Core pairs OUTPUT_TOOLTIPS with the outputs by position (server.py:783-796), so one
+    # missing tooltip moves every later one onto the wrong socket.
+    for name, node_class in loaded_package.NODE_CLASS_MAPPINGS.items():
+        outputs = getattr(node_class, "RETURN_NAMES", node_class.RETURN_TYPES)
+        tooltips = node_class.OUTPUT_TOOLTIPS
+        aliases = node_class.SEARCH_ALIASES
+        assert len(tooltips) == len(outputs), name
+        for tooltip in tooltips:
+            assert isinstance(tooltip, str) and tooltip.strip(), name
+            assert "—" not in tooltip and ";" not in tooltip, f"{name}: {tooltip}"
+        assert isinstance(aliases, list) and aliases, name
+        assert all(isinstance(alias, str) and alias.strip() for alias in aliases), name
 
 
 def test_node_module_never_imports_comfy():
@@ -259,6 +280,7 @@ def test_progress_module_never_imports_comfy():
         "assert 'latent_preview' not in sys.modules, 'progress.py imported latent_preview at module scope'\n"
         "assert 'torch' not in sys.modules, 'progress.py imported torch at module scope'\n"
         "assert 'server' not in sys.modules, 'progress.py imported server at module scope'\n"
+        "assert 'logit_classifier' not in sys.modules, 'progress.py imported logit_classifier at module scope'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

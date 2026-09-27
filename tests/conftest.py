@@ -289,6 +289,13 @@ def comfy_stubs(monkeypatch):
     model_management_module.throw_exception_if_processing_interrupted = (
         throw_exception_if_processing_interrupted
     )
+
+    class InterruptProcessingException(BaseException):
+        # Core's Cancel derives from BaseException, which the stepper's catch sites and the
+        # toolkit's run_outcome both depend on.
+        pass
+
+    model_management_module.InterruptProcessingException = InterruptProcessingException
     samplers_module = types.ModuleType("comfy.samplers")
 
     class StubKSampler:

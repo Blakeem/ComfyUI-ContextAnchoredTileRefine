@@ -529,11 +529,19 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
     (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95\n", ""),
      r"preset 'tagged' in .* is missing \['prompt_tags_verification_threshold'\]"),
     (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 1.5"),
-     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be between 0 and 1, got 1.5"),
+     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 1.5"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 0"),
+     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 0"),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", 'tile_tags_verification_threshold = "high"'),
      "preset 'tagged' key tile_tags_verification_threshold in .* must be of type float, got str"),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 1.5"),
-     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be between 0 and 1, got 1.5"),
+     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 1.5"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 0.0"),
+     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 0.0"),
     (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7", "tile_tags_position_threshold = -0.1"),
      "preset 'tagged' key tile_tags_position_threshold in .* is a score and must be between 0 and 1, got -0.1"),
     # {PROMPT} belongs in prompt_tags_instruction only.
@@ -903,13 +911,6 @@ def test_generate_caption_drops_the_decode_graphs_after_every_generate(comfy_stu
     captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
 
     assert cleanups == [1, 2]
-
-
-def test_clip_generate_runs_on_a_core_without_graph_decode(comfy_stubs, monkeypatch):
-    monkeypatch.setitem(sys.modules, "comfy.model_prefetch", None)
-    clip = FakeCaptionClip(answer=lambda image, instruction: "a wall")
-
-    assert captions.clip_generate(clip, clip.tokenize("x", images=[torch.zeros(1, 8, 8, 3)])) is not None
 
 
 def test_generate_caption_raises_when_every_fallback_is_empty():

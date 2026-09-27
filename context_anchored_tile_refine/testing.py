@@ -43,6 +43,7 @@ as sampling.py / vl.py, pinned by a subprocess test).
 import math
 import re
 from dataclasses import dataclass, replace
+from typing import ClassVar
 
 import torch
 
@@ -92,6 +93,23 @@ SETTINGS_OUTPUTS = (*SETTINGS_PRESET_OUTPUTS, *SETTINGS_VISION_OUTPUTS, *SETTING
 # What a preset key outputs when the preset's kind does not carry it, so an unused socket
 # holds an empty value rather than failing the run.
 SETTINGS_ABSENT_VALUES = {"STRING": "", "INT": 0, "FLOAT": 0.0}
+# Keyed by settings key rather than listed by slot, so an output added without its tooltip
+# fails at import instead of shifting every later tooltip onto the wrong socket.
+SETTINGS_OUTPUT_TOOLTIPS = {
+    "global_style_instruction": f"The question the VL model is asked about the entire image for the style caption, with {captions.PROMPT_PLACEHOLDER} left in.",
+    "global_style_max_tokens": "The generation budget for the style caption.",
+    "tile_caption_instruction": f"The question the VL model is asked about each tile by the caption kind, with {captions.PROMPT_PLACEHOLDER} left in. A tags preset outputs an empty text.",
+    "tile_caption_max_tokens": "The generation budget for each tile caption. A tags preset outputs 0.",
+    "tile_tags_instruction": "The question that asks the VL model to list the things in each tile as tags. A caption preset outputs an empty text.",
+    "prompt_tags_instruction": f"The question that asks the VL model to list the things the prompt names, with {captions.PROMPT_PLACEHOLDER} left in. A caption preset outputs an empty text.",
+    "tile_tags_verification_statement": f"The statement each candidate tag is scored against on its tile, with {captions.TAG_PLACEHOLDER} left in. A caption preset outputs an empty text.",
+    "caption_megapixels": "The picture size in megapixels the VL model reads for each caption, from the [vision] table.",
+    "canvas_tokens": "The vision rows a tile takes from one encode of the entire image, from the [vision] table.",
+    "crop_tokens": "The vision rows a tile takes from the encode of its own crop, from the [vision] table.",
+    "tile_tags_verification_threshold": "The score a tag the tile's own list names must reach on the entire tile to be kept. A caption preset outputs 0.",
+    "tile_tags_position_threshold": "The score a tag must reach on one of the six strips of a tile for that strip to hold it. A caption preset outputs 0.",
+    "prompt_tags_verification_threshold": "The score a thing from the prompt that the tile's own list lacks must reach on the entire tile to be kept. A caption preset outputs 0.",
+}
 
 # One fixed colour per band, outward from the core, so a tile reads the same way in every
 # render. The bands are drawn band by band rather than tile by tile, so a later tile's rings
@@ -261,8 +279,10 @@ class ContextAnchoredTileTestSettings:
 
     RETURN_TYPES = tuple(kind for _, kind in SETTINGS_OUTPUTS)
     RETURN_NAMES = tuple(key for key, _ in SETTINGS_OUTPUTS)
+    OUTPUT_TOOLTIPS = tuple(SETTINGS_OUTPUT_TOOLTIPS[key] for key, _ in SETTINGS_OUTPUTS)
     FUNCTION = "read_settings"
     CATEGORY = "image/upscaling/tile testing"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["tile settings", "caption presets", "settings file", "tile testing"]
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
@@ -312,8 +332,14 @@ class ContextAnchoredTileTestLayout:
 
     RETURN_TYPES = ("CATR_LAYOUT", "IMAGE", "INT")
     RETURN_NAMES = ("layout", "overlay", "tile_count")
+    OUTPUT_TOOLTIPS = (
+        "The solved tile grid and the widgets it was solved from. Feed it to Tile Test: Upscale, Tile Test: Captions and Tile Test: Render.",
+        f"A preview of the image at its upscaled shape, with every tile's crop, overlap and core outlined and its number labeled. The preview is at most {OVERLAY_MEGAPIXELS:g} megapixels.",
+        "The number of tiles in the grid.",
+    )
     FUNCTION = "solve_layout"
     CATEGORY = "image/upscaling/tile testing"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["tile grid", "tile layout", "grid preview", "tile count", "tile testing"]
 
     @classmethod
     def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None):
@@ -369,8 +395,12 @@ class ContextAnchoredTileTestUpscale:
         }
 
     RETURN_TYPES = ("IMAGE",)
+    OUTPUT_TOOLTIPS = (
+        "The upscaled canvas at the layout's target size. Feed it to Tile Test: Captions and Tile Test: Render.",
+    )
     FUNCTION = "upscale_image"
     CATEGORY = "image/upscaling/tile testing"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["upscale", "upscale canvas", "tile testing"]
 
     def upscale_image(self, image, layout, upscale_model=None):
         # ---- inputs
@@ -484,12 +514,15 @@ def _check_budget(name, value):
             "preset carries it.")
 
 
-def _check_score(name, value):
-    # A linked value bypasses the widget's min and max.
-    if not 0 <= value <= 1:
+def _check_score(name, value, above_zero=False):
+    # A linked value bypasses the widget's min and max. The tagging stages take a verification
+    # threshold above 0 only.
+    floor_ok = value > 0 if above_zero else value >= 0
+    span = "above 0 and at most 1" if above_zero else "between 0 and 1"
+    if not (floor_ok and value <= 1):
         raise ValueError(
-            f"{CAPTIONS_NODE} was given {name} {value}, and it is a score between 0 and 1. Set it "
-            "between 0 and 1, or link it from a Tile Test: Settings node whose preset carries it.")
+            f"{CAPTIONS_NODE} was given {name} {value}, and it is a score {span}. Set it {span}, "
+            "or link it from a Tile Test: Settings node whose preset carries it.")
 
 
 def _caption_megapixels_error(value):
@@ -523,9 +556,9 @@ def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_toke
         _check_budget("global_style_max_tokens", global_style_max_tokens)
     if kind == captions.TILE_TEXT_TAGS:
         _check_tags_texts(texts)
-        _check_score("tile_tags_verification_threshold", verification_threshold)
+        _check_score("tile_tags_verification_threshold", verification_threshold, above_zero=True)
         _check_score("tile_tags_position_threshold", position_threshold)
-        _check_score("prompt_tags_verification_threshold", prompt_verification_threshold)
+        _check_score("prompt_tags_verification_threshold", prompt_verification_threshold, above_zero=True)
         preset = captions.Preset(
             surface=captions.VLM_METHOD_CAPTIONS,
             label=CAPTIONS_NODE,
@@ -800,9 +833,9 @@ class ContextAnchoredTileTestCaptions:
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the picture the VL model reads for every caption this node writes, the tile captions and the style caption. Use 0 for the picture's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels. The tags kind reads it for the style caption only, since its tags questions read a fixed copy of about 1 megapixel. Can take the caption_megapixels output of Tile Test: Settings."}),
                 "tile_caption_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for each tile caption, which also covers the model's hidden reasoning turn. Read by the caption kind and ignored by the tags kind. Can take the tile_caption_max_tokens output of Tile Test: Settings."}),
                 "global_style_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for the style caption, which also covers the model's hidden reasoning turn. Read when global_style_instruction is connected. Can take the global_style_max_tokens output of Tile Test: Settings."}),
-                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
                 "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
-                "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
+                "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
             },
             "optional": {
                 "prompt": node._prompt(),
@@ -818,8 +851,18 @@ class ContextAnchoredTileTestCaptions:
     RETURN_TYPES = ("CATR_CAPTIONS", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("captions", "tile_texts", "tiles", "prompt_tags", "tags_listed",
                     "tags_verified", "tags_final")
+    OUTPUT_TOOLTIPS = (
+        "The style caption and every captioned tile's text, for the captions input of Tile Test: Render.",
+        "Markdown that lists the style caption once and then each captioned tile's own text, the texts Tile Test: Render conditions on.",
+        "The named tile numbers, comma separated, for the tiles input of Tile Test: Render. It is empty when the tiles input was empty.",
+        "Markdown of the tags kind's prompt stage: the question sent once per picture, the VL model's reply and whether each listed tag was kept.",
+        "Markdown of the tags kind's listing stage: each tile's VL model reply and the tags parsed from it.",
+        "Markdown of the tags kind's verification stage: each tile's candidate tags with their scores and whether each was kept.",
+        "Markdown of the tags kind's last stage: each tile's tags after the subset and position checks, and the tile text they make.",
+    )
     FUNCTION = "caption_tiles"
     CATEGORY = "image/upscaling/tile testing"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["tile captions", "tile tags", "caption debug", "tag debug", "tile testing"]
 
     @classmethod
     def VALIDATE_INPUTS(s, caption_megapixels=None):
@@ -1090,9 +1133,14 @@ class ContextAnchoredTileTestRender:
 
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("tiles", "blocks")
+    OUTPUT_TOOLTIPS = (
+        "One image per named tile, the refined canvas cut at the tile's crop rect. An empty tiles input returns the entire refined canvas.",
+        "One image per named tile, the refined block rendered for it, which spans its bordering tiles when with_neighbors is on. An empty tiles input returns the entire refined canvas.",
+    )
     OUTPUT_IS_LIST = (True, True)
     FUNCTION = "render_tiles"
     CATEGORY = "image/upscaling/tile testing"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["tile render", "render one tile", "tile preview", "tile testing"]
 
     @classmethod
     def VALIDATE_INPUTS(s, sampler_name=None):

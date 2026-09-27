@@ -12,6 +12,7 @@ stand-in is what "one real bar" is counted against: a bar the shim routed is a p
 of the shim's own class and never lands in that list.
 """
 import sys
+import threading
 import types
 
 import pytest
@@ -244,8 +245,8 @@ def test_the_shim_is_scoped_to_the_run_and_restored_after_a_raise(comfy_stubs):
         raise RuntimeError("mid-run")
 
     assert comfy.utils.ProgressBar is real
-    # The ledger's OWN bar was built from the class captured BEFORE the patch, so it is the
-    # genuine one — and it is the only one this package constructed.
+    # The ledger's OWN bar was built in __init__, before the patch, so it is core's class and
+    # the only one this package constructed.
     assert len(comfy_stubs["progress_bars"]) == 1
 
 
@@ -367,6 +368,24 @@ def prompt_server(monkeypatch):
     return sent
 
 
+@pytest.fixture()
+def clock(monkeypatch):
+    """The ledger's clock: 100.0 s at __enter__ and 142.1 s at __exit__. Returns the done line."""
+    readings = iter((100.0, 142.1))
+    monkeypatch.setattr(progress, "time", types.SimpleNamespace(perf_counter=lambda: next(readings)))
+    return "done in 42.1 s"
+
+
+def arm_cancel(monkeypatch):
+    # Core's interrupt check raises once the user presses Cancel.
+    import comfy.model_management
+
+    def cancel():
+        raise comfy.model_management.InterruptProcessingException()
+
+    monkeypatch.setattr(comfy.model_management, "throw_exception_if_processing_interrupted", cancel)
+
+
 def texts(sent):
     return [text for text, _node_id in sent]
 
@@ -395,15 +414,16 @@ def drive_combined_picture(ledger, n_tiles, caption_counters, targets):
         ledger.advance((index + 1) * progress.W_DECODE_TILE)
 
 
-def test_a_vl_run_names_every_phase_it_passes_through(comfy_stubs, prompt_server):
+def test_a_vl_run_names_every_phase_it_passes_through(comfy_stubs, prompt_server, clock):
     # 2 tiles, 4 steps, one eval per step: the sampling percent is the segment's own fill, so
     # the four steps read 25/50/75/100 and the last one lands exactly on the boundary. The
-    # phases arrive in the code's order — captions BEFORE the conditioning build — and the
-    # run ends by CLEARING the line.
+    # phases arrive in the code's order, captions BEFORE the conditioning build, and the run
+    # ends on the done line.
     ledger = progress.build_ledger(captions.VLM_METHOD_VISION_CAPTIONS, 4, unique_id=NODE_ID)
 
-    drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
-    ledger.finish()
+    with ledger:
+        drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
+        ledger.finish()
 
     assert texts(prompt_server) == [
         "captioning 1/2",
@@ -416,7 +436,7 @@ def test_a_vl_run_names_every_phase_it_passes_through(comfy_stubs, prompt_server
         "sampling 75%",
         "sampling 100%",
         "decoding",
-        "",
+        clock,
     ]
     # "sampling 0%" appears AT the segment's open: the diffusion model loads onto the GPU
     # between the open and the first eval, and the previous phase's line must not stand
@@ -425,19 +445,20 @@ def test_a_vl_run_names_every_phase_it_passes_through(comfy_stubs, prompt_server
     assert {node_id for _text, node_id in prompt_server} == {NODE_ID}
 
 
-def test_the_upscale_nodes_run_leads_with_its_two_extra_phases(comfy_stubs, prompt_server):
+def test_the_upscale_nodes_run_leads_with_its_two_extra_phases(comfy_stubs, prompt_server, clock):
     # The upscale model pass and the cold text-encoder load are minutes each with nothing
     # else covering them, which is the whole reason they are named segments.
     ledger = progress.build_ledger(captions.VLM_METHOD_VISION_CAPTIONS, 4, upscale_model=True,
                                    clip_load=True, unique_id=NODE_ID)
 
-    ledger.open(progress.UPSCALE)
-    ledger.resize(4 * progress.W_UPSCALE_STEP)
-    for step in range(4):
-        ledger.advance((step + 1) * progress.W_UPSCALE_STEP)
-    ledger.open(progress.CLIP_LOAD)
-    drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
-    ledger.finish()
+    with ledger:
+        ledger.open(progress.UPSCALE)
+        ledger.resize(4 * progress.W_UPSCALE_STEP)
+        for step in range(4):
+            ledger.advance((step + 1) * progress.W_UPSCALE_STEP)
+        ledger.open(progress.CLIP_LOAD)
+        drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
+        ledger.finish()
 
     assert texts(prompt_server) == [
         "upscaling",
@@ -452,18 +473,19 @@ def test_the_upscale_nodes_run_leads_with_its_two_extra_phases(comfy_stubs, prom
         "sampling 75%",
         "sampling 100%",
         "decoding",
-        "",
+        clock,
     ]
 
 
-def test_a_batch_says_which_picture_every_line_belongs_to(comfy_stubs, prompt_server):
+def test_a_batch_says_which_picture_every_line_belongs_to(comfy_stubs, prompt_server, clock):
     # B>1 refines one picture at a time under ONE ledger, so without the prefix the phases
     # would simply repeat with no way to tell how far through the batch the run is.
     ledger = progress.build_ledger(captions.VLM_METHOD_VISION_CAPTIONS, 4, batch=2, unique_id=NODE_ID)
 
-    drive_combined_picture(ledger, 1, ((1, 2),), (1, 2, 3, 4))
-    drive_combined_picture(ledger, 1, ((2, 2),), (1, 2, 3, 4))
-    ledger.finish()
+    with ledger:
+        drive_combined_picture(ledger, 1, ((1, 2),), (1, 2, 3, 4))
+        drive_combined_picture(ledger, 1, ((2, 2),), (1, 2, 3, 4))
+        ledger.finish()
 
     lines = texts(prompt_server)
     # Picture 1's pre-completion line only knows its LOCAL count (1 tile); the completion
@@ -471,13 +493,14 @@ def test_a_batch_says_which_picture_every_line_belongs_to(comfy_stubs, prompt_se
     # next run-wide index, so the count never appears to restart at the boundary.
     assert lines[0] == "image 1/2: captioning 1/1"
     assert lines[lines.index("image 1/2: decoding") + 1] == "image 2/2: captioning 2/2"
-    assert lines[-1] == ""
+    # The end line covers the whole batch, so it carries no picture prefix.
+    assert lines[-1] == clock
     assert [line for line in lines if "captioning" in line] == [
         "image 1/2: captioning 1/1", "image 1/2: captioning 1/2",
         "image 2/2: captioning 2/2"]
 
 
-def test_the_line_is_written_once_per_caption_not_once_per_token(comfy_stubs, prompt_server):
+def test_the_line_is_written_once_per_caption_not_once_per_token(comfy_stubs, prompt_server, clock):
     # Core's token bar fires ~200 times per caption through the shim. Those move the BAR, and
     # must not move the line: the text cadence is per caption, per sigma step and per phase.
     ledger = progress.build_ledger(captions.VLM_METHOD_CAPTIONS, 4, unique_id=NODE_ID)
@@ -489,20 +512,95 @@ def test_the_line_is_written_once_per_caption_not_once_per_token(comfy_stubs, pr
                 bar.update_absolute(token)
             ledger.caption_done(*counters)
 
-    assert texts(prompt_server) == ["captioning 1/2", "captioning 2/2", ""]
+    assert texts(prompt_server) == ["captioning 1/2", "captioning 2/2", clock]
 
 
-def test_an_exception_mid_run_still_clears_the_line(comfy_stubs, prompt_server):
-    # An OOM mid-sampling is the reachable case; without this the node would keep "sampling
-    # 50%" under it for the rest of the session.
+@pytest.mark.parametrize(("raised", "last_line"), [
+    (None, "done in 42.1 s"),
+    ("cancel", "cancelled"),
+    # An OOM mid-sampling is the reachable error. Without an end line the node would keep
+    # "sampling 50%" under it for the rest of the session.
+    (RuntimeError("out of memory"), "failed"),
+])
+def test_the_run_ends_on_a_line_that_says_how_it_ended(comfy_stubs, prompt_server, clock, raised,
+                                                       last_line):
+    import comfy.model_management
+
     ledger = progress.build_ledger(captions.VLM_METHOD_VISION, 4, unique_id=NODE_ID)
+    error = comfy.model_management.InterruptProcessingException() if raised == "cancel" else raised
+    caught = None
 
-    with pytest.raises(RuntimeError, match="out of memory"), ledger:
-        ledger.open(progress.SAMPLING, 8.0)
-        ledger.advance(4.0)
-        raise RuntimeError("out of memory")
+    try:
+        with ledger:
+            ledger.open(progress.SAMPLING, 8.0)
+            ledger.advance(4.0)
+            if error is not None:
+                raise error
+    except BaseException as exception:
+        caught = exception
 
-    assert texts(prompt_server) == ["sampling 0%", "sampling 50%", ""]
+    assert caught is error
+    assert texts(prompt_server) == ["sampling 0%", "sampling 50%", last_line]
+
+
+def test_an_interrupt_raised_by_a_routed_update_inside_a_generate_cancels_the_run(
+        comfy_stubs, prompt_server, monkeypatch):
+    # Core's bar hook is the only Cancel check inside a generate, and core throttles it, so a
+    # routed token update must check for itself or Cancel waits for the whole generate.
+    import comfy.model_management
+
+    ledger = progress.build_caption_ledger(a_preset("captions"), 2, unique_id=NODE_ID)
+
+    with pytest.raises(comfy.model_management.InterruptProcessingException), ledger:
+        token_bar = inner_bar(200)
+        token_bar.update_absolute(65)
+        before = ledger.value
+        arm_cancel(monkeypatch)
+        token_bar.update_absolute(130)
+
+    assert ledger.value == before
+    assert texts(prompt_server)[-1] == "cancelled"
+
+
+def test_an_interrupt_from_a_routed_update_on_a_lane_thread_ends_the_run_as_a_cancel(
+        comfy_stubs, prompt_server, monkeypatch):
+    # Ledger updates also arrive on the stepper's lane threads. An interrupt raised there must
+    # take the stepper's abort path, reach the caller as itself and end the run as a Cancel.
+    import comfy.model_management
+    import comfy.samplers
+
+    raised = []
+
+    def model(x, sigma, **kwargs):
+        try:
+            inner_bar(8).update_absolute(1)
+        except comfy.model_management.InterruptProcessingException as error:
+            raised.append((error, threading.current_thread().name))
+            raise
+        return x
+
+    class GenerateLaneGuider:
+        def sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None,
+                   disable_pbar=False, seed=None):
+            return sampler.sampler_function(model, noise, sigmas, extra_args={}, callback=callback,
+                                            disable=disable_pbar, **sampler.extra_options)
+
+    def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+        for step in range(int(sigmas.shape[-1]) - 1):
+            x = model(x, sigmas[step] * x.new_ones([x.shape[0]]))
+        return x
+
+    spec = stepper.LaneSpec(guider=GenerateLaneGuider(), sigmas=SIGMAS, noise=torch.zeros(1, 4, 8, 8),
+                            latent=torch.zeros(1, 4, 8, 8))
+    ledger = progress.build_ledger(captions.VLM_METHOD_VISION, 4, unique_id=NODE_ID)
+    arm_cancel(monkeypatch)
+
+    with pytest.raises(comfy.model_management.InterruptProcessingException) as caught, ledger:
+        ledger.open(progress.SAMPLING, 4.0)
+        stepper.run_lanes([spec], comfy.samplers.KSAMPLER(sample_euler), lambda *args: None)
+
+    assert raised == [(caught.value, "catr-lane-0")]
+    assert texts(prompt_server)[-1] == "cancelled"
 
 
 def test_a_run_with_no_node_id_emits_nothing(comfy_stubs, prompt_server):
@@ -510,23 +608,33 @@ def test_a_run_with_no_node_id_emits_nothing(comfy_stubs, prompt_server):
     # script driving refine_image), and the base node owns no ledger at all.
     ledger = progress.build_ledger(captions.VLM_METHOD_VISION_CAPTIONS, 4)
 
-    drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
-    ledger.finish()
+    with ledger:
+        drive_combined_picture(ledger, 2, ((1, 2), (2, 2)), (2, 4, 6, 8))
+        ledger.finish()
 
     assert prompt_server == []
 
 
-def test_no_server_module_is_silence_rather_than_an_error(monkeypatch):
+def half_a_sampling_run():
+    # A run with a node id, so every status line is sent, and a clean end line.
+    ledger = progress.build_ledger(captions.VLM_METHOD_VISION, 4, unique_id=NODE_ID)
+    with ledger:
+        ledger.open(progress.SAMPLING, 8.0)
+        ledger.advance(4.0)
+    return ledger
+
+
+def test_no_server_module_is_silence_rather_than_an_error(comfy_stubs, monkeypatch):
     # None in sys.modules is exactly what makes `import server` raise ImportError, which is
-    # the state of any run outside a live ComfyUI — this suite and every tests-AB harness.
+    # the state of any run outside a live ComfyUI, this suite and every tests-AB harness.
     monkeypatch.setitem(sys.modules, "server", None)
 
-    assert progress.send_status(NODE_ID, "sampling 50%") is None
+    assert half_a_sampling_run().value == scaled(4.0)
 
 
-def test_a_server_with_no_instance_is_silence_rather_than_an_error(monkeypatch):
+def test_a_server_with_no_instance_is_silence_rather_than_an_error(comfy_stubs, monkeypatch):
     # Core sets PromptServer.instance inside __init__, so on a headless run the attribute is
-    # ABSENT, not None — a plain PromptServer.instance would raise AttributeError there.
+    # ABSENT, not None. A plain PromptServer.instance would raise AttributeError there.
     module = types.ModuleType("server")
 
     class PromptServer:
@@ -536,9 +644,9 @@ def test_a_server_with_no_instance_is_silence_rather_than_an_error(monkeypatch):
     module.PromptServer = PromptServer
     monkeypatch.setitem(sys.modules, "server", module)
 
-    assert progress.send_status(NODE_ID, "sampling 50%") is None
+    assert half_a_sampling_run().value == scaled(4.0)
     PromptServer.instance = None
-    assert progress.send_status(NODE_ID, "sampling 50%") is None
+    assert half_a_sampling_run().value == scaled(4.0)
 
 
 # ---- preset: true sizes at the grid solve ----------------------------------
@@ -748,11 +856,13 @@ def test_the_caption_ledger_is_one_open_segment_sized_by_caption_segment(
     (captions.TILE_TEXT_CAPTION, "captioning"),
     (captions.TILE_TEXT_TAGS, "tagging"),
 ])
-def test_the_captions_line_names_the_pass_the_preset_runs(comfy_stubs, prompt_server, kind, word):
+def test_the_captions_line_names_the_pass_the_preset_runs(comfy_stubs, prompt_server, clock, kind,
+                                                          word):
     # Both kinds share the CAPTIONS segment, and a tags run must not read "captioning".
     ledger = progress.build_caption_ledger(a_preset("captions", kind=kind), 3, unique_id=NODE_ID)
-    for index in range(1, 4):
-        ledger.caption_done(index, 3)
-    ledger.finish()
+    with ledger:
+        for index in range(1, 4):
+            ledger.caption_done(index, 3)
+        ledger.finish()
 
-    assert texts(prompt_server) == [f"{word} 1/3", f"{word} 2/3", f"{word} 3/3", ""]
+    assert texts(prompt_server) == [f"{word} 1/3", f"{word} 2/3", f"{word} 3/3", clock]

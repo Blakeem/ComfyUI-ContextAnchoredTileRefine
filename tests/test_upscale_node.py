@@ -7,7 +7,8 @@ import sys
 
 import pytest
 import torch
-from test_tags import FakeTagClip
+from logit_classifier import UnsupportedModelError
+from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
 from context_anchored_tile_refine import sampling, upscale
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
@@ -331,6 +332,7 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
     from context_anchored_tile_refine import captions
 
     write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
+    open_toolkit(monkeypatch, FakeClassifier())
 
     recorded, _ = _drive(monkeypatch, clip=FakeTagClip())
 
@@ -339,14 +341,15 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
     assert preset.prompt == WIDGETS["prompt"]
 
 
-@pytest.mark.parametrize(("clip", "missing", "message"), [
-    (None, False, "this CLIP cannot generate text"),
-    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+@pytest.mark.parametrize(("clip", "missing", "error", "message"), [
+    (None, False, UnsupportedModelError,
+     r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.3\.0"'),
 ])
 def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
-                                                                         clip, missing, message):
+                                                                         clip, missing, error, message):
     # This node runs the upscale-model pass and the text-encoder load before the engine's tags
-    # pass, so a CLIP without a text generator or a missing library is named first.
+    # pass, so a CLIP that is not a Qwen3-VL text encoder or a missing library is named first.
     from test_captions import TAGS_SETTINGS, write_settings
 
     write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
@@ -354,7 +357,7 @@ def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_st
         monkeypatch.setitem(sys.modules, "logit_classifier", None)
     recorded = {}
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(error, match=message):
         _drive(monkeypatch, recorded=recorded, clip=clip)
 
     assert recorded["prepare_upscaled"] is None

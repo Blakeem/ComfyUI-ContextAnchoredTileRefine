@@ -1,6 +1,6 @@
-"""ComfyUI bootstrap for the standalone A/B harness (no ComfyUI server).
+"""This machine's ComfyUI root, model folder and memory flags for the library's harness bootstrap, comfy_env.
 
-`bootstrap()` MUST run before the first `comfy` / `comfy_extras` / `folder_paths`
+`bootstrap()` MUST run before the first `comfy`, `comfy_extras` or `folder_paths`
 import, because it decides which ComfyUI source tree those names resolve to and
 what `folder_paths.base_path` is.
 
@@ -17,7 +17,6 @@ loading the UNET there fails outright. `Z_IMAGE_MARKER` probes for that support 
 roots that have it win. Set COMFYUI_ROOT to override the whole search.
 """
 import dataclasses
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -60,8 +59,17 @@ RESERVE_VRAM_GB = None
 # --disable-pinned-memory keeps weight staging pageable; --fast-disk streams from NVMe.
 MEMORY_ARGS = ("--disable-pinned-memory", "--fast-disk")
 
-# (enabled, why) of the one-per-process DynamicVRAM bring-up; see _enable_dynamic_vram.
-_DYNAMIC_VRAM = None
+# comfy_env ships in the library's repository and in no install. Appended, so its neighbours
+# (the library's own ab_env among them) never shadow a module of this folder.
+LIBRARY_HARNESS_DIR = Path(r"E:\logit-classifier\tests-AB")
+
+if not (LIBRARY_HARNESS_DIR / "comfy_env.py").is_file():
+    raise SystemExit(f"{LIBRARY_HARNESS_DIR} holds no comfy_env.py. Point LIBRARY_HARNESS_DIR at the "
+                     "logit-classifier repository's tests-AB folder.")
+if str(LIBRARY_HARNESS_DIR) not in sys.path:
+    sys.path.append(str(LIBRARY_HARNESS_DIR))
+
+import comfy_env  # noqa: E402
 
 # Probed inside <root>/comfy to tell a z-image-capable tree from an older one.
 Z_IMAGE_MARKER = Path("comfy") / "text_encoders" / "z_image.py"
@@ -115,135 +123,24 @@ def resolve_root():
     )
 
 
-def _enable_dynamic_vram():
-    """Mirror main.py's DynamicVRAM (comfy_aimdo) enablement. Returns (enabled, why).
-
-    SOURCE OF TRUTH: <root>/main.py — its module-level `enables_dynamic_vram()` block
-    (control.init) plus the `init_devices` block that follows the comfy.model_management
-    import. Re-read BOTH when the pinned root moves; nothing else in the tree ever
-    assigns `comfy.memory_management.aimdo_enabled`, and that flag gates the streaming
-    weight loader (comfy/utils.py), the free-memory budget (model_patcher.py), three
-    load branches (model_management.py), every --fast-disk staging path (ops.py,
-    model_prefetch.py) and VAE offload (sd.py). Without it the harness runs a different
-    memory path than the app it is supposed to reproduce."""
-    import comfy_aimdo.control
-    from comfy.cli_args import args, enables_dynamic_vram
-
-    # main.py module level: control.init() before any torch device init.
-    if enables_dynamic_vram():
-        simple_vram_headroom = None if args.reserve_vram is None else int(args.reserve_vram * 1024 ** 3)
-        try:
-            comfy_aimdo.control.init(simple_vram_headroom=simple_vram_headroom,
-                                     nvml_pressure=not args.disable_nvml_pressure)
-        except TypeError:
-            # comfy-aimdo 0.4.10 protocol.
-            try:
-                comfy_aimdo.control.init(simple_vram_headroom=simple_vram_headroom)
-            except TypeError:
-                # comfy-aimdo 0.4.9 protocol.
-                comfy_aimdo.control.init()
-
-    # main.py after its `import comfy.model_management`: device init, then the two globals.
-    import comfy.memory_management
-    import comfy.model_management
-    import comfy.model_patcher
-
-    if not (args.enable_dynamic_vram or (enables_dynamic_vram()
-                                         and comfy.model_management.is_nvidia()
-                                         and not comfy.model_management.is_wsl())):
-        return False, "not enabled for this device/flags (main.py's own condition)"
-    if (not args.enable_dynamic_vram) and (comfy.model_management.torch_version_numeric < (2, 8)):
-        return False, f"torch {comfy.model_management.torch_version_numeric} < 2.8"
-
-    try:
-        aimdo_initialized = comfy_aimdo.control.init_devices(
-            (d.index, int(args.vram_headroom * 1024 ** 3))
-            for d in comfy.model_management.get_all_torch_devices())
-    except TypeError:
-        # comfy-aimdo 0.4.9 protocol.
-        aimdo_initialized = comfy_aimdo.control.init_devices(
-            d.index for d in comfy.model_management.get_all_torch_devices())
-    if not aimdo_initialized:
-        return False, "comfy_aimdo.control.init_devices() reported no working install"
-
-    comfy_aimdo.control.set_log_info()   # main.py's default console log level branch
-    comfy.model_patcher.CoreModelPatcher = comfy.model_patcher.ModelPatcherDynamic
-    comfy.memory_management.aimdo_enabled = True
-    return True, "comfy_aimdo devices initialized"
-
-
 def bootstrap():
-    """Put the ComfyUI root + this repo on sys.path, point folder_paths at the real
-    model directory, and bring up DynamicVRAM the way main.py does.
+    """Put this repo on sys.path, then import comfy from the chosen root with this machine's
+    model folder and flags, as comfy_env.bootstrap does for every harness.
     Returns (root, note). Safe to call twice."""
-    # main.py sets this at module level, before native/torch init; the top of bootstrap()
-    # is the same point relative to native init here.
-    if os.name == "nt":
-        os.environ["MIMALLOC_PURGE_DELAY"] = "0"
-
     root, note = resolve_root()
-    for path in (str(REPO_ROOT), str(root)):
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    extra_args = list(MEMORY_ARGS)
 
-    # A regular 'comfy' package elsewhere (comfy_cli ships one) beats the source
-    # tree regardless of sys.path order — verify the intended source resolves.
-    spec = importlib.util.find_spec("comfy.samplers")
-    origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
-    if origin is None or origin.parent != (root / "comfy").resolve():
-        raise SystemExit(
-            f"A different 'comfy' package shadows the ComfyUI source at {root} "
-            f"(comfy.samplers resolved to: {origin})."
-        )
-
-    # folder_paths reads comfy.cli_args.args at import; cli_args only parses argv
-    # once comfy.options.enable_args_parsing() has been called (main.py does this).
-    # Enable it and hand it a synthetic argv so --base-directory is honoured and our
-    # own flags are never seen by ComfyUI's parser.
-    import comfy.options
-
-    comfy.options.enable_args_parsing()
-    saved_argv = sys.argv
-    sys.argv = [saved_argv[0], "--base-directory", str(MODEL_BASE_DIR), *MEMORY_ARGS]
     if RESERVE_VRAM_GB is not None:
-        sys.argv += ["--reserve-vram", str(RESERVE_VRAM_GB)]
-    try:
-        import folder_paths  # noqa: F401  (import side effect is the point)
-    finally:
-        sys.argv = saved_argv
-
-    # cli_args parses argv exactly once, at its own import, and says nothing when it
-    # already ran: anything that imported comfy.cli_args / folder_paths before this
-    # leaves base_directory None and every MEMORY_ARGS flag False, silently. Read the
-    # parsed state back instead of trusting the side effect.
-    from comfy.cli_args import args as parsed_args
-
-    if parsed_args.base_directory != str(MODEL_BASE_DIR):
-        raise SystemExit(
-            f"comfy.cli_args was parsed before bootstrap(): --base-directory is {parsed_args.base_directory!r}, "
-            f"expected {str(MODEL_BASE_DIR)!r}. Nothing may import comfy/folder_paths first.")
-    for flag in MEMORY_ARGS:
-        attribute = flag.lstrip("-").replace("-", "_")
-        if not getattr(parsed_args, attribute, False):
-            raise SystemExit(
-                f"comfy.cli_args was parsed before bootstrap(): {flag} never took effect "
-                f"(args.{attribute} is not set). Nothing may import comfy/folder_paths first.")
-
-    # Attempted once per process — main.py runs these stages once, and bootstrap()
-    # must stay safe to call twice.
-    global _DYNAMIC_VRAM
-    if _DYNAMIC_VRAM is None:
-        try:
-            _DYNAMIC_VRAM = _enable_dynamic_vram()
-        except Exception as exc:   # comfy_aimdo missing, or any init raising
-            _DYNAMIC_VRAM = (False, f"{type(exc).__name__}: {exc}")
-    dynamic_vram, why = _DYNAMIC_VRAM
-    if dynamic_vram:
-        print(f"DynamicVRAM (comfy_aimdo) enabled, as main.py does: {why}")
-    else:
-        print("WARNING: DynamicVRAM (comfy_aimdo) NOT enabled — legacy ModelPatcher, "
-              f"estimate-based VRAM accounting, --fast-disk inert: {why}")
+        extra_args += ["--reserve-vram", str(RESERVE_VRAM_GB)]
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    comfy_env.bootstrap(root, MODEL_BASE_DIR, extra_args)
     return root, note
+
+
+def end_node_execution():
+    """The cleanup core's executor runs after every node, for a harness that runs several node executions."""
+    comfy_env.end_node_execution()
 
 
 def caption_preset(instruction, max_tokens, surface=None):

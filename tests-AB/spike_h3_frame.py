@@ -59,7 +59,7 @@ CAPTION_INSTRUCTION = ("Describe the image by detailing the color, shape, size, 
 # of 64 layers with no final norm, and clip.generate's tied-embedding fallback there
 # degenerates to comma streams (found 2026-08-09 — non-empty, so it slipped past the
 # Krea-era emptiness guards; _usable() now catches that class).
-CAPTIONER_CLIP_NAME = "qwen3-vl-4b-heretic_int8.safetensors"
+CAPTIONER_CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 CAPTIONER_CLIP_TYPE = "krea2"
 
 FRAME_KEY = dict(stress.STRESS_KEY, frame=FRAME_INDEX, clip_frames=FRAMES)
@@ -269,11 +269,16 @@ def refine_frame(model, vae, up, tile_positive_fn, denoise, noise_pack, audio_ze
 
 
 def main():
+    global CAPTIONER_CLIP_NAME
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--denoises", type=float, nargs="+", default=list(DEFAULT_DENOISES))
     parser.add_argument("--arms", nargs="+", choices=list(ARMS), default=["text", "vl"])
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--clip", default=CAPTIONER_CLIP_NAME,
+                        help="the captioner's text encoder file in models/text_encoders")
     args = parser.parse_args()
+
+    CAPTIONER_CLIP_NAME = args.clip
 
     version = poc.ab_env.version(poc.ROOT)
     print(f"ComfyUI root: {poc.ROOT} ({poc.ROOT_NOTE}) version {version}", flush=True)

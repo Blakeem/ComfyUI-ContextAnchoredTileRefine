@@ -3,8 +3,9 @@ import sys
 
 import pytest
 import torch
+from logit_classifier import UnsupportedModelError
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
-from test_tags import FakeTagClip
+from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
 from context_anchored_tile_refine import captions, sampling
 from context_anchored_tile_refine.node import (
@@ -125,6 +126,7 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
         return image
 
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+    open_toolkit(monkeypatch, FakeClassifier())
 
     _refine_vl(FakeTagClip(), prompt=prompt)
 
@@ -132,14 +134,15 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
     assert recorded["preset"].prompt == ("" if prompt is None else prompt)
 
 
-@pytest.mark.parametrize(("clip", "missing", "message"), [
-    (object(), False, "this CLIP cannot generate text"),
-    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+@pytest.mark.parametrize(("clip", "missing", "error", "message"), [
+    (object(), False, UnsupportedModelError,
+     r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.3\.0"'),
 ])
 def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
-                                                                             clip, missing, message):
-    # A CLIP without a text generator or a missing library is named here, before refine_image
-    # and so before any VAE or VL encode spends GPU time.
+                                                                             clip, missing, error, message):
+    # A CLIP that is not a Qwen3-VL text encoder or a missing library is named here, before
+    # refine_image and so before any VAE or VL encode spends GPU time.
     def unreached(*args, **kwargs):
         raise AssertionError("refine_image must not run when the tags preset cannot")
 
@@ -147,18 +150,22 @@ def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comf
         monkeypatch.setitem(sys.modules, "logit_classifier", None)
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(error, match=message):
         _refine_vl(clip)
 
 
-def test_vl_node_never_checks_the_tags_library_for_a_caption_preset(comfy_stubs, monkeypatch,
-                                                                    caption_settings):
+def test_vl_node_names_the_missing_library_for_a_caption_preset_before_the_engine_runs(
+        comfy_stubs, monkeypatch, caption_settings):
+    # The progress ledger routes core's bars and writes the status line through the library,
+    # so every VL run needs it and a caption preset fails before any GPU time too.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run without the library")
+
     monkeypatch.setitem(sys.modules, "logit_classifier", None)
-    monkeypatch.setattr(sampling, "refine_image", lambda image, *args, **kwargs: image)
+    monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    result = _refine_vl(object())
-
-    assert isinstance(result, tuple) and len(result) == 1
+    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.3\.0"'):
+        _refine_vl(object())
 
 
 def test_connected_mask_refines(comfy_stubs):

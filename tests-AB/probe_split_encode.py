@@ -48,6 +48,7 @@ includes the weight upload; later calls show the resident per-encode cost).
 Run alone on an idle GPU (CLAUDE.md: one GPU job at a time):
     <venv python> tests-AB/probe_split_encode.py
 """
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -65,7 +66,7 @@ import ab_models  # noqa: E402
 
 from context_anchored_tile_refine import captions, vl  # noqa: E402
 
-CLIP_NAME = "qwen3-vl-4b-heretic_int8.safetensors"
+CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 CLIP_TYPE = "krea2"
 BASE_PNG = Path(__file__).resolve().parent / "inputs" / "krea2-00676-base-768x1024.png"
 
@@ -134,14 +135,18 @@ def compare(label, left, right, floor=0.0):
     return diff
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--clip", default=CLIP_NAME, help="the text encoder file in models/text_encoders")
+    args = parser.parse_args(argv)
+
     base = load_base()
     canvas, enc_h, enc_w = vl.resample_picture(base, 768 * 1024)
     grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
     n_rows = grid_h * grid_w
     print(f"canvas {enc_w}x{enc_h}, grid {grid_w}x{grid_h}, n_rows={n_rows}")
 
-    clip = ab_models.load_clip(CLIP_NAME, CLIP_TYPE)
+    clip = ab_models.load_clip(args.clip, CLIP_TYPE)
 
     print("\nencodes (call 1 includes the weight upload):")
     with ab_models.VramProbe() as probe, torch.inference_mode():

@@ -29,9 +29,9 @@ vlm_method option per caption surface (`resolve_method`), and the file's [vision
 holds the row counts and picture sizes every surface samples at.
 
 Everything here is lifted from tests-AB/run_ab_matrix.py, which produced the renders the
-owner judged on 2026-08-13; nothing is newly invented. Module scope is torch-only; comfy
-is imported lazily inside functions (the same contract as vl.py / sampling.py, pinned by
-a subprocess test).
+owner judged on 2026-08-13. Nothing is newly invented. Module scope is torch-only. comfy
+and logit_classifier are imported lazily inside functions (the same contract as vl.py /
+sampling.py, pinned by a subprocess test).
 """
 import functools
 import hashlib
@@ -217,8 +217,8 @@ _TAGS_PLACEHOLDERS = {"prompt_tags_instruction": PROMPT_PLACEHOLDER,
 # prompt_tags_instruction only, so anywhere else it reaches the VL model literally.
 _TAGS_PROMPT_FREE_KEYS = ("tile_tags_instruction", "tile_tags_verification_statement")
 
-_TAGS_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "prompt_tags_verification_threshold",
-                        "tile_tags_position_threshold")
+# The tagging stages take a verification threshold above 0 only, while a strip reads any score.
+_TAGS_VERIFICATION_THRESHOLD_KEYS = ("tile_tags_verification_threshold", "prompt_tags_verification_threshold")
 
 # Per-preset keys this version no longer reads: the caption picture size moved to the
 # [vision] table on 2026-09-02, one size for both caption surfaces. Named so a user's own
@@ -386,11 +386,16 @@ def _check_preset(path, label, block):
                     f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
                     f"holds {PROMPT_PLACEHOLDER}, which only prompt_tags_instruction takes. "
                     f"Remove {PROMPT_PLACEHOLDER} from {key}.")
-        for key in _TAGS_THRESHOLD_KEYS:
-            if not 0 <= block[key] <= 1:
+        for key in _TAGS_VERIFICATION_THRESHOLD_KEYS:
+            if not 0 < block[key] <= 1:
                 raise RuntimeError(
                     f"Context-Anchored Tile Refine (VL): preset {label!r} key {key} in {path} "
-                    f"is a score and must be between 0 and 1, got {block[key]}.")
+                    f"is a score and must be above 0 and at most 1, got {block[key]}.")
+        if not 0 <= block["tile_tags_position_threshold"] <= 1:
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine (VL): preset {label!r} key tile_tags_position_threshold "
+                f"in {path} is a score and must be between 0 and 1, got "
+                f"{block['tile_tags_position_threshold']}.")
         budget_keys = ("global_style_max_tokens",)
     else:
         if not block["tile_caption_instruction"].strip():
@@ -843,23 +848,22 @@ def picture_digest(picture):
     return (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
 
 
-def clip_generate(clip, tokens, **kwargs):
-    """clip.generate, then core's cleanup of the CUDA graphs that generate captured.
+# logit_classifier.toolkit, which holds clip_generate and the tagging stages, arrived in 0.3.0.
+LIBRARY_VERSION = "0.3.0"
 
-    Each decoder layer keeps the graph it captured, bound to that generate's freed KV cache, and
-    core cleans up only between nodes, so the next generate in the same node replayed it and
-    raised a device side assert (Comfy-Org/ComfyUI issue #16441). A core without graph decode
-    has nothing to clean up."""
+
+def comfy_toolkit():
+    """logit_classifier.toolkit.comfyui, or a RuntimeError naming the pip command that installs
+    LIBRARY_VERSION when the library is missing or older."""
     try:
-        return clip.generate(tokens, **kwargs)
-    finally:
-        try:
-            import comfy.model_prefetch as model_prefetch
-        except ImportError:
-            model_prefetch = None
-        cleanup = getattr(model_prefetch, "cleanup_prefetch_queues", None)
-        if cleanup is not None:
-            cleanup()
+        import logit_classifier.toolkit.comfyui as toolkit
+    except ImportError as error:
+        raise RuntimeError(
+            f"Context-Anchored Tile Refine (VL): every VL run needs logit-classifier "
+            f"{LIBRARY_VERSION} or newer, and logit_classifier.toolkit.comfyui cannot be imported "
+            f"({error}). Install or upgrade it in the ComfyUI Python environment with: "
+            f'pip install -U "logit-classifier>={LIBRARY_VERSION}"') from error
+    return toolkit
 
 
 def generate_caption(clip, vl_input, instruction, max_length, thinking=True, scope=()):
@@ -878,6 +882,7 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
             "Context-Anchored Tile Refine (VL): this CLIP cannot generate text. The caption "
             "vlm_methods need a vision-language text encoder with a text-generation head "
             "(Krea 2 family). Use vlm_method 'vision tokens' with any other CLIP.")
+    clip_generate = comfy_toolkit().clip_generate
 
     key = (picture_digest(vl_input), instruction, max_length, thinking, scope)
     stored = _CAPTION_CACHE.get(key, clip)

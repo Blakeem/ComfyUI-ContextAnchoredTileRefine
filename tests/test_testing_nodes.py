@@ -17,7 +17,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 from test_captions import FakeCaptionClip
-from test_tags import PROMPT_TAGS, PROPOSE, VERIFY, FakeClassifier, FakeTagClip, calls_of, strip_requests
+from test_tags import (
+    PROMPT_TAGS,
+    PROPOSE,
+    PROPOSE_TEXT,
+    VERIFY,
+    FakeClassifier,
+    FakeTagClip,
+    calls_of,
+    chat_text,
+    open_toolkit,
+    strip_requests,
+)
 
 from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileUpscaleVL
@@ -705,7 +716,7 @@ TAG_PROMPT_TAGS = "moon, lantern, oil painting"
 def tag_classifier(comfy_stubs, monkeypatch):
     fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.95,
                           other=lambda tag: 0.97 if tag == "oil painting" else 0.1)
-    monkeypatch.setattr(tags, "build_classifier", lambda clip: fake)
+    open_toolkit(monkeypatch, fake)
     return fake
 
 
@@ -731,9 +742,8 @@ def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
     style_calls = calls_of(clip, "style")
     assert [(call["text"], call["max_length"]) for call in style_calls] == [("name the medium", 64)]
     (prompt_tags_call,) = calls_of(clip, "prompt tags")
-    assert prompt_tags_call["text"] == tags.PROMPT_TAGS_TEMPLATE.format(
-        instruction=PROMPT_TAGS.replace("{PROMPT}", TAG_PROMPT))
-    assert calls_of(clip, "propose")[0]["text"] == tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
+    assert prompt_tags_call["text"] == chat_text(PROMPT_TAGS.replace("{PROMPT}", TAG_PROMPT))
+    assert calls_of(clip, "propose")[0]["text"] == PROPOSE_TEXT
 
 
 def test_the_tags_kind_ignores_the_caption_budget_a_tags_settings_node_outputs(tag_classifier):
@@ -884,11 +894,14 @@ def test_a_shown_score_is_truncated_so_it_never_reaches_a_threshold_its_row_fell
             in testing._final_block("### Tile", final, True, 0.9))
 
 
-@pytest.mark.parametrize(("name", "value"), [
-    ("tile_tags_verification_threshold", 1.5), ("tile_tags_position_threshold", -0.1),
-    ("prompt_tags_verification_threshold", 1.5)])
-def test_a_linked_threshold_outside_0_to_1_is_refused_before_any_request(tag_classifier, name, value):
-    with pytest.raises(ValueError, match=f"was given {name} {value}, and it is a score between 0 and 1"):
+@pytest.mark.parametrize(("name", "value", "span"), [
+    ("tile_tags_verification_threshold", 1.5, "above 0 and at most 1"),
+    ("tile_tags_verification_threshold", 0, "above 0 and at most 1"),
+    ("tile_tags_position_threshold", -0.1, "between 0 and 1"),
+    ("prompt_tags_verification_threshold", 1.5, "above 0 and at most 1"),
+    ("prompt_tags_verification_threshold", 0, "above 0 and at most 1")])
+def test_a_linked_threshold_outside_its_range_is_refused_before_any_request(tag_classifier, name, value, span):
+    with pytest.raises(ValueError, match=f"was given {name} {value}, and it is a score {span}"):
         _tag_run(**{name: value})
 
     assert tag_classifier.requests == []
@@ -948,7 +961,7 @@ def test_the_prompt_never_reaches_the_tile_question_and_is_asked_once_when_conne
     clip, _result = _tag_run(prompt=prompt)
 
     propose = calls_of(clip, "propose")
-    assert [call["text"] for call in propose] == [tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)] * 2
+    assert [call["text"] for call in propose] == [PROPOSE_TEXT] * 2
     assert len(calls_of(clip, "prompt tags")) == asked
 
 

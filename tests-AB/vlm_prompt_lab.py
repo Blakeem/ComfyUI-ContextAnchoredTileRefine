@@ -48,7 +48,7 @@ CACHE_DIR = Path(__file__).resolve().parent / "cache"
 LAB_DIR = CACHE_DIR / "promptlab"
 
 KREA2_ROOT = Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI")
-CLIP_NAME = "qwen3-vl-4b-heretic_int8.safetensors"
+CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 CLIP_TYPE = "krea2"
 
 # Generation is greedy (do_sample=False) so a variant's answer is a property of the
@@ -888,6 +888,7 @@ def summarize(rows):
 # ------------------------------------------------------------------ MAIN
 
 def main():
+    global CLIP_NAME
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--round", type=int, default=max(ROUNDS), help="which variant set")
@@ -897,7 +898,10 @@ def main():
     parser.add_argument("--show", default=None, help="print one variant's full answers and exit")
     parser.add_argument("--list", action="store_true", help="print the plan, generate nothing")
     parser.add_argument("--force", action="store_true", help="regenerate, ignoring the cache")
+    parser.add_argument("--clip", default=CLIP_NAME, help="the text encoder file in models/text_encoders")
     args = parser.parse_args()
+
+    CLIP_NAME = args.clip
 
     if args.round not in ROUNDS:
         raise SystemExit(f"No round {args.round}; have {sorted(ROUNDS)}")

@@ -145,16 +145,9 @@ def upscale_to(image, upscale_model_name, target_w, target_h):
 
 def load_clip(clip_name, clip_type):
     """CLIPLoader.load_clip with device="default"."""
-    import comfy.sd
-    import folder_paths
+    import comfy_env
 
-    clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
-    return comfy.sd.load_clip(
-        ckpt_paths=[clip_path],
-        embedding_directory=folder_paths.get_folder_paths("embeddings"),
-        clip_type=getattr(comfy.sd.CLIPType, clip_type.upper()),
-        model_options={},
-    )
+    return comfy_env.load_clip(clip_name, clip_type)
 
 
 def encode_prompt(clip, text):

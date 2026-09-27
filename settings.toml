@@ -80,12 +80,12 @@
 #                            listed tag. It must hold {TAG}.
 # tile_tags_verification_threshold
 #                            In a tags preset, the score the verification statement must reach
-#                            on the entire tile to keep a tag the tile's own list names. Range
-#                            0 to 1.
+#                            on the entire tile to keep a tag the tile's own list names. Above
+#                            0 and at most 1.
 # prompt_tags_verification_threshold
 #                            In a tags preset, the score the verification statement must reach
 #                            on the entire tile to keep a thing from the prompt that the tile's
-#                            own list lacks. Range 0 to 1.
+#                            own list lacks. Above 0 and at most 1.
 # tile_tags_position_threshold
 #                            In a tags preset, the score the verification statement must reach
 #                            on one of six strips of the tile, three rows and three columns,

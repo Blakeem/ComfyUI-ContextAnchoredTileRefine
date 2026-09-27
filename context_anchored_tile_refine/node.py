@@ -1,3 +1,4 @@
+from typing import ClassVar
 
 # Mirrors core nodes.MAX_RESOLUTION (importing it would pull comfy in at module scope).
 MAX_RESOLUTION = 16384
@@ -155,8 +156,12 @@ class ContextAnchoredTileRefine:
         }
 
     RETURN_TYPES = ("IMAGE",)
+    OUTPUT_TOOLTIPS = (
+        "The refined image at the size of the input image, one picture per input picture. With a mask, only the masked region is refined and the rest is left untouched.",
+    )
     FUNCTION = "refine"
     CATEGORY = "image/upscaling"
+    SEARCH_ALIASES: ClassVar[list[str]] = ["tiled refine", "tile refine", "tiled upscale", "refine", "seamless tiles", "tiled diffusion"]
 
     @classmethod
     def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None, vlm_method=None, sampler_name=None):
@@ -213,6 +218,8 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     With a mask, the canvas rows come from the FULL image, so a masked refine stays aware
     of its surroundings.
     """
+
+    SEARCH_ALIASES: ClassVar[list[str]] = ["vl refine", "vision refine", "tiled refine", "tile captions", "krea 2 refine", "seamless tiles"]
 
     @classmethod
     def INPUT_TYPES(s):
@@ -283,6 +290,11 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     vlm_method picks WHICH surface fills that positive: the vision rows, a per-tile VLM
     caption of the tile's own crop, or both (default, see captions.py).
     """
+
+    OUTPUT_TOOLTIPS = (
+        "The image upscaled by upscale_by and then refined tile by tile, one picture per input picture. At denoise 0 it is the upscaled image with no refine.",
+    )
+    SEARCH_ALIASES: ClassVar[list[str]] = ["vl upscale", "tiled upscale", "upscale", "refine", "krea 2 upscale", "8k upscale", "seamless tiles"]
 
     @classmethod
     def INPUT_TYPES(s):

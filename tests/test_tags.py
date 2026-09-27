@@ -1,13 +1,14 @@
 """tags.py: the tile text a tags preset writes, from the prompt tags, propose, merge, the thing
 check, verify, clean and render.
 
-A duck-typed CLIP stands in for the VL text encoder and a scripted classifier, patched in at
-`tags.build_classifier`, answers every noul and thing check. logit_classifier itself is the real
-library (its tags helpers and question types), so no comfy install and no model are needed.
+A duck-typed CLIP stands in for the VL text encoder and a scripted classifier, handed out by the
+toolkit's comfy_classifier (see `open_toolkit`), answers every noul and thing check.
+logit_classifier itself is the real library (its toolkit stages, tags helpers and question
+types), so no comfy install and no model are needed.
 """
+import contextlib
 import dataclasses
 import importlib.metadata
-import logging
 import re
 import sys
 import types
@@ -38,6 +39,27 @@ def a_tags_preset(prompt="", style="", style_tokens=128, **thresholds):
 
 def statement(item):
     return VERIFY.replace("{TAG}", item)
+
+
+def chat_text(user, image=False):
+    """The chat text of one user turn, byte for byte what the pass sent before the toolkit
+    wrote it."""
+    slot = "<|vision_start|><|image_pad|><|vision_end|>" if image else ""
+    return f"<|im_start|>user\n{slot}{user}<|im_end|>\n<|im_start|>assistant\n"
+
+
+PROPOSE_TEXT = chat_text(PROPOSE, image=True)
+
+
+def open_toolkit(monkeypatch, fake):
+    """Let a duck-typed CLIP through the toolkit, whose comfy_classifier and
+    shared_vision_encode read core's model parts: the first hands out `fake` and the second
+    passes through."""
+    import logit_classifier.toolkit.comfyui as toolkit
+    import logit_classifier.toolkit.comfyui.tagger as tagger
+
+    monkeypatch.setattr(toolkit, "comfy_classifier", lambda clip, **kwargs: fake)
+    monkeypatch.setattr(tagger, "shared_vision_encode", lambda clip: contextlib.nullcontext())
 
 
 class FakeTagClip:
@@ -93,7 +115,8 @@ class FakeClassifier:
     """Scripted classifier: `noul(statement)` answers every noul and `other(tag)` the p("other")
     of every thing check, 0.0 (a thing) by default. `noul_at(statement, picture)`, when set,
     answers the nouls in place of `noul`, so a test can script each strip. Every request is
-    recorded with its statements and its picture."""
+    recorded with its statements and its picture. `nouls` is the library's own, so the
+    statements are packed into requests as a real classifier packs them."""
 
     def __init__(self, noul=None, other=None):
         self.noul = noul if noul is not None else (lambda text: 0.95)
@@ -101,7 +124,14 @@ class FakeClassifier:
         self.noul_at = None
         self.requests = []
 
+    def nouls(self, statements, *, image=None, state=""):
+        from logit_classifier import Classifier
+
+        return Classifier.nouls(self, statements, image=image, state=state)
+
     def classify(self, request, image=None):
+        from logit_classifier import ChoiceAnswer, NoulAnswer
+
         answers = {}
         texts = []
         kinds = set()
@@ -111,11 +141,12 @@ class FakeClassifier:
             if question.type == "choice":
                 tag = re.search(r'"(.*)"', question.instructions).group(1)
                 p = self.other(tag)
-                answers[qid] = types.SimpleNamespace(probabilities={"thing": 1.0 - p, "other": p})
+                answers[qid] = ChoiceAnswer(choice="other" if p >= 0.5 else "thing", confidence=max(p, 1.0 - p),
+                                            probabilities={"thing": 1.0 - p, "other": p})
             elif self.noul_at is not None:
-                answers[qid] = types.SimpleNamespace(noul=self.noul_at(question.instructions, image))
+                answers[qid] = NoulAnswer(noul=self.noul_at(question.instructions, image))
             else:
-                answers[qid] = types.SimpleNamespace(noul=self.noul(question.instructions))
+                answers[qid] = NoulAnswer(noul=self.noul(question.instructions))
         self.requests.append({"kind": kinds.pop() if len(kinds) == 1 else kinds, "texts": texts,
                               "image": image, "state": request.state})
         return types.SimpleNamespace(answers=answers), None
@@ -124,7 +155,7 @@ class FakeClassifier:
 @pytest.fixture
 def classifier(comfy_stubs, monkeypatch):
     fake = FakeClassifier()
-    monkeypatch.setattr(tags, "build_classifier", lambda clip: fake)
+    open_toolkit(monkeypatch, fake)
     return fake
 
 
@@ -234,13 +265,11 @@ def test_the_prompt_is_asked_once_per_picture_text_only_and_never_in_the_propose
     run(without, a_tags_preset(), tiles=(TILE_A, TILE_B))
     run(with_prompt, a_tags_preset(prompt="a cat {on} a mat"), tiles=(TILE_A, TILE_B))
 
-    propose_question = tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE)
-    assert [call["text"] for call in propose_calls(without)] == [propose_question] * 2
-    assert [call["text"] for call in propose_calls(with_prompt)] == [propose_question] * 2
+    assert [call["text"] for call in propose_calls(without)] == [PROPOSE_TEXT] * 2
+    assert [call["text"] for call in propose_calls(with_prompt)] == [PROPOSE_TEXT] * 2
     assert calls_of(without, "prompt tags") == []
     (asked,) = calls_of(with_prompt, "prompt tags")
-    assert asked["text"] == tags.PROMPT_TAGS_TEMPLATE.format(
-        instruction="List the things this prompt names: a cat {on} a mat")
+    assert asked["text"] == chat_text("List the things this prompt names: a cat {on} a mat")
     assert asked["image"] is None
     assert asked["do_sample"] is False
     assert asked["max_length"] == tags.PROMPT_TAGS_MAX_TOKENS == 256
@@ -309,47 +338,13 @@ class GeneratingClip:
         return "".join(self.words.get(i, "") for i in ids)
 
 
-def stop_clip(words, ids):
-    transformer = ScriptedTransformer(ids)
-    clip = types.SimpleNamespace(
-        cond_stage_model=types.SimpleNamespace(clip="qwen", qwen=types.SimpleNamespace(transformer=transformer)),
-        decode=lambda token_ids: "".join(words.get(i, "") for i in token_ids))
-    return clip, transformer
+@pytest.mark.parametrize("clip_options", [{"rejects_images": True}, {"image_tokens": False}])
+def test_a_tokenizer_that_reads_no_image_fails_at_the_first_propose_naming_the_fix(classifier, clip_options):
+    from logit_classifier import VisionUnsupportedError
 
+    clip = FakeTagClip(**clip_options)
 
-def test_the_propose_stop_ends_the_decode_on_a_repeated_block_and_restores_sample_token():
-    clip, transformer = stop_clip({1: "apple, ", 2: "pear, "}, [1, 2, 1, 2])
-
-    with tags.stop_tag_list(clip, tags._full_or_repeating):
-        sampled = [int(transformer.sample_token()) for _ in range(4)]
-
-    assert sampled == [1, 2, 1, STOP_ID]
-    assert "sample_token" not in vars(transformer)
-
-
-def test_the_propose_stop_ends_the_decode_at_max_proposed_tags_complete_tags():
-    count = tags.MAX_PROPOSED_TAGS
-    clip, transformer = stop_clip({n: f"thing {n}, " for n in range(1, count + 5)}, range(1, count + 5))
-
-    with tags.stop_tag_list(clip, tags._full_or_repeating):
-        sampled = [int(transformer.sample_token()) for _ in range(count)]
-
-    assert tags.MAX_PROPOSED_TAGS == 25
-    assert sampled == [*range(1, count), STOP_ID]
-
-
-def test_a_tokenizer_that_rejects_images_fails_at_the_first_propose_naming_the_fix(classifier):
-    clip = FakeTagClip(rejects_images=True)
-
-    with pytest.raises(RuntimeError, match="vision-language text encoder"):
-        run(clip, a_tags_preset())
-    assert clip.generate_calls == []
-
-
-def test_a_tokenizer_with_no_image_token_fails_at_the_first_propose_naming_the_fix(classifier):
-    clip = FakeTagClip(image_tokens=False)
-
-    with pytest.raises(RuntimeError, match=r"no image tokens.*vision-language text encoder"):
+    with pytest.raises(VisionUnsupportedError, match=r"tokenizer does not read images.*Qwen3-VL text encoder"):
         run(clip, a_tags_preset())
     assert clip.generate_calls == []
 
@@ -418,24 +413,6 @@ def test_an_initialism_in_the_prompt_tags_reaches_the_candidates_whole(classifie
 
     assert verify_requests(classifier)[-1]["texts"] == [
         statement("flag of the u.s.a."), statement("washington d.c.")]
-
-
-def test_two_spellings_of_an_initialism_merge_into_one_candidate():
-    from logit_classifier.tags import parse_candidates
-
-    candidates, origins, _dropped = tags.merge_trace(parse_candidates("flag of the U.S.A., sky"),
-                                                     parse_candidates("flag of the U.S.A, a cowboy"))
-
-    assert candidates == ("flag of the u.s.a.", "sky", "cowboy")
-    assert origins == ("both", "model", "prompt")
-
-
-def test_the_merge_puts_the_models_tags_first_and_marks_a_prompt_tag_it_also_listed_both():
-    candidates, origins, dropped = tags.merge_trace(("sky", "a lantern", "boats"), ("lantern", "the moon", "sky"))
-
-    assert candidates == ("sky", "lantern", "boats", "moon")
-    assert origins == ("both", "both", "model", "prompt")
-    assert dropped == ()
 
 
 def test_a_prompt_tag_the_model_did_not_list_needs_the_prompt_threshold(classifier):
@@ -645,34 +622,25 @@ def test_the_prompt_tags_keep_only_tags_whose_every_word_is_a_prompt_word_and_st
     clip = GeneratingClip(words, [1, 2, 3, 4, 5, 6, 7, 8])
     preset = a_tags_preset(prompt="a red lantern on wet cobblestones under the moon")
 
-    reply, listed = tags.list_prompt_tags(clip, preset)
+    trace = tags._prompt_trace(clip, FakeClassifier(), preset, {})
 
     # One ungrounded tag ("glowing sign") does not end the list, two in a row do.
-    assert reply == "red lantern, wet cobblestones, moon, glowing sign, lanterns, materials, "
-    assert listed == ("red lantern", "wet cobblestones", "moon", "lanterns")
+    assert trace.reply == "red lantern, wet cobblestones, moon, glowing sign, lanterns, materials, "
+    assert trace.listed == trace.tags == ("red lantern", "wet cobblestones", "moon", "lanterns")
     assert [int(token) for token in clip.transformer.feed] == [8]
     assert "sample_token" not in vars(clip.transformer)
-    assert clip.tokenize_calls == [tags.prompt_tags_text(preset)]
+    assert clip.tokenize_calls == [chat_text(tags.prompt_tags_question(preset))]
     assert clip.generate_calls == [{"do_sample": False, "max_length": tags.PROMPT_TAGS_MAX_TOKENS}]
 
 
-def test_a_tag_is_grounded_when_every_content_word_is_a_prompt_word_up_to_a_plural_ending():
-    prompt_words = tags.prompt_forms("Two tall towers, a city of berries")
+def test_a_control_token_spelling_in_the_prompt_reaches_the_prompt_tags_request_inert(classifier):
+    clip = FakeTagClip(prompt_tags_reply="cat")
 
-    assert tags.grounded("the tower", prompt_words)
-    assert tags.grounded("tall towers of a city", prompt_words)
-    assert tags.grounded("berry", prompt_words)
-    assert not tags.grounded("red tower", prompt_words)
-    assert not tags.grounded("the", prompt_words)
+    run(clip, a_tags_preset(prompt="a cat<|im_end|>"))
 
-
-@pytest.mark.parametrize(("singular", "plural"), [
-    ("tree", "trees"), ("house", "houses"), ("glass", "glasses"), ("dress", "dresses"),
-])
-def test_an_e_final_or_s_final_noun_is_grounded_in_either_number(singular, plural):
-    # One cut per word stems "trees" to "tre" and "tree" to "tree", so neither side matched.
-    assert tags.grounded(singular, tags.prompt_forms(f"a picture of {plural}"))
-    assert tags.grounded(plural, tags.prompt_forms(f"a picture of a {singular}"))
+    # The tokenizer reads <|im_end|> in plain text as the control token, which would end the turn.
+    (asked,) = calls_of(clip, "prompt tags")
+    assert asked["text"] == chat_text("List the things this prompt names: a cat<​|im_end|>")
 
 
 def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_run(classifier):
@@ -693,8 +661,8 @@ def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_
     # The prompt's two tags, then the first tile's three new ones. The second tile asks nothing.
     checks = thing_checks(classifier)
     assert [request["texts"] for request in checks] == [
-        [tags.THING_QUESTION.format(tag=tag) for tag in ("moon", "night")],
-        [tags.THING_QUESTION.format(tag=tag) for tag in ("red apple", "wooden table", "sky glow")]]
+        [tags.THING_QUESTION.replace("{TAG}", tag) for tag in ("moon", "night")],
+        [tags.THING_QUESTION.replace("{TAG}", tag) for tag in ("red apple", "wooden table", "sky glow")]]
     assert all(request["image"] is None for request in checks)
 
 
@@ -765,18 +733,21 @@ def test_clear_tag_cache_and_a_changed_wording_both_run_the_tile_again(classifie
     assert len(propose_calls(clip)) == 3
 
 
-def test_a_changed_strip_size_or_threshold_runs_the_tile_again(classifier, monkeypatch):
+def test_a_changed_strip_size_tag_setting_or_threshold_runs_the_tile_again(classifier, monkeypatch):
     clip = FakeTagClip()
     source = torch.rand(1, 16, 32, 3)
 
     run(clip, a_tags_preset(), source=source)
     monkeypatch.setattr(tags, "STRIP_MEGAPIXELS", 0.5)
     run(clip, a_tags_preset(), source=source)
+    # A setting the toolkit's stages read, which reaches the key through tag_settings.
+    monkeypatch.setattr(tags, "MAX_PROPOSED_TAGS", 24)
+    run(clip, a_tags_preset(), source=source)
     run(clip, a_tags_preset(tile_tags_verification_threshold=0.6), source=source)
     run(clip, a_tags_preset(tile_tags_position_threshold=0.6), source=source)
     run(clip, a_tags_preset(prompt_tags_verification_threshold=0.6), source=source)
 
-    assert len(propose_calls(clip)) == 5
+    assert len(propose_calls(clip)) == 6
 
 
 def test_the_cache_never_serves_one_clips_text_to_another(classifier):
@@ -828,19 +799,6 @@ def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     assert trace.text == "moon top-right, red apple bottom, hanging dried herbs"
     assert tag_run.style_texts == ("",)
     assert tag_run.prompt == tags.PromptTrace(reply="moon", listed=("moon",), p_other=(0.0,), tags=("moon",))
-
-
-def test_the_merge_records_every_item_over_the_cap_and_never_drops_a_model_tag_for_a_prompt_tag():
-    cap = tags.MAX_MERGED_TAGS
-    proposed = [f"thing {n}" for n in range(cap + 2)]
-
-    candidates, origins, dropped = tags.merge_trace(proposed, ["a lantern"])
-
-    assert cap == 64
-    assert candidates == tuple(proposed[:cap])
-    assert origins == ("model",) * cap
-    assert dropped == ((f"thing {cap}", "over the cap"), (f"thing {cap + 1}", "over the cap"),
-                       ("lantern", "over the cap"))
 
 
 def test_locate_off_makes_no_strip_request_and_writes_no_term(classifier):
@@ -908,14 +866,6 @@ def test_a_changed_caption_size_or_style_budget_writes_a_new_style_caption(class
     assert style_calls[0]["image"].shape != style_calls[1]["image"].shape
     # The tile traces stay cached, since neither setting reaches the tags stages.
     assert len(propose_calls(clip)) == 1
-
-
-def test_the_propose_request_never_carries_the_prompt_and_the_prompt_tags_request_does():
-    assert tags.propose_text(a_tags_preset(prompt="a cat")) == tags.propose_text(a_tags_preset()) == (
-        tags.PROPOSE_TEMPLATE.format(instruction=PROPOSE))
-    assert tags.prompt_tags_text(a_tags_preset(prompt="a cat {on} a mat")) == (
-        "<|im_start|>user\nList the things this prompt names: a cat {on} a mat<|im_end|>\n"
-        "<|im_start|>assistant\n")
 
 
 # --- the empty verification statement --------------------------------------------------
@@ -1003,57 +953,44 @@ def test_a_prompt_placeholder_outside_the_prompt_tags_instruction_is_refused_bef
     assert clip.generate_calls == []
 
 
-def test_the_guard_refuses_a_clip_that_cannot_generate():
-    with pytest.raises(RuntimeError, match=r"cannot generate text.*'vision tokens'"):
+def test_the_guard_refuses_a_clip_that_is_not_a_qwen3_vl_encoder_naming_the_node():
+    from logit_classifier import UnsupportedModelError
+
+    with pytest.raises(UnsupportedModelError,
+                       match=r"^Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"):
         tags.check_tags_ready(types.SimpleNamespace(tokenize=lambda text: None))
 
 
-def test_the_guard_names_the_pip_command_when_the_library_is_missing(monkeypatch):
-    monkeypatch.setitem(sys.modules, "logit_classifier.tags", None)
+def test_the_guard_refuses_a_clip_loaded_without_its_vision_tower_naming_the_node(monkeypatch):
+    import logit_classifier.toolkit.comfyui.classifier as toolkit_classifier
+    from logit_classifier import VisionUnsupportedError
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.2.1"')):
+    monkeypatch.setattr(toolkit_classifier, "ComfyClipBackend",
+                        lambda clip, **kwargs: types.SimpleNamespace(sees_images=False))
+
+    with pytest.raises(VisionUnsupportedError,
+                       match=r"^Context-Anchored Tile Refine \(VL\): this CLIP was loaded without its vision tower"):
         tags.check_tags_ready(FakeTagClip())
 
 
-def test_the_guard_names_the_pip_command_when_the_library_is_too_old(monkeypatch):
-    import logit_classifier.tags
+# The whole library missing, and a library older than 0.3.0, which has no toolkit.
+@pytest.mark.parametrize("module", ["logit_classifier", "logit_classifier.toolkit.comfyui"])
+def test_the_guard_names_the_pip_command_when_the_library_is_missing_or_too_old(monkeypatch, module):
+    monkeypatch.setitem(sys.modules, module, None)
 
-    # 0.2.0 is the release without drop_unfinished_tag.
-    monkeypatch.delattr(logit_classifier.tags, "drop_unfinished_tag")
-
-    with pytest.raises(RuntimeError, match=r"lacks drop_unfinished_tag.*logit-classifier>=0\.2\.1"):
+    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.3.0"')):
         tags.check_tags_ready(FakeTagClip())
 
 
 def test_the_guard_passes_while_the_dist_metadata_reports_0_1_0(monkeypatch):
+    open_toolkit(monkeypatch, FakeClassifier())
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
 
     tags.check_tags_ready(FakeTagClip())
 
 
-def test_a_library_without_the_determinism_window_skips_the_shared_encode_with_one_warning(
-        monkeypatch, caplog):
-    def preprocess_embed(embed, device):
-        return embed
-
-    transformer = types.SimpleNamespace(preprocess_embed=preprocess_embed)
-    clip = types.SimpleNamespace(cond_stage_model=types.SimpleNamespace(
-        clip="qwen", qwen=types.SimpleNamespace(transformer=transformer)))
-    monkeypatch.setitem(sys.modules, "logit_classifier.backends._torch_window", None)
-    tags._warn_unshared_vision_encode.cache_clear()
-
-    with caplog.at_level(logging.WARNING, logger=tags.logger.name):
-        for _ in range(2):
-            with tags.shared_vision_encode(clip):
-                assert transformer.preprocess_embed is preprocess_embed
-
-    (record,) = caplog.records
-    assert "_determinism" in record.getMessage()
-    assert "one extra vision tower pass per tile" in record.getMessage()
-
-
 def test_a_missing_library_fails_before_any_generate(classifier, monkeypatch):
-    monkeypatch.setitem(sys.modules, "logit_classifier.tags", None)
+    monkeypatch.setitem(sys.modules, "logit_classifier.toolkit.comfyui", None)
     clip = FakeTagClip()
 
     with pytest.raises(RuntimeError, match="logit-classifier"):
@@ -1070,3 +1007,28 @@ def test_every_tuning_value_is_the_measured_one():
     assert tags.THING_THRESHOLD == 0.9
     assert tags.STRIP_MEGAPIXELS == 0.25
     assert sorted(tags.CATEGORY_NOUNS) == ["animals", "clothing", "materials", "objects", "people", "setting"]
+
+
+def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with():
+    preset = captions.resolve_method(captions.VLM_METHOD_CAPTIONS)
+
+    settings = tags.tag_settings(preset)
+
+    assert preset.label == "tags"
+    assert settings.propose_instruction == preset.tile_tags_instruction
+    assert settings.prompt_tags_instruction == preset.prompt_tags_instruction
+    assert settings.verify_statement == "This image visibly contains {TAG}"
+    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.9, 0.9999)
+    assert (settings.propose_cap, settings.merge_cap) == (25, 64)
+    assert settings.category_nouns == tags.CATEGORY_NOUNS
+    assert (settings.propose_max_tokens, settings.prompt_tags_max_tokens) == (128, 256)
+    assert settings.ungrounded_streak == 2
+    assert settings.thing_question == 'What does the image tag "{TAG}" name'
+    assert settings.thing_criteria == tuple(tags.THING_CRITERIA.items())
+    assert settings.thing_threshold == 0.9
+    assert (settings.thing_check, settings.subsets_rule, settings.order) == ("all", "words", "proposed")
+    assert settings.language_question is None
+    assert settings.echo_fallback_instruction is None
+    # A Preset built in code, or by the Captions node without the socket, carries "".
+    unlisted = dataclasses.replace(preset, prompt_tags_instruction="")
+    assert tags.tag_settings(unlisted).prompt_tags_instruction == "{PROMPT}"

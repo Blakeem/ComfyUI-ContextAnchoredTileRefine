@@ -1,6 +1,7 @@
 """Probe: does packing move the thing check's p(other) enough to flip at 0.9, and what does an
 unpacked check cost? Replays each recorded run's candidate order (prompt tags first, then each
 tile's new tags as one pack) against one tag per request."""
+import argparse
 import json
 import sys
 import time
@@ -15,9 +16,10 @@ ab_env.bootstrap()
 import ab_models  # noqa: E402
 import torch  # noqa: E402
 
-from context_anchored_tile_refine import tags  # noqa: E402
+from context_anchored_tile_refine import captions, tags  # noqa: E402
 
 RUNS = REPO / "tests-AB" / "cache" / "tags_bench" / "runs"
+CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 
 
 def run_packs(record):
@@ -30,11 +32,17 @@ def run_packs(record):
     return list(dict.fromkeys(prompt_tags)), tiles
 
 
-def main():
+def main(argv=None):
     from logit_classifier import Classifier, Config
     from logit_classifier.backends.comfy_clip import ComfyClipBackend
+    from logit_classifier.toolkit.comfyui import thing_scores
 
-    clip = ab_models.load_clip("qwen3-vl-4b-heretic_int8.safetensors", "krea2")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--clip", default=CLIP_NAME, help="the text encoder file in models/text_encoders")
+    args = parser.parse_args(argv)
+
+    clip = ab_models.load_clip(args.clip, "krea2")
+    settings = tags.tag_settings(captions.resolve_method(captions.default_vlm_method()))
     packed = tags.build_classifier(clip)
     unpacked = Classifier(Config(use_prior_debias=False, calibration_path=None),
                           ComfyClipBackend(clip, batch_branches=False))
@@ -50,15 +58,15 @@ def main():
                 torch.cuda.synchronize()
                 start = time.perf_counter()
                 if prompt_tags:
-                    tags.thing_scores(packed, prompt_tags, known)
+                    thing_scores(packed, prompt_tags, settings, known)
                 for candidates in tiles:
-                    tags.thing_scores(packed, candidates, known)
+                    thing_scores(packed, candidates, settings, known)
                 torch.cuda.synchronize()
                 t_packed += time.perf_counter() - start
                 alone = {}
                 start = time.perf_counter()
                 for tag in known:
-                    tags.thing_scores(unpacked, [tag], alone)
+                    thing_scores(unpacked, [tag], settings, alone)
                 torch.cuda.synchronize()
                 t_unpacked += time.perf_counter() - start
                 n_tags += len(known)

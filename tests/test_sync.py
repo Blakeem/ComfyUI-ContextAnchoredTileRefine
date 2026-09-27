@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from logit_classifier import UnsupportedModelError
 from test_stepper import run_bounded
 from test_tags import FakeTagClip
 from test_tiling import GridNoise, GridVAE, _layout
@@ -2182,12 +2183,13 @@ def test_the_region_path_tags_the_region_crop_and_styles_the_full_image(comfy_st
     assert torch.equal(call["style_source"], image)
 
 
-@pytest.mark.parametrize(("clip", "missing", "message"), [
-    (FakeVLClip(seq_override=ENC_SEQ), False, "this CLIP cannot generate text"),
-    (FakeTagClip(), True, r'pip install -U "logit-classifier>=0\.2\.1"'),
+@pytest.mark.parametrize(("clip", "missing", "error", "message"), [
+    (FakeVLClip(seq_override=ENC_SEQ), False, UnsupportedModelError,
+     r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.3\.0"'),
 ])
 def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs, monkeypatch, clip,
-                                                                     missing, message):
+                                                                     missing, error, message):
     # The direct caller's guard: the VL nodes run check_tags_ready themselves, and a caller that
     # hands the engine a tags preset must still fail before any VAE or VL encode.
     def unreached(*args, **kwargs):
@@ -2198,7 +2200,7 @@ def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs,
     monkeypatch.setattr(sync, "build_tile_positives", unreached)
     monkeypatch.setattr(sync, "encode_canvas_latent", unreached)
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(error, match=message):
         prepare_with(clip, preset=a_tags_preset(), vlm_method=captions.VLM_METHOD_CAPTIONS)
 
 
