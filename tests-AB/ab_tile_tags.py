@@ -1,5 +1,8 @@
 """Tile tagging and tile location on the owner's 8K tile layout, over the real Qwen3-VL CLIP.
 
+It imports the Logit Tagger's first tagger (its logit_tagger.tagging at e41818d), which that pack has
+since replaced, so it no longer runs.
+
 Per tile it runs the Logit Tagger's own propose stage on the tile's crop, splits the scene
 prompt into fragments, and noul-verifies both against the crop. For every kept item it then
 asks four location methods and one reference:

@@ -1,5 +1,8 @@
 """Can a text-only question sort prompt fragments into things shown and the picture's style?
 
+It imports the Logit Tagger's first tagger (its logit_tagger.tagging at e41818d), which that pack has
+since replaced, so it no longer runs.
+
 Style fragments ("photorealistic oil-painting realism", "ethereal") pass the tile verify on
 nearly every tile in ab_tile_tags.py, so they would repeat on every tile beside the style
 caption. This asks one choice per fragment with no image, over the real CLIP, and prints the

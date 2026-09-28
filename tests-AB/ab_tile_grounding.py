@@ -1,5 +1,8 @@
 """A trained-grounding reference for tile location: Qwen3-VL's own bbox JSON per kept item.
 
+It imports the Logit Tagger's first tagger (its logit_tagger.tagging at e41818d), which that pack has
+since replaced, so it no longer runs.
+
 Reads an ab_tile_tags.py record, asks the CLIP to box every kept item of each tile (a
 generate, far too slow for production, fine as a judge), and adds two cheap location arms:
 L9P, the nine cell choice relettered four times (which cancels a letter position bias),

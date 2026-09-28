@@ -1,5 +1,8 @@
 """Can a text-only question pick the items worth locating, before any split pass?
 
+It imports the Logit Tagger's first tagger (its logit_tagger.tagging at e41818d), which that pack has
+since replaced, so it no longer runs.
+
 Asks one choice per kept item with no image: a countable object, or an extent (a surface,
 material, texture, light, background or the whole scene). Writes kind.json beside each record.
 ab_tile_position_report.py --kinds scores whether the extent items are the ones that spread

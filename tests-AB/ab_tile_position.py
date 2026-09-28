@@ -1,5 +1,8 @@
 """Every position method for a tile's kept items, timed, on an ab_tile_tags.py record.
 
+It imports the Logit Tagger's first tagger (its logit_tagger.tagging at e41818d), which that pack has
+since replaced, so it no longer runs.
+
 Language methods read the whole tile once (1 MP):
   L5F   one choice "Where is {item} in the frame": top, bottom, left, right, center (relettered 4x)
   L5I   the same with "image" in place of "frame"
