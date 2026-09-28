@@ -222,10 +222,12 @@ The `guider` input takes any guider, including NAG for models without negative p
 
 ## Example workflows
 
-- [Krea 2 8K upscale workflow](Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
-- [Krea 2 refine workflow](Krea%202%20(refine).json)
-- [Chroma + Z-Image hybrid workflow](Chroma%20+%20z-image%20Hybrid%20workflow.json)
-- [Tile test chain workflow](VL%208k%20upscale%20-%20Test.json) (the five Tile Test nodes)
+The `workflows` folder holds four workflows, and ComfyUI lists them in its template browser.
+
+- [Krea 2 8K upscale workflow](workflows/Krea%202%208k%20upscale.json) (the two-pass 4x then 2x chain the sample images above were made with)
+- [Krea 2 refine workflow](workflows/Krea%202%20(refine).json)
+- [Chroma + Z-Image hybrid workflow](workflows/Chroma%20+%20z-image%20Hybrid%20workflow.json)
+- [Tile test chain workflow](workflows/VL%208k%20upscale%20-%20Test.json) (the five Tile Test nodes)
 
 ## License
 
