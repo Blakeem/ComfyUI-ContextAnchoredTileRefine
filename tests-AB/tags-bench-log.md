@@ -238,6 +238,7 @@ units), with 95% bootstrap intervals.
 | fp8-q | verify wording "Is there {TAG} in this image?" | 12.52 | 0.32 | 0.28 | -0.28 [-0.49, -0.09] | -0.07 [-0.14, 0.00] |
 | prod-fp8, v0.999 | verify threshold 0.999 | 12.28 | 0.25 | 0.29 | -0.52 [-0.72, -0.33] | -0.13 [-0.22, -0.06] |
 | prod-fp8, v0.9999 | verify threshold 0.9999 | 10.74 | 0.22 | 0.29 | -2.06 [-2.58, -1.57] | -0.16 [-0.25, -0.07] |
+| prod-fp8-r3 | the shipped pass at 91df08e | 12.32 | 0.25 | 0.29 | -0.48 [-0.67, -0.30] | -0.13 [-0.22, -0.06] |
 
 - Every change that adds tags adds wrong or vague ones. A lower tile resolution added wrong tags
   (0.33 to 0.49 per tile), so the 1 MP tile picture stays.
@@ -249,6 +250,10 @@ units), with 95% bootstrap intervals.
   the owner ranks fewer wrong tags above more correct ones. 0.9999 costs 51 correct tags per further
   one.
 - The language gate and the echo fallback come from the toolkit, as the Logit Tagger measured them.
-  The gate passes an English prompt through untranslated, so its tile text is unchanged.
+- Arm prod-fp8-r3 ran the shipped pass at 91df08e and kept prod-fp8's reply and candidates on all 69
+  tile runs. So the gate passed every English prompt through and the echo fallback never ran. Its
+  items matched prod-fp8 cut at 0.999 on 66 runs. On the other 3 a longer tag missed 0.999
+  ("ventilation ducts" 0.9985, "bell tower" 0.99899), so its shorter tag ("ducts", "bell") was no
+  longer a subset and stayed. The judges graded all 3 correct.
 - Parity: arm prod-fp8-r2 ran the pass at 7d46f34, on the toolkit, and kept the same reply and the
   same items on all 69 tile runs.
