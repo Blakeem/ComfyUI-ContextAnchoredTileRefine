@@ -48,6 +48,9 @@ def interval(diffs, rounds=4000, seed=7):
 def summarize(label, arm_units, base_units):
     keys = sorted(set(arm_units) & set(base_units))
     n = len(keys)
+    if n == 0:
+        print(f"{label:<26}{0:>4}  no shared units with the base")
+        return
 
     def rate(table, name):
         return sum(table[k][name] for k in keys) / n

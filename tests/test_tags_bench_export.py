@@ -1,5 +1,5 @@
 """tests-AB/ab_tags_bench.py's export: one manifest entry per tile and prompt, and PNGs that keep an
-8-bit crop's pixels."""
+8-bit crop's pixels. Also its run's refusal to mix encoders in one record."""
 
 import importlib.util
 import io
@@ -76,3 +76,17 @@ def test_export_png_keeps_an_8_bit_crop_byte_for_byte(bench):
     with Image.open(io.BytesIO(data)) as png:
         assert (png.format, png.mode, png.size) == ("PNG", "RGB", (7, 5))
         assert np.array_equal(np.asarray(png), pixels[0].numpy())
+
+
+def test_a_run_refuses_a_record_holding_another_encoders_results(bench):
+    fp8, int8 = "qwen3vl_4b_fp8_scaled.safetensors", "qwen3-vl-4b-heretic_int8.safetensors"
+    record = {"cyber8k": {"none": {"clip": fp8}, "long": {"clip": fp8}}}
+
+    bench.check_record_encoder({}, fp8, "prod.json")
+    bench.check_record_encoder(record, fp8, "prod.json")
+    with pytest.raises(SystemExit, match=f"prod.json holds results from {fp8}, and this run uses {int8}"):
+        bench.check_record_encoder(record, int8, "prod.json")
+    # A result from before the stamp counts as another encoder.
+    record["cyber8k"]["short"] = {}
+    with pytest.raises(SystemExit, match=f"from {fp8}, unstamped, and .* Pass --fresh"):
+        bench.check_record_encoder(record, fp8, "prod.json")

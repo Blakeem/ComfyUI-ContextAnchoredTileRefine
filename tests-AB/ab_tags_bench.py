@@ -411,6 +411,18 @@ ARMS = {
 }
 
 
+def check_record_encoder(record, clip, path):
+    """Refuse to add results from `clip` to a record holding another encoder's, since the encoders tag
+    differently and the report averages a record's results into one row. An unstamped result predates
+    the stamp, so it counts as another encoder."""
+    stamps = {result.get("clip") for by_prompt in record.values() for result in by_prompt.values()}
+
+    if stamps - {clip}:
+        stored = ", ".join(sorted(stamp or "unstamped" for stamp in stamps))
+        raise SystemExit(f"{path} holds results from {stored}, and this run uses {clip}. Pass --fresh to "
+                         "replace the record.")
+
+
 def cmd_run(args):
     ab_env.bootstrap()
     import ab_models
@@ -425,6 +437,7 @@ def cmd_run(args):
     out = RUNS_DIR / f"{args.arm}.json"
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     record = json.loads(out.read_text()) if out.exists() and not args.fresh else {}
+    check_record_encoder(record, args.clip, out)
     ctx = Context(clip=ab_models.load_clip(args.clip, "krea2"), torch=torch)
 
     for scene in scenes:
