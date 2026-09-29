@@ -1,6 +1,7 @@
 """The fp8 tile arms of tags-bench-log.md section 12, each patching one stage of the shipped tags pass.
 
 It ran at 5b2ea54 and patches names that 7d46f34 moved into the library toolkit, so check out 5b2ea54 to run it.
+It also needs logit-classifier 0.3.0, since arm fp8-q imports presence_question, which 0.4.0 removed.
 usage: ab_tags_fp8_arms.py sizes
        ab_tags_fp8_arms.py run <arm> <set>
 Each arm writes cache/tags_bench/runs/<arm>.json.

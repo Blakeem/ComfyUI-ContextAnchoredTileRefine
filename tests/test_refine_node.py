@@ -137,7 +137,7 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (object(), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.3\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
 ])
 def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
                                                                              clip, missing, error, message):
@@ -164,7 +164,7 @@ def test_vl_node_names_the_missing_library_for_a_caption_preset_before_the_engin
     monkeypatch.setitem(sys.modules, "logit_classifier", None)
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.3\.0"'):
+    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.4\.0"'):
         _refine_vl(object())
 
 

@@ -344,7 +344,7 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (None, False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.3\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
 ])
 def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
                                                                          clip, missing, error, message):

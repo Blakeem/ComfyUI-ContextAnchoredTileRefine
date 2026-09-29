@@ -152,16 +152,14 @@ TILE_TEXT_CAPTION = "caption"
 TILE_TEXT_TAGS = "tags"
 TILE_TEXT_KINDS = (TILE_TEXT_CAPTION, TILE_TEXT_TAGS)
 
-# The shipped tags thresholds, and the defaults of a tags Preset built in code. On the fp8 encoder, 0.999 over 0.9
-# removed a wrong or vague tile tag per 4 correct ones, and 0.9999 per 51 (tests-AB/tags-bench-log.md, section 12).
-SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.999
+# Restates the library's STRICT_THRESHOLDS, as logit_classifier is imported only in functions. Against the former 0.999
+# and 0.9999 prompt-only pair, an offline cut of fp8 tiles rose from precision 0.958 to 0.977 (tags-bench-log.md 13).
+SHIPPED_TAGS_VERIFICATION_THRESHOLD = 0.99998
 # On the owner's 8K storm sky tile every tag under 0.9 on every strip named a bay or buildings the tile lacks.
 SHIPPED_TAGS_POSITION_THRESHOLD = 0.9
-# A prompt tag the tile's own list lacks passes the verify statement as a near name for what is
-# there ("wooden carriage" for a cart) with whole-tile scores from 0.9 to 0.9999. At 0.9999 the
-# wrong tags per tile fell from 0.92 to 0.29 on held-out tiles and prompts
-# (tests-AB/tags-bench-log.md).
-SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD = 0.9999
+# STRICT_THRESHOLDS as well. The owner ranks fewer wrong tags above more correct tags, and the correct tags kept per
+# tile fell from 12.32 at the former 0.999 and 0.9999 prompt-only pair to 7.33.
+SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD = 0.99998
 
 # Caption input budget (total pixels, aspect preserved) — AB27's prep, what resample_for_vl
 # falls back to, and the size every judged tests-AB arm was captioned at (ab_env.caption_preset
@@ -847,8 +845,9 @@ def picture_digest(picture):
     return (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
 
 
-# logit_classifier.toolkit, which holds clip_generate and the tagging stages, arrived in 0.3.0.
-LIBRARY_VERSION = "0.3.0"
+# logit_classifier.toolkit arrived in 0.3.0, and presence_statement, which tags.py builds each strip statement with,
+# in 0.4.0.
+LIBRARY_VERSION = "0.4.0"
 
 
 def comfy_toolkit():
@@ -856,10 +855,13 @@ def comfy_toolkit():
     LIBRARY_VERSION when the library is missing or older."""
     try:
         import logit_classifier.toolkit.comfyui as toolkit
+
+        # A 0.3 library would otherwise pass here and fail at the strips, after the tile generates.
+        from logit_classifier.toolkit.tags import presence_statement  # noqa: F401
     except ImportError as error:
         raise RuntimeError(
             f"Context-Anchored Tile Refine (VL): every VL run needs logit-classifier "
-            f"{LIBRARY_VERSION} or newer, and logit_classifier.toolkit.comfyui cannot be imported "
+            f"{LIBRARY_VERSION} or newer, and its toolkit cannot be imported "
             f"({error}). Install or upgrade it in the ComfyUI Python environment with: "
             f'pip install -U "logit-classifier>={LIBRARY_VERSION}"') from error
     return toolkit

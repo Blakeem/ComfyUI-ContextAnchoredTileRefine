@@ -91,7 +91,8 @@
 #                            on one of six strips of the tile, three rows and three columns,
 #                            for that strip to hold the tag. A tag no strip holds is dropped.
 #                            On an axis where exactly one strip holds the tag, that strip names
-#                            its position, such as top-left. Range 0 to 1.
+#                            its position, such as top-left. A center column adds no word
+#                            beside a row word. Range 0 to 1.
 #
 # THE IMAGE'S PROMPT
 # An instruction may hold {PROMPT}. The VL nodes and the Tile Test: Captions node write their
@@ -116,8 +117,8 @@ tile_text = "tags"
 tile_tags_instruction = "Tag this image. List every distinct visible thing in it: objects, people, animals, clothing, materials, and the setting. Use short lowercase noun phrases separated by commas. List each thing once. Do not list moods, styles, or ideas. Output only the tags."
 prompt_tags_instruction = "This is a prompt for an image:\n{PROMPT}\n\nList the physical things the prompt names that could be pointed at in the image: objects, people, animals, plants, clothing, materials, buildings and parts of the scene. Use short lowercase noun phrases of one to four words, separated by commas. Keep each thing's own descriptive words, such as its color. Leave out places and settings, actions, sizes, moods, the image's style, medium, quality, camera and lighting, artist names and position words. List each thing once. Output only the list."
 tile_tags_verification_statement = "This image visibly contains {TAG}"
-tile_tags_verification_threshold = 0.999
-prompt_tags_verification_threshold = 0.9999
+tile_tags_verification_threshold = 0.99998
+prompt_tags_verification_threshold = 0.99998
 tile_tags_position_threshold = 0.9
 global_style_instruction = "Concise prose containing only the style of media used and the general style within that type of media."
 global_style_max_tokens = 768

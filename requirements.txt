@@ -1,1 +1,1 @@
-logit-classifier>=0.3.0
+logit-classifier>=0.4.0

@@ -257,3 +257,49 @@ units), with 95% bootstrap intervals.
   longer a subset and stayed. The judges graded all 3 correct.
 - Parity: arm prod-fp8-r2 ran the pass at 7d46f34, on the toolkit, and kept the same reply and the
   same items on all 69 tile runs.
+
+### 13. Candidate verdicts and strict thresholds
+
+`ab_tags_candidates.py` gave the 474 candidates of the recorded prod-fp8 run that no judge had
+graded to two judge sets. Verify had dropped 473 of them, and `drop_subsets` the other. The sets agreed on 453 of 474. The 21 disagreements were not stored. On 184
+control answers mixed in, the judges matched the stored verdicts 156 times.
+
+The candidate verdicts serve the wording ranking below. That ranking is the tiles set of the Logit
+Tagger's `tests-AB/ab_presence_wording.py`, which reads `cache/tags_bench/runs/prod-fp8.json`.
+
+`ab_tags_paired.py` reads only the kept and placed items of a run. So the threshold table cuts the
+kept items of the recorded prod-fp8-r3 pass offline, at or above that pass's own 0.999 and 0.9999
+pair (69 tile and prompt units).
+
+| Verify threshold | Correct per tile | Wrong | Vague | Precision |
+|---|---|---|---|---|
+| 0.999, prompt-only 0.9999 (former shipped pair) | 12.32 | 0.25 | 0.29 | 0.958 |
+| 0.9999 | 10.78 | 0.22 | 0.29 | 0.955 |
+| 0.99995 | 9.77 | 0.14 | 0.25 | 0.961 |
+| 0.99998 | 7.33 | 0.10 | 0.07 | 0.977 |
+| 0.99999 | 4.88 | 0.04 | 0.06 | 0.980 |
+
+The Logit Tagger's `tests-AB/ab_presence_wording.py` (round 4) ranked seven verify wordings on the
+905 judged tile candidates. The table gives correct tags per tile at each pooled precision.
+
+| Wording | 0.95 | 0.97 | 0.98 | 0.99 |
+|---|---|---|---|---|
+| "This image visibly contains {TAG}" | 17.43 | 12.78 | 9.87 | 6.04 |
+| "Is there a {TAG} in this image?" (0.3.0, article by rule) | 17.35 | 11.30 | 2.39 | 2.09 |
+| "Present in this image: {TAG}" | 17.61 | 8.74 | 8.13 | 6.74 |
+
+- The wording stays "This image visibly contains {TAG}". Among wordings that need no grammar rule,
+  it keeps the most correct tags at pooled precision 0.97 and 0.98.
+- At pooled precision 0.98 every paired interval against "This image visibly contains {TAG}" spans
+  zero. The grammar arm "Is/Are there a/an {TAG}" (is-are) kept 11.09 correct tags per tile against
+  9.87, a difference of +1.22 [-7.57, 6.48].
+- The shipped thresholds move to 0.99998 for model tags and prompt tags, the library's
+  `STRICT_THRESHOLDS`. The owner ranks fewer wrong tags above more correct tags.
+- 0.9999 alone gained no precision over 0.999 on this wording.
+- The threshold table is an offline cut. A short tag that `drop_subsets` removed under a longer tag
+  that now fails verify does not come back in it, so a live run at 0.99998 may keep a few more
+  tags than the table shows. No live run at 0.99998 was recorded.
+- This round's task files listed the control tags, so the 156 of 184 is not a blind agreement.
+  `ab_tags_candidates.py` now keeps the control lists beside the judge folders.
+- Scripts: `ab_tags_candidates.py`, `ab_tags_paired.py --base prod-fp8-r3 --arms prod-fp8-r3
+  --thresholds 0.9999,0.99995,0.99998,0.99999` and the Logit Tagger's `tests-AB/ab_presence_wording.py`.

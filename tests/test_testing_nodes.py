@@ -18,9 +18,11 @@ import pytest
 import torch
 from test_captions import FakeCaptionClip
 from test_tags import (
+    PROMPT_ONLY_THRESHOLD,
     PROMPT_TAGS,
     PROPOSE,
     PROPOSE_TEXT,
+    TILE_THRESHOLD,
     VERIFY,
     FakeClassifier,
     FakeTagClip,
@@ -233,12 +235,14 @@ CAPTION_INPUTS = {
     "tile_caption_instruction": "name the objects",
 }
 
-# The tags kind's sockets, worded as test_tags words its own preset.
+# The tags kind's sockets and verification thresholds, as test_tags sets its own preset.
 TAGS_SOCKETS = {
     "tile_caption_instruction": None,
     "tile_tags_instruction": PROPOSE,
     "prompt_tags_instruction": PROMPT_TAGS,
     "tile_tags_verification_statement": VERIFY,
+    "tile_tags_verification_threshold": TILE_THRESHOLD,
+    "prompt_tags_verification_threshold": PROMPT_ONLY_THRESHOLD,
     "global_style_instruction": "name the medium",
     "global_style_max_tokens": 64,
 }
@@ -343,6 +347,14 @@ def test_the_caption_size_widget_defaults_to_the_settings_files_own_value():
 
     assert widget[1]["default"] == captions.SHIPPED_CAPTION_MEGAPIXELS
     assert (widget[1]["min"], widget[1]["max"]) == (0.0, 2.0)
+
+
+@pytest.mark.parametrize("name", ["tile_tags_verification_threshold", "prompt_tags_verification_threshold"])
+def test_a_verification_threshold_widget_reaches_the_shipped_0_99998(name):
+    widget = ContextAnchoredTileTestCaptions.INPUT_TYPES()["required"][name]
+
+    assert widget[1]["default"] == 0.99998
+    assert (widget[1]["min"], widget[1]["max"], widget[1]["step"]) == (0.00001, 1.0, 0.00001)
 
 
 def test_every_caption_input_has_a_tooltip():
@@ -876,17 +888,17 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 
     tile = ("| Source | Result | Score | Tag |\n"
             "|---|---|---|---|\n"
-            "| prompt and VL model | kept | 0.9995 | moon |\n"
-            "| prompt | dropped | 0.9995 | lantern |\n"
-            "| VL model | kept | 0.9995 | red apple |\n"
-            "| VL model | dropped | 0.2000 | wooden spoon |\n"
-            "| VL model | kept | 0.9995 | apple |\n\n"
+            "| prompt and VL model | kept | 0.999500 | moon |\n"
+            "| prompt | dropped | 0.999500 | lantern |\n"
+            "| VL model | kept | 0.999500 | red apple |\n"
+            "| VL model | dropped | 0.200000 | wooden spoon |\n"
+            "| VL model | kept | 0.999500 | apple |\n\n"
             "**Left out before verification:** objects (category noun)")
     assert result.verified == (
         f"{testing.VERIFIED_TITLE}\n"
         "Each candidate is scored with `tile_tags_verification_statement` on its tile. A tag the VL "
-        "model listed is kept at 0.9990 or above (`tile_tags_verification_threshold`), and a prompt "
-        "tag it did not list at 0.9999 or above (`prompt_tags_verification_threshold`).\n\n"
+        "model listed is kept at 0.999000 or above (`tile_tags_verification_threshold`), and a prompt "
+        "tag it did not list at 0.999900 or above (`prompt_tags_verification_threshold`).\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
 
@@ -894,7 +906,7 @@ def test_the_tags_verified_output_groups_the_scores_by_origin_and_lists_the_left
 def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_text(tag_classifier):
     _clip, result = _tag_run()
 
-    axis = "**0.99**, **0.99**, **0.99**"
+    axis = "**0.999500**, **0.999500**, **0.999500**"
     tile = ("**Dropped as a subset of a longer kept tag:** apple\n\n"
             "| Tag | Result | Rows (top, center, bottom) | Columns (left, center, right) |\n"
             "|---|---|---|---|\n"
@@ -905,10 +917,10 @@ def test_the_tags_final_output_prints_the_subsets_the_positions_and_the_tile_tex
     assert result.final == (
         f"{testing.FINAL_TITLE}\n"
         "A kept tag that is part of a longer kept tag is dropped. Each remaining tag is scored on "
-        "six strips of the tile, three rows and three columns. A strip holds a tag at 0.90 or "
+        "six strips of the tile, three rows and three columns. A strip holds a tag at 0.900000 or "
         "above (`tile_tags_position_threshold`). A tag no strip holds is dropped. On each axis "
-        "where exactly one strip holds a tag, that strip names the tag's position term. The tags "
-        "with their terms make the tile text.\n\n"
+        "where exactly one strip holds a tag, that strip names the tag's position term. A center "
+        "column adds no word beside a row word. The tags with their terms make the tile text.\n\n"
         f"### Tile 0, row 0, column 0\n\n{tile}\n\n"
         f"### Tile 1, row 0, column 1\n\n{tile}")
 
@@ -920,25 +932,34 @@ def test_the_three_threshold_widgets_reach_the_tags_pass(tag_classifier):
     _clip, loose_prompt = _tag_run(prompt_tags_verification_threshold=0.9)
 
     assert strict_verify.written.captions == (("",),) * 2
-    assert "| VL model | dropped | 0.9995 | red apple |" in strict_verify.verified
+    assert "| VL model | dropped | 0.999500 | red apple |" in strict_verify.verified
     assert strict_strips.written.captions == (("",),) * 2
     assert "| red apple | dropped, no strip holds it |" in strict_strips.final
     assert loose_prompt.written.captions == (("red apple, moon, lantern",),) * 2
-    assert "| prompt | kept | 0.9995 | lantern |" in loose_prompt.verified
+    assert "| prompt | kept | 0.999500 | lantern |" in loose_prompt.verified
 
 
 def test_a_shown_score_is_truncated_so_it_never_reaches_a_threshold_its_row_fell_below():
-    # Rounding would print 1.00 beside dropped for 0.99985 and 0.90 without bold for 0.8999.
-    verified = SimpleNamespace(candidates=("lantern",), scores=(0.99985,), origins=("prompt",), dropped=())
+    # Rounding would print 0.999980 beside dropped for 0.9999799 and 0.900000 without bold for 0.8999999.
+    verified = SimpleNamespace(candidates=("lantern",), scores=(0.9999799,), origins=("prompt",), dropped=())
     final = SimpleNamespace(verified=("lantern",), kept=("lantern",), terms=("top",), unplaced=(),
-                            strips=((0.95, 0.8999, 0.2, 0.8999, 0.8999, 0.8999),), text="lantern top")
+                            strips=((0.95, 0.8999999, 0.2, 0.8999999, 0.8999999, 0.8999999),), text="lantern top")
 
-    assert testing._verified_block("### Tile", verified, 0.9, 0.9999) == (
+    assert testing._verified_block("### Tile", verified, 0.9, 0.99998) == (
         "### Tile\n\n| Source | Result | Score | Tag |\n|---|---|---|---|\n"
-        "| prompt | dropped | 0.9998 | lantern |\n\n"
+        "| prompt | dropped | 0.999979 | lantern |\n\n"
         "**Left out before verification:** none")
-    assert ("| lantern | kept at top | **0.95**, 0.89, 0.20 | 0.89, 0.89, 0.89 |"
+    assert ("| lantern | kept at top | **0.950000**, 0.899999, 0.200000 | 0.899999, 0.899999, 0.899999 |"
             in testing._final_block("### Tile", final, True, 0.9))
+
+
+def test_a_strip_score_shows_the_digits_a_linked_position_threshold_needs():
+    # At 2 digits both strips would print 0.90, one of them bold, under "holds a tag at 0.90".
+    final = SimpleNamespace(verified=("lantern",), kept=("lantern",), terms=("center",), unplaced=(),
+                            strips=((0.904, 0.906, 0.2, 0.2, 0.2, 0.2),), text="lantern center")
+
+    assert ("| lantern | kept at center | 0.904000, **0.906000**, 0.200000 | 0.200000, 0.200000, 0.200000 |"
+            in testing._final_block("### Tile", final, True, 0.905))
 
 
 @pytest.mark.parametrize(("name", "value", "span"), [

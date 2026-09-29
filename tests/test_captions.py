@@ -213,12 +213,10 @@ def test_settings_toml_ships_the_owner_tested_wording():
             "image's style, medium, quality, camera and lighting, artist names and position words. "
             "List each thing once. Output only the list."),
         "tile_tags_verification_statement": "This image visibly contains {TAG}",
-        # tests-AB/tags-bench-log.md, section 12: on fp8, 0.999 over 0.9 removed a wrong or vague
-        # tile tag per 4 correct ones.
-        "tile_tags_verification_threshold": 0.999,
-        # tests-AB/tags-bench-log.md: a prompt tag the tile's own list lacks passes as a near
-        # name for what is there below 0.9999.
-        "prompt_tags_verification_threshold": 0.9999,
+        # The library's strict pair, which replaced the former 0.999 and 0.9999 prompt-only pair
+        # (tests-AB/tags-bench-log.md, section 13).
+        "tile_tags_verification_threshold": 0.99998,
+        "prompt_tags_verification_threshold": 0.99998,
         # The owner's 8K storm sky tile: every tag under 0.9 on every strip named a bay or
         # buildings the tile lacks.
         "tile_tags_position_threshold": 0.9,
@@ -228,7 +226,7 @@ def test_settings_toml_ships_the_owner_tested_wording():
         "global_style_max_tokens": 768,
     }
     assert (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_TAGS_POSITION_THRESHOLD,
-            captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD) == (0.999, 0.9, 0.9999)
+            captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD) == (0.99998, 0.9, 0.99998)
     # The shipped file is that one tags preset and nothing else, so it is the default.
     assert settings.presets == {"tags": examples["tags"]}
 

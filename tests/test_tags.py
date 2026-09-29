@@ -25,9 +25,14 @@ TILE_B = Rect(16, 0, 32, 16)
 PROMPT_TAGS = "List the things this prompt names: {PROMPT}"
 PROPOSE = "Tag this image."
 VERIFY = "This image visibly contains {TAG}"
+# Unequal, unlike the shipped pair, so one score can keep a model tag and drop a prompt-only one.
+TILE_THRESHOLD = 0.999
+PROMPT_ONLY_THRESHOLD = 0.9999
 
 
 def a_tags_preset(prompt="", style="", style_tokens=128, **thresholds):
+    thresholds = {"tile_tags_verification_threshold": TILE_THRESHOLD,
+                  "prompt_tags_verification_threshold": PROMPT_ONLY_THRESHOLD, **thresholds}
     return captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS, label="tags",
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0,
@@ -151,7 +156,7 @@ class FakeClassifier:
     the statements are packed into requests as a real classifier packs them."""
 
     def __init__(self, noul=None, other=None, english=1.0):
-        # 0.9995 passes the shipped verify and position thresholds and misses the prompt-only one.
+        # 0.9995 passes a_tags_preset's verify and position thresholds and misses its prompt-only one.
         self.noul = noul if noul is not None else (lambda text: 0.9995)
         self.other = other if other is not None else (lambda tag: 0.0)
         self.english = english
@@ -487,14 +492,14 @@ def test_a_prompt_tag_the_model_did_not_list_needs_the_prompt_threshold(classifi
     clip = FakeTagClip(proposal="red apple, lantern", prompt_tags_reply="lantern, moon, boat")
     prompt = "a lantern, the moon and a boat"
 
-    shipped = run_trace(clip, a_tags_preset(prompt=prompt), locate=False).tiles[0][0]
+    held = run_trace(clip, a_tags_preset(prompt=prompt), locate=False).tiles[0][0]
     lowered = run_trace(clip, a_tags_preset(prompt=prompt, prompt_tags_verification_threshold=0.5),
                         locate=False).tiles[0][0]
 
-    assert shipped.origins == ("model", "both", "prompt", "prompt")
+    assert held.origins == ("model", "both", "prompt", "prompt")
     assert a_tags_preset().prompt_tags_verification_threshold == 0.9999
     # "lantern" is listed by both, so it is held to the tile threshold, not the prompt one.
-    assert shipped.verified == ("red apple", "lantern", "moon")
+    assert held.verified == ("red apple", "lantern", "moon")
     assert lowered.verified == ("red apple", "lantern", "moon", "boat")
 
 
@@ -1062,8 +1067,39 @@ def test_the_guard_refuses_a_clip_loaded_without_its_vision_tower_naming_the_nod
 def test_the_guard_names_the_pip_command_when_the_library_is_missing_or_too_old(monkeypatch, module):
     monkeypatch.setitem(sys.modules, module, None)
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.3.0"')):
+    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
         tags.check_tags_ready(FakeTagClip())
+
+
+def test_the_guard_names_the_pip_command_for_a_0_3_library_without_presence_statement(monkeypatch):
+    import logit_classifier.toolkit.tags as library_tags
+
+    monkeypatch.delattr(library_tags, "presence_statement")
+
+    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
+        tags.check_tags_ready(FakeTagClip())
+
+
+def test_the_strip_statements_are_the_librarys_presence_statements():
+    from logit_classifier.toolkit.tags import presence_statement
+
+    statements = tags._statements(["  red apple  ", "moon"], VERIFY)
+
+    assert statements == ["This image visibly contains red apple", "This image visibly contains moon"]
+    assert statements == [presence_statement(item, wording=VERIFY) for item in ["  red apple  ", "moon"]]
+
+
+def test_the_shipped_thresholds_are_the_librarys_strict_thresholds():
+    import logit_classifier.toolkit.tags as library_tags
+
+    preset = captions.resolve_method(captions.VLM_METHOD_CAPTIONS)
+
+    strict = tuple(library_tags.STRICT_THRESHOLDS)
+    in_file = (preset.tile_tags_verification_threshold, preset.prompt_tags_verification_threshold)
+    in_code = (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD)
+
+    assert in_file == strict
+    assert in_code == strict
 
 
 def test_the_guard_passes_while_the_dist_metadata_reports_0_1_0(monkeypatch):
@@ -1105,7 +1141,7 @@ def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with
     assert settings.propose_instruction == preset.tile_tags_instruction
     assert settings.prompt_tags_instruction == preset.prompt_tags_instruction
     assert settings.verify_statement == "This image visibly contains {TAG}"
-    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.999, 0.9999)
+    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.99998, 0.99998)
     assert (settings.propose_cap, settings.merge_cap) == (25, 64)
     assert settings.category_nouns == tags.CATEGORY_NOUNS
     assert (settings.propose_max_tokens, settings.prompt_tags_max_tokens) == (128, 256)

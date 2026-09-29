@@ -43,25 +43,26 @@ VL_MAX_PIXELS = 1024 * 1024
 # repeating tags, and 192 added no tag on nine images.
 PROPOSE_MAX_TOKENS = 128
 
-# The wrong and vague tags of a greedy list sit at its tail. Stopping after 25 tags raised the
-# judged precision of the no-prompt lists from 0.865 to 0.915 (tests-AB/tags-bench-log.md).
+# Caps of 40 proposed and 80 merged tags added 0.87 correct and 0.10 wrong or vague tags per tile (ab_tags_fp8_arms.py
+# fp8-cap40, tags-bench-log.md section 12). 25 stays, since the owner ranks fewer wrong tags above more correct tags.
 MAX_PROPOSED_TAGS = 25
 
-# The model's 25 and a long prompt's 30 to 40 tags, in one packed verify pass beside a 1 MP
-# picture. Model tags come first, so prompt tags never push a model tag out.
+# The model's 25 and a long prompt's tags in one packed verify pass beside a 1 MP picture. Model tags come first, so
+# prompt tags never push a model tag out.
 MAX_MERGED_TAGS = 64
 
 # tests-AB/ab_tile_tags.py on market: the propose instruction's own nouns came back as tags
 # and passed verify.
 CATEGORY_NOUNS = frozenset({"objects", "people", "animals", "clothing", "materials", "setting"})
 
-# tests-AB/ab_tile_position.py: strips at 0.25 MP placed items as precisely as 0.5 MP.
+# Strips at 0.5 MP gave 303 judged position terms against 338, with 3 wrong in each
+# (tests-AB/ab_tags_fp8_arms.py arm fp8-strip05, tests-AB/tags-bench-log.md section 12).
 STRIP_MEGAPIXELS = 0.25
 
 ROW_WORDS = ("top", "center", "bottom")
 COLUMN_WORDS = ("left", "center", "right")
 
-# A 500 word prompt listed 28 to 45 tags in 70 to 256 tokens (tests-AB/tags-bench-log.md).
+# A long prompt names far more things than a tile shows, so its listing gets twice the propose budget.
 PROMPT_TAGS_MAX_TOKENS = 256
 
 # Past the prompt's own things the model pads the list with words the prompt lacks
@@ -132,7 +133,10 @@ def tag_settings(preset):
 
 
 def _statements(items, statement):
-    return [statement.replace(captions.TAG_PLACEHOLDER, item) for item in items]
+    # The strips must read the statement the toolkit's verify read, so both fill it one way.
+    from logit_classifier.toolkit.tags import presence_statement
+
+    return [presence_statement(item, wording=statement) for item in items]
 
 
 def prompt_tags_question(preset, text):
@@ -154,9 +158,7 @@ def axis_word(probabilities, words, threshold):
     more than one does.
 
     Two adjacent strips named the center or the side by a coin flip, and a term covering part
-    of a spread tag points the diffusion model at the wrong place. On the grounded items of
-    tests-AB/ab_tile_position.py the one strip rule was right 0.980 of the time against 0.960
-    for the p-weighted mean of the holding strips, and it names about half as many."""
+    of a spread tag points the diffusion model at the wrong place."""
     present = [index for index, p in enumerate(probabilities) if p >= threshold]
     if len(present) != 1:
         return None

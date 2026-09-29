@@ -426,11 +426,13 @@ without that doc's temporal design.
   merge model-first (cap `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK
   (one packed text-only `ChoiceQuestion` per distinct tag, answers shared across the run in
   `known_things`, dropped at p(other) >= `THING_THRESHOLD` 0.9), verify (the noul
-  `tile_tags_verification_statement`, 0.999 for model and both, `prompt_tags_verification_threshold`
-  0.9999 for prompt-only), `drop_subsets` (words rule), then this module's locate (six strips at
-  `STRIP_MEGAPIXELS` 0.25, a tag no strip holds dropped, a term only on an axis where exactly ONE
-  strip holds it). Every tuning value was measured on the fp8 encoder in
-  `tests-AB/tags-bench-log.md` section 12. The thing check stays PACKED on purpose:
+  `tile_tags_verification_statement`, filled by the library's `presence_statement`, keeping a
+  model or both tag at `tile_tags_verification_threshold` and a prompt-only tag at
+  `prompt_tags_verification_threshold`, both at the library's strict 0.99998), `drop_subsets`
+  (words rule), then this module's locate (six strips at `STRIP_MEGAPIXELS` 0.25, a tag no
+  strip holds dropped, a term only on an axis where exactly ONE strip holds it). Every tuning
+  value was measured on the fp8 encoder in `tests-AB/tags-bench-log.md` section 12, and the
+  thresholds in section 13. The thing check stays PACKED on purpose:
   `tests-AB/probe_thing_pack.py` measured one tag per request at 6x the time, with every flip a
   correct tag dropped. The toolkit's `skip_resident_loads`, `shared_vision_encode` and
   `clip_generate` (CUDA graph decode stays on, core issue #16441) carry the speed. Results cache

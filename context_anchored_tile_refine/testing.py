@@ -66,7 +66,7 @@ INSTRUCTION_SOCKETS = (
 OVERLAY_MEGAPIXELS = 2.0
 
 # Every Tile Test: Settings output in order, as (settings key, socket type). The first seven
-# are preset keys and the last three the [vision] table's.
+# are preset keys, the next three the [vision] table's, and the last three the tags thresholds.
 SETTINGS_PRESET_OUTPUTS = (
     ("global_style_instruction", "STRING"),
     ("global_style_max_tokens", "INT"),
@@ -620,8 +620,9 @@ NO_TAG_STAGES = ("The caption kind has no tag stages, and connecting `tile_tags_
                  "place of `tile_caption_instruction` runs them.")
 VERIFICATION_OFF = "off, `tile_tags_verification_statement` is not connected"
 ORIGIN_NAMES = {"prompt": "prompt", "both": "prompt and VL model", "model": "VL model"}
-# prompt_tags_verification_threshold steps by 0.0001, so the verification scores need 4 digits.
-SCORE_DIGITS = 4
+# The library rounds every noul to 6 digits, so 6 digits show every score exactly. A threshold with more digits acts
+# as its 6 digit ceiling.
+SCORE_DIGITS = 6
 
 # Model text is escaped so that it shows as written. A tag such as <think> would otherwise be
 # removed by the frontend's HTML sanitizer, and a line starting with "-" would become a list.
@@ -769,7 +770,7 @@ def _placement(item, term, unplaced):
 
 def _axis_cell(strips, threshold):
     # Bold marks a strip that holds the tag, the same rule tags.axis_word applies.
-    return ", ".join(f"**{_p(p)}**" if p >= threshold else _p(p) for p in strips)
+    return ", ".join(f"**{_p(p, SCORE_DIGITS)}**" if p >= threshold else _p(p, SCORE_DIGITS) for p in strips)
 
 
 def _positions_table(trace, threshold):
@@ -798,9 +799,10 @@ def _final_debug(preset, headers, traces, locate):
     positions = (f"Positions are {positions_off}. The remaining tags make the tile text."
                  if positions_off else
                  "Each remaining tag is scored on six strips of the tile, three rows and three "
-                 f"columns. A strip holds a tag at {_p(threshold)} or above "
+                 f"columns. A strip holds a tag at {_p(threshold, SCORE_DIGITS)} or above "
                  "(`tile_tags_position_threshold`). A tag no strip holds is dropped. On each axis "
                  "where exactly one strip holds a tag, that strip names the tag's position term. "
+                 "A center column adds no word beside a row word. "
                  "The tags with their terms make the tile text.")
     sentence = f"A kept tag that is part of a longer kept tag is dropped. {positions}"
     return _debug_text(FINAL_TITLE, sentence, [_final_block(header, trace, not positions_off, threshold)
@@ -853,9 +855,9 @@ class ContextAnchoredTileTestCaptions:
                 "caption_megapixels": ("FLOAT", {"default": captions.load_settings().vision.caption_megapixels, "min": 0.0, "max": vl.PICTURE_CAP_MEGAPIXELS, "step": 0.01, "tooltip": f"How much of the picture the VL model reads for every caption this node writes, the tile captions and the style caption. Use 0 for the picture's own size, capped at {vl.PICTURE_CAP_MEGAPIXELS} megapixels. The tags kind reads it for the style caption only, since its tags questions read a fixed copy of about 1 megapixel. Can take the caption_megapixels output of Tile Test: Settings."}),
                 "tile_caption_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for each tile caption, which also covers the model's hidden reasoning turn. Read by the caption kind and ignored by the tags kind. Can take the tile_caption_max_tokens output of Tile Test: Settings."}),
                 "global_style_max_tokens": ("INT", {"default": 768, "min": 1, "max": captions.MAX_CAPTION_TOKENS, "tooltip": "Generation budget for the style caption, which also covers the model's hidden reasoning turn. Read when global_style_instruction is connected. Can take the global_style_max_tokens output of Tile Test: Settings."}),
-                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
-                "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
-                "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.0001, "max": 1.0, "step": 0.0001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, "min": 0.00001, "max": 1.0, "step": 0.00001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a tag the tile's own list names. Read by the tags kind when tile_tags_verification_statement is connected. Can take the tile_tags_verification_threshold output of Tile Test: Settings."}),
+                "tile_tags_position_threshold": ("FLOAT", {"default": captions.SHIPPED_TAGS_POSITION_THRESHOLD, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "The score tile_tags_verification_statement must reach on one of the six strips of a tile for that strip to hold a tag. A tag no strip holds is dropped, and a strip that is the only one holding a tag on its axis names the tag's position term. A center column adds no word beside a row word. Read by the tags kind when position_terms is on. Can take the tile_tags_position_threshold output of Tile Test: Settings."}),
+                "prompt_tags_verification_threshold": ("FLOAT", {"default": captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD, "min": 0.00001, "max": 1.0, "step": 0.00001, "tooltip": "The score tile_tags_verification_statement must reach on the entire tile to keep a thing from the prompt that the tile's own list lacks. Read by the tags kind when prompt_tags_instruction and tile_tags_verification_statement are connected. Can take the prompt_tags_verification_threshold output of Tile Test: Settings."}),
             },
             "optional": {
                 "prompt": node._prompt(),
