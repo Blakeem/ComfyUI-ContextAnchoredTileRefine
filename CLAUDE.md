@@ -416,19 +416,20 @@ without that doc's temporal design.
   (`logit_classifier.toolkit.comfyui`, which the Logit Tagger also runs), driven by
   `tag_settings(preset)`: the preset's wordings and thresholds plus this module's budgets, caps
   and thing check. PICTURE PASS: the style caption, then, when the prompt is non-blank AND
-  `prompt_tags_instruction` is set, the toolkit's `prompt_tags`: the language gate ("Is this
+  `prompt_tags_instruction` is set, the toolkit's `tag_prompt`: the language gate ("Is this
   text written in English?", a translate generate only below 0.5), one text-only greedy generate
   listing the prompt's physical things, a tag kept only when every content word shares a plural
   form with a word of the English text, the list stopped after `UNGROUNDED_STREAK` 2 ungrounded
-  tags in a row, then the thing check. PER TILE: the toolkit's `tag_picture` over the crop
+  tags in a row, then the thing check. PER TILE: the toolkit's `tag_image` over the crop
   resampled to `VL_MAX_PIXELS` 1 MP: propose (stopped at `MAX_PROPOSED_TAGS` 25 complete tags,
   never reads the prompt, one echo fallback propose when the reply holds only category nouns),
   merge model-first (cap `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK
   (one packed text-only `ChoiceQuestion` per distinct tag, answers shared across the run in
-  `known_things`, dropped at p(other) >= `THING_THRESHOLD` 0.9), verify (the noul
+  `thing_cache`, dropped below p(thing) `THING_THRESHOLD` 0.1), verify (the noul
   `tile_tags_verification_statement`, filled by the library's `presence_statement`, keeping a
-  model or both tag at `tile_tags_verification_threshold` and a prompt-only tag at
-  `prompt_tags_verification_threshold`, both at the library's strict 0.99998), `drop_subsets`
+  model or both tag at `tile_tags_verification_threshold` (`verify_thresholds.proposed`) and a
+  prompt-only tag at `prompt_tags_verification_threshold` (`verify_thresholds.declared`), both
+  at the library's `STRICT_THRESHOLDS` 0.99998), `drop_subsets`
   (words rule), then this module's locate (six strips at `STRIP_MEGAPIXELS` 0.25, a tag no
   strip holds dropped, a term only on an axis where exactly ONE strip holds it). Every tuning
   value was measured on the fp8 encoder in `tests-AB/tags-bench-log.md` section 12, and the

@@ -729,7 +729,7 @@ TAG_PROMPT_TAGS = "moon, lantern, oil painting"
 @pytest.fixture
 def tag_classifier(comfy_stubs, monkeypatch):
     fake = FakeClassifier(noul=lambda text: 0.2 if "wooden" in text else 0.9995,
-                          other=lambda tag: 0.97 if tag == "oil painting" else 0.1)
+                          thing=lambda tag: 0.03 if tag == "oil painting" else 0.9)
     open_toolkit(monkeypatch, fake)
     return fake
 
@@ -782,7 +782,7 @@ def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_cla
 PROMPT_TAGS_SENTENCE = (
     'A prompt the VL model scores below 0.50 on "Is this text written in English?" is translated to '
     "English first. The VL model lists the things the English text names, a listed tag with a word "
-    "the English text lacks is dropped, and the thing check drops a tag at p(other) 0.90 or above. "
+    "the English text lacks is dropped, and the thing check drops a tag whose p(thing) is below 0.10. "
     "The kept tags join every tile's candidates.")
 
 
@@ -796,11 +796,11 @@ def test_the_prompt_tags_output_prints_the_question_the_reply_and_each_tag_with_
         "### VL model reply\n\n"
         f"> {TAG_PROMPT_TAGS}\n\n"
         "### Listed tags\n\n"
-        "| Result | p(other) | Tag |\n"
+        "| Result | p(thing) | Tag |\n"
         "|---|---|---|\n"
-        "| kept | 0.10 | moon |\n"
-        "| kept | 0.10 | lantern |\n"
-        "| dropped | 0.97 | oil painting |")
+        "| kept | 0.90 | moon |\n"
+        "| kept | 0.90 | lantern |\n"
+        "| dropped | 0.03 | oil painting |")
 
 
 def test_the_prompt_tags_output_prints_the_translation_and_asks_from_it(tag_classifier):
@@ -818,11 +818,11 @@ def test_the_prompt_tags_output_prints_the_translation_and_asks_from_it(tag_clas
         "### VL model reply\n\n"
         f"> {TAG_PROMPT_TAGS}\n\n"
         "### Listed tags\n\n"
-        "| Result | p(other) | Tag |\n"
+        "| Result | p(thing) | Tag |\n"
         "|---|---|---|\n"
-        "| kept | 0.10 | moon |\n"
-        "| kept | 0.10 | lantern |\n"
-        "| dropped | 0.97 | oil painting |")
+        "| kept | 0.90 | moon |\n"
+        "| kept | 0.90 | lantern |\n"
+        "| dropped | 0.03 | oil painting |")
     assert result.written.captions == (("red apple, moon",),) * 2
 
 

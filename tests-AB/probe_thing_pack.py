@@ -1,5 +1,5 @@
-"""Probe: does packing move the thing check's p(other) enough to flip at 0.9, and what does an
-unpacked check cost? Replays each recorded run's candidate order (prompt tags first, then each
+"""Probe: does packing move the thing check's p(thing) enough to flip at THING_THRESHOLD, and what does
+an unpacked check cost? Replays each recorded run's candidate order (prompt tags first, then each
 tile's new tags as one pack) against one tag per request."""
 import argparse
 import json
@@ -54,30 +54,30 @@ def main(argv=None):
         for scene, prompts in runs.items():
             for prompt, record in prompts.items():
                 prompt_tags, tiles = run_packs(record)
-                known = {}
+                thing_cache = {}
                 torch.cuda.synchronize()
                 start = time.perf_counter()
                 if prompt_tags:
-                    thing_scores(packed, prompt_tags, settings, known)
+                    thing_scores(packed, prompt_tags, settings, thing_cache)
                 for candidates in tiles:
-                    thing_scores(packed, candidates, settings, known)
+                    thing_scores(packed, candidates, settings, thing_cache)
                 torch.cuda.synchronize()
                 t_packed += time.perf_counter() - start
                 alone = {}
                 start = time.perf_counter()
-                for tag in known:
+                for tag in thing_cache:
                     thing_scores(unpacked, [tag], settings, alone)
                 torch.cuda.synchronize()
                 t_unpacked += time.perf_counter() - start
-                n_tags += len(known)
-                for tag, p in known.items():
+                n_tags += len(thing_cache)
+                for tag, p in thing_cache.items():
                     q = alone[tag]
                     deltas.append(abs(p - q))
-                    if (p < tags.THING_THRESHOLD) != (q < tags.THING_THRESHOLD):
+                    if (p >= tags.THING_THRESHOLD) != (q >= tags.THING_THRESHOLD):
                         flips.append((scene, prompt, tag, p, q))
                     if abs(q - tags.THING_THRESHOLD) < 0.01:
                         near += 1
-                print(f"{scene}/{prompt}: {len(known)} tags, max delta so far {max(deltas):.2e}", flush=True)
+                print(f"{scene}/{prompt}: {len(thing_cache)} tags, max delta so far {max(deltas):.2e}", flush=True)
     deltas.sort()
     print(json.dumps({
         "tags": n_tags, "max_delta": deltas[-1], "median_delta": deltas[len(deltas) // 2],

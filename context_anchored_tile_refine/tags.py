@@ -7,13 +7,13 @@ the engine's, and reads only the texts from that run, as `(style_texts, tile_tex
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
     picture pass   the style caption (captions.style_caption), which is the style line
-                   alone, then the prompt tags (logit_classifier.toolkit's prompt_tags): the
+                   alone, then the prompt tags (logit_classifier.toolkit's tag_prompt): the
                    language question, a translation when the prompt is not English, one
                    text-only generate listing the physical things its English text names, and
                    the thing check, which keeps the ones that are things. They join every
                    tile's candidates. The prompt reaches no tile question, so a long prompt
                    never lengthens a tile's reply.
-    per tile row   the toolkit's tag_picture on a 1 MP copy of the crop: propose (stopped
+    per tile row   the toolkit's tag_image on a 1 MP copy of the crop: propose (stopped
                    after MAX_PROPOSED_TAGS tags, asked once more with the fallback question
                    when the reply names only category nouns), merge (the model's tags first,
                    then the prompt tags, category nouns and repeats dropped), thing check,
@@ -83,9 +83,9 @@ THING_CRITERIA = {
              "shape or form, lighting in general, a camera or render effect, a style, a mood, a "
              "quality or an idea",
 }
-# Mid scores mix real things with non-things ("chinese characters" 0.45, "huge" 0.43), so only a
-# confident "other" drops a tag.
-THING_THRESHOLD = 0.9
+# Mid scores mix real things with non-things ("chinese characters" 0.55, "huge" 0.57), so only a
+# p("thing") below 0.1 drops a tag.
+THING_THRESHOLD = 0.1
 
 
 def check_tags_ready(clip):
@@ -106,6 +106,7 @@ def tag_settings(preset):
     """The toolkit's TagSettings for a tags preset: its wordings and thresholds, this module's
     budgets, caps and thing check, and the toolkit's language gate and echo fallback."""
     from logit_classifier.toolkit.comfyui import TagSettings
+    from logit_classifier.toolkit.tags import PresenceThresholds
 
     return TagSettings(
         propose_instruction=preset.tile_tags_instruction,
@@ -113,8 +114,8 @@ def tag_settings(preset):
         # wording without {PROMPT}. An empty one is never asked.
         prompt_tags_instruction=preset.prompt_tags_instruction or captions.PROMPT_PLACEHOLDER,
         verify_statement=preset.tile_tags_verification_statement,
-        verify_threshold=preset.tile_tags_verification_threshold,
-        prompt_only_threshold=preset.prompt_tags_verification_threshold,
+        verify_thresholds=PresenceThresholds(proposed=preset.tile_tags_verification_threshold,
+                                             declared=preset.prompt_tags_verification_threshold),
         propose_cap=MAX_PROPOSED_TAGS,
         merge_cap=MAX_MERGED_TAGS,
         category_nouns=CATEGORY_NOUNS,
@@ -128,7 +129,7 @@ def tag_settings(preset):
         # The head-noun rule kept "stone" beside "stone walls" and "castle" beside "stone castle
         # tower", 0.03 wrong or vague tags per tile (tests-AB/tags-bench-log.md, section 12).
         subsets_rule="words",
-        order="proposed",
+        order="candidate",
     )
 
 
@@ -208,14 +209,14 @@ def render_tags(items, terms):
 class PromptTrace:
     """The prompt tags of one picture. `text` is the English text the listing read, the prompt
     or its translation. `reply` is the VL model's list as written, cut back to its last whole tag
-    when it fills the budget, `listed` its tags whose every word is a word of `text`, `p_other`
+    when it fills the budget, `listed` its tags whose every word is a word of `text`, `p_thing`
     each listed tag's thing check score, and `tags` the listed tags the thing check keeps, which
     join every tile's candidates."""
 
     text: str
     reply: str
     listed: tuple
-    p_other: tuple
+    p_thing: tuple
     tags: tuple
 
 
@@ -244,17 +245,17 @@ class TileTrace:
     text: str
 
 
-def trace_tile(clip, classifier, crop, picture, preset, prompt_tags, known_things, locate=True):
-    """Every stage of one tile row: the toolkit's tag_picture on `picture` (propose, merge with
-    `prompt_tags`, the thing check with answers shared through `known_things`, verify and
+def trace_tile(clip, classifier, crop, image, preset, prompt_tags, thing_cache, locate=True):
+    """Every stage of one tile row: the toolkit's tag_image on `image` (propose, merge with
+    `prompt_tags`, the thing check with answers shared through `thing_cache`, verify and
     clean), then locate on the full-resolution `crop` unless `locate` is off. An empty
     verification statement skips verify and locate, so every candidate is kept."""
-    from logit_classifier.toolkit.comfyui import tag_picture
+    from logit_classifier.toolkit.comfyui import tag_image
 
     statement = preset.tile_tags_verification_statement
     position_threshold = preset.tile_tags_position_threshold
-    trace = tag_picture(clip, classifier, picture, prompt_tags=prompt_tags, settings=tag_settings(preset),
-                        known=known_things)
+    trace = tag_image(clip, classifier, image, prompt_tags=prompt_tags, settings=tag_settings(preset),
+                      thing_cache=thing_cache)
     kept = trace.kept
     strips = ((),) * len(kept)
     terms = ("",) * len(kept)
@@ -296,10 +297,10 @@ def clear_tag_cache():
     _TAG_CACHE.clear()
 
 
-def _tag_cache_key(picture, preset, scope):
+def _tag_cache_key(image, preset, scope):
     # The settings object holds every value a toolkit stage reads, so a changed value never
-    # serves text written under the old one. A picture of None keys a text-only request.
-    digest = () if picture is None else captions.picture_digest(picture)
+    # serves text written under the old one. An image of None keys a text-only request.
+    digest = () if image is None else captions.picture_digest(image)
     return (digest, tag_settings(preset), VL_MAX_PIXELS, STRIP_MEGAPIXELS, ROW_WORDS, COLUMN_WORDS,
             preset.tile_tags_position_threshold, preset.style_instruction, preset.prompt, scope)
 
@@ -313,12 +314,12 @@ def _cached(key, clip, compute):
     return value
 
 
-def _prompt_trace(clip, classifier, preset, known_things):
-    from logit_classifier.toolkit.comfyui import prompt_tags
+def _prompt_trace(clip, classifier, preset, thing_cache):
+    from logit_classifier.toolkit.comfyui import tag_prompt
 
-    listing = prompt_tags(clip, classifier, preset.prompt, tag_settings(preset), known_things)
+    listing = tag_prompt(clip, classifier, preset.prompt, tag_settings(preset), thing_cache)
     return PromptTrace(text=listing.text, reply=listing.reply, listed=listing.listed,
-                       p_other=listing.p_other, tags=listing.tags)
+                       p_thing=listing.p_thing, tags=listing.tags)
 
 
 def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0, progress=None,
@@ -347,7 +348,7 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
     total = per_picture * batch_size
     pbar = None if progress is not None else comfy.utils.ProgressBar(total)
     done = per_picture * batch_index
-    known_things = {}
+    thing_cache = {}
     prompt_trace = None
     style_texts = [""] * batch
     tile_traces = []
@@ -363,7 +364,7 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
     with captions.comfy_toolkit().skip_resident_loads(clip):
         if preset.prompt and preset.prompt_tags_instruction:
             prompt_trace = _cached(_tag_cache_key(None, preset, ("prompt tags",)), clip,
-                                   lambda: _prompt_trace(clip, classifier, preset, known_things))
+                                   lambda: _prompt_trace(clip, classifier, preset, thing_cache))
         prompt_tags = () if prompt_trace is None else prompt_trace.tags
 
         if style_rows:
@@ -385,12 +386,12 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
             row_traces = []
             for b in range(batch):
                 row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
-                picture = captions.resample_for_vl(row, VL_MAX_PIXELS)
+                image = captions.resample_for_vl(row, VL_MAX_PIXELS)
                 scope = ("tile", crop.x0, crop.y0, crop.x1, crop.y1, b, batch_index, locate)
-                row_traces.append(_cached(_tag_cache_key(picture, preset, scope), clip,
-                                          lambda row=row, picture=picture: trace_tile(
-                                              clip, classifier, row, picture, preset, prompt_tags,
-                                              known_things, locate)))
+                row_traces.append(_cached(_tag_cache_key(image, preset, scope), clip,
+                                          lambda row=row, image=image: trace_tile(
+                                              clip, classifier, row, image, preset, prompt_tags,
+                                              thing_cache, locate)))
                 advance()
             tile_traces.append(tuple(row_traces))
     return TagRun(style_texts=tuple(style_texts), prompt=prompt_trace, tiles=tuple(tile_traces))

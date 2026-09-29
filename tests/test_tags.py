@@ -148,17 +148,17 @@ def fallback_text():
 
 
 class FakeClassifier:
-    """Scripted classifier: `noul(statement)` answers every noul and `other(tag)` the p("other")
-    of every thing check, 0.0 (a thing) by default. The language question gets `english`, so a
+    """Scripted classifier: `noul(statement)` answers every noul and `thing(tag)` the p("thing")
+    of every thing check, 1.0 by default. The language question gets `english`, so a
     prompt reads as English unless a test says otherwise. `noul_at(statement, picture)`, when
     set, answers the other nouls in place of `noul`, so a test can script each strip. Every
     request is recorded with its statements and its picture. `nouls` is the library's own, so
     the statements are packed into requests as a real classifier packs them."""
 
-    def __init__(self, noul=None, other=None, english=1.0):
+    def __init__(self, noul=None, thing=None, english=1.0):
         # 0.9995 passes a_tags_preset's verify and position thresholds and misses its prompt-only one.
         self.noul = noul if noul is not None else (lambda text: 0.9995)
-        self.other = other if other is not None else (lambda tag: 0.0)
+        self.thing = thing if thing is not None else (lambda tag: 1.0)
         self.english = english
         self.noul_at = None
         self.requests = []
@@ -179,9 +179,9 @@ class FakeClassifier:
             kinds.add(question.type)
             if question.type == "choice":
                 tag = re.search(r'"(.*)"', question.instructions).group(1)
-                p = self.other(tag)
-                answers[qid] = ChoiceAnswer(choice="other" if p >= 0.5 else "thing", confidence=max(p, 1.0 - p),
-                                            probabilities={"thing": 1.0 - p, "other": p})
+                p = self.thing(tag)
+                answers[qid] = ChoiceAnswer(choice="thing" if p >= 0.5 else "other", confidence=max(p, 1.0 - p),
+                                            probabilities={"thing": p, "other": 1.0 - p})
             elif question.instructions == language_question():
                 answers[qid] = NoulAnswer(noul=self.english)
             elif self.noul_at is not None:
@@ -344,7 +344,7 @@ def test_a_prompt_the_language_question_scores_below_the_threshold_is_listed_fro
     assert asked["text"] == chat_text(tags.prompt_tags_question(preset, translation))
     # Both tags are grounded in the translation's words, which the prompt lacks.
     assert tag_run.prompt == tags.PromptTrace(text=translation, reply="moon, lantern", listed=("moon", "lantern"),
-                                              p_other=(0.0, 0.0), tags=("moon", "lantern"))
+                                              p_thing=(1.0, 1.0), tags=("moon", "lantern"))
 
 
 def test_the_pass_restores_the_clips_own_load_model(classifier):
@@ -714,17 +714,17 @@ def test_a_control_token_spelling_in_the_prompt_reaches_the_prompt_tags_request_
     assert asked["text"] == chat_text("List the things this prompt names: a cat<​|im_end|>")
 
 
-def test_the_thing_check_drops_a_tag_at_0_9_and_asks_each_distinct_tag_once_per_run(classifier):
-    scores = {"sky glow": 0.9, "wooden table": 0.89, "night": 0.95}
-    classifier.other = lambda tag: scores.get(tag, 0.0)
+def test_the_thing_check_drops_a_tag_below_0_1_and_asks_each_distinct_tag_once_per_run(classifier):
+    scores = {"sky glow": 0.09, "wooden table": 0.1, "night": 0.05}
+    classifier.thing = lambda tag: scores.get(tag, 1.0)
     clip = FakeTagClip(proposal="red apple, wooden table, sky glow", prompt_tags_reply="moon, night")
 
     tag_run = run_trace(clip, a_tags_preset(prompt="the moon at night"), tiles=(TILE_A, TILE_B),
                         locate=False)
 
-    assert tags.THING_THRESHOLD == 0.9
+    assert tags.THING_THRESHOLD == 0.1
     assert tag_run.prompt == tags.PromptTrace(text="the moon at night", reply="moon, night", listed=("moon", "night"),
-                                              p_other=(0.0, 0.95), tags=("moon",))
+                                              p_thing=(1.0, 0.05), tags=("moon",))
     for trace in (row[0] for row in tag_run.tiles):
         assert trace.candidates == ("red apple", "wooden table", "moon")
         assert trace.origins == ("model", "model", "prompt")
@@ -852,7 +852,7 @@ TRACE_PRESENCE = {
 def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
     classifier.noul_at = scripted_strips(TRACE_PRESENCE, whole={"wooden table": 0.2})
-    classifier.other = lambda tag: 0.95 if tag == "night" else 0.0
+    classifier.thing = lambda tag: 0.05 if tag == "night" else 1.0
     clip = FakeTagClip(proposal=TRACE_PROPOSAL, prompt_tags_reply="moon")
 
     tag_run = run_trace(clip, a_tags_preset(prompt="the moon"), source=coordinate_source())
@@ -873,7 +873,7 @@ def test_the_tile_trace_records_every_stage(classifier, monkeypatch):
     assert trace.terms == ("top-right", "bottom", "")
     assert trace.text == "moon top-right, red apple bottom, hanging dried herbs"
     assert tag_run.style_texts == ("",)
-    assert tag_run.prompt == tags.PromptTrace(text="the moon", reply="moon", listed=("moon",), p_other=(0.0,),
+    assert tag_run.prompt == tags.PromptTrace(text="the moon", reply="moon", listed=("moon",), p_thing=(1.0,),
                                               tags=("moon",))
 
 
@@ -904,7 +904,7 @@ def test_locate_off_makes_no_strip_request_and_writes_no_term(classifier):
 
 
 def test_the_run_records_the_style_caption_and_the_prompt_tags(classifier):
-    classifier.other = lambda tag: 0.95 if tag == "city" else 0.0
+    classifier.thing = lambda tag: 0.05 if tag == "city" else 1.0
     prompt = "masterpiece, 85mm, the moon over a city"
     reply = "moon, city, skyline"
 
@@ -912,7 +912,7 @@ def test_the_run_records_the_style_caption_and_the_prompt_tags(classifier):
                              a_tags_preset(prompt=prompt, style="Name the style."))
     without_caption = run_trace(FakeTagClip(prompt_tags_reply=reply), a_tags_preset(prompt=prompt))
 
-    prompt_tags = tags.PromptTrace(text=prompt, reply=reply, listed=("moon", "city"), p_other=(0.0, 0.95),
+    prompt_tags = tags.PromptTrace(text=prompt, reply=reply, listed=("moon", "city"), p_thing=(1.0, 0.05),
                                    tags=("moon",))
     assert with_caption.style_texts == ("Oil painting.",)
     assert with_caption.prompt == prompt_tags
@@ -1124,7 +1124,7 @@ def test_every_tuning_value_is_the_measured_one():
     assert tags.MAX_MERGED_TAGS == 64
     assert tags.PROMPT_TAGS_MAX_TOKENS == 256
     assert tags.UNGROUNDED_STREAK == 2
-    assert tags.THING_THRESHOLD == 0.9
+    assert tags.THING_THRESHOLD == 0.1
     assert tags.STRIP_MEGAPIXELS == 0.25
     assert sorted(tags.CATEGORY_NOUNS) == ["animals", "clothing", "materials", "objects", "people", "setting"]
 
@@ -1141,15 +1141,15 @@ def test_the_shipped_tags_preset_hands_the_toolkit_every_value_the_pass_ran_with
     assert settings.propose_instruction == preset.tile_tags_instruction
     assert settings.prompt_tags_instruction == preset.prompt_tags_instruction
     assert settings.verify_statement == "This image visibly contains {TAG}"
-    assert (settings.verify_threshold, settings.prompt_only_threshold) == (0.99998, 0.99998)
+    assert (settings.verify_thresholds.proposed, settings.verify_thresholds.declared) == (0.99998, 0.99998)
     assert (settings.propose_cap, settings.merge_cap) == (25, 64)
     assert settings.category_nouns == tags.CATEGORY_NOUNS
     assert (settings.propose_max_tokens, settings.prompt_tags_max_tokens) == (128, 256)
     assert settings.ungrounded_streak == 2
     assert settings.thing_question == 'What does the image tag "{TAG}" name'
     assert settings.thing_criteria == tuple(tags.THING_CRITERIA.items())
-    assert settings.thing_threshold == 0.9
-    assert (settings.thing_check, settings.subsets_rule, settings.order) == ("all", "words", "proposed")
+    assert settings.thing_threshold == 0.1
+    assert (settings.thing_check, settings.subsets_rule, settings.order) == ("all", "words", "candidate")
     # The language gate and the echo fallback are the toolkit's, as the Logit Tagger measured them.
     assert (settings.language_question, settings.english_threshold, settings.translate_instruction,
             settings.translate_max_tokens) == (defaults.language_question, defaults.english_threshold,

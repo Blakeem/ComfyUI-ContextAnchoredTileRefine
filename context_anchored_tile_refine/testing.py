@@ -686,8 +686,8 @@ def _prompt_tags_debug(preset, run):
     sentence = (f"A prompt the VL model scores below {_p(settings.english_threshold)} on "
                 f'"{settings.language_question}" is translated to English first. The VL model lists the '
                 "things the English text names, a listed tag with a word the English text lacks is "
-                f"dropped, and the thing check drops a tag at p(other) {_p(settings.thing_threshold)} or "
-                "above. The kept tags join every tile's candidates.")
+                f"dropped, and the thing check drops a tag whose p(thing) is below {_p(settings.thing_threshold)}. "
+                "The kept tags join every tile's candidates.")
     translation = []
     rows = []
 
@@ -697,13 +697,13 @@ def _prompt_tags_debug(preset, run):
     if run.prompt.text != preset.prompt:
         translation = [_section("### English translation", [_quote(run.prompt.text)])]
     rows = [("kept" if tag in run.prompt.tags else "dropped", _p(p), _escaped(tag))
-            for tag, p in zip(run.prompt.listed, run.prompt.p_other, strict=True)]
+            for tag, p in zip(run.prompt.listed, run.prompt.p_thing, strict=True)]
     return _debug_text(PROMPT_TAGS_TITLE, sentence, [
         *translation,
         _section("### Question sent to the VL model once per picture",
                  [_quote(tags.prompt_tags_question(preset, run.prompt.text))]),
         _section("### VL model reply", [_quote(run.prompt.reply)]),
-        _section("### Listed tags", [_table(("Result", "p(other)", "Tag"), rows)])])
+        _section("### Listed tags", [_table(("Result", "p(thing)", "Tag"), rows)])])
 
 
 def _listed_block(header, trace, fallback_question):
