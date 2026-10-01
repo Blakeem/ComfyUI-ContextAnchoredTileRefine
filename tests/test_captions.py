@@ -145,7 +145,6 @@ def test_settled_instructions_are_the_ab_settled_strings():
     assert "centre" in captions.SETTLED_RICH_INSTRUCTION
     assert "colour" in captions.SETTLED_RICH_INSTRUCTION
     assert captions.SETTLED_POSITION_MAX_TOKENS == 512
-    assert captions.SETTLED_RICH_MAX_TOKENS == 768
 
 
 # --- the settings file ------------------------------------------------------------------

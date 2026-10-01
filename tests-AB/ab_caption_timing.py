@@ -1,5 +1,8 @@
 """Wall time of every part of the tags pass, per stage, over a ladder of prompt lengths.
 
+It wraps tags.fragment_style_p, tags.propose and tags._verify_scores, which the toolkit's
+tag_picture has since replaced, so it no longer runs.
+
 The tags pass (context_anchored_tile_refine/tags.py) runs, per picture, the style caption and
 the prompt fragment sort, and per tile propose, verify and locate (six strips). This harness
 runs the shipped pass unchanged through tags.generate_tag_trace and times it from outside:

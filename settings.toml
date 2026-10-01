@@ -108,7 +108,7 @@
 
 [vision]
 canvas_tokens = 165
-crop_tokens = 110
+crop_tokens = 165
 caption_megapixels = 0.786432
 
 # The default preset. Each tile's text is the tags the VL model lists and then confirms.

@@ -301,8 +301,8 @@ without that doc's temporal design.
   failed like the canvas slice, so it was removed, not flagged off. A/B-settled (AB26-AB36):
   vision rows are positionally exact and demand-free, and ANY text (user prompt, generated
   style, captions) re-admits phantom objects in proportion to its volume, so there is no
-  prompt input for the DiT at all (the VL nodes' `prompt` widget fills the caption QUESTION
-  only, see captions.py). The rows are a bag. Krea 2's DiT gives every conditioning row RoPE
+  prompt input for the DiT at all (the VL nodes' `prompt` socket reaches the VL model's
+  questions, and only the things a tile confirms enter that tile's text, see captions.py and tags.py). The rows are a bag. Krea 2's DiT gives every conditioning row RoPE
   position 0 (measured bit-exact under a shuffle), so the block order carries nothing.
   Fail-fast guards: non-VL CLIP (tokenizer rejects images / no image token), encoder
   seq-length vs token-derived layout, and a real `pooled_output` or stray extras on a
@@ -347,7 +347,7 @@ without that doc's temporal design.
   rejects it. "vision tokens" reads the `[vision]` table and no preset (pinned end to end).
   THE PROMPT INPUT (2026-09-16): an instruction may carry `PROMPT_PLACEHOLDER` (`{PROMPT}`),
   which `with_prompt(preset, prompt)` fills by literal replace (never str.format, a prompt can
-  hold braces) into BOTH instructions, stripping the widget's trailing newline; a placeholder
+  hold braces) into BOTH instructions, stripping the text's trailing newline; a placeholder
   met by a blank prompt raises there, naming the preset, the key and the input, and
   `generate_caption_set` runs `_check_prompt_filled` first so a direct caller that skipped
   `with_prompt` never captions with the literal placeholder. The prompt reaches the VL model's
@@ -376,12 +376,13 @@ without that doc's temporal design.
   `(style_texts, captions)`, `join_style_captions` puts the style on top of every tile
   caption, and `generate_tile_captions` (the engine's call) is the two together. The Captions
   test node reads the set so its listing shows the style once, labelled, and the Render test
-  node joins it per lane set, so the joined form exists only where the engine reads it. The three shipped presets' wording is pinned
+  node joins it per lane set, so the joined form exists only where the engine reads it. The shipped preset's wording, and the example file's, is pinned
   character-for-character by `test_settings_toml_ships_the_owner_tested_wording` (the owner's
   testing found small wording changes lose consistency), so a deliberate prompt change updates
-  pin and file together. The retired settled pair (`RICH_GROUPED_INSTRUCTION`,
-  `SETTLED_POSITION_INSTRUCTION`) stays defined, character-frozen EU spelling included,
-  because tests-AB's judged arms pin themselves to it (`ab_env.caption_preset` is how a
+  pin and file together. The retired settled pair stays defined, character-frozen EU spelling
+  included: `SETTLED_POSITION_INSTRUCTION` because tests-AB's judged arms pin themselves to
+  it, and `RICH_GROUPED_INSTRUCTION` because the pin test ties the example file's `standard`
+  preset to it (`ab_env.caption_preset` is how a
   harness asks its own pinned question). The caption input is an area-resampled COPY sized by `caption_megapixels`
   (`VL_INPUT_BUDGET` keeps the 384^2 px the judged harness arms were captioned at) and never
   the sampled tile (prime directive 1). `0` reads the crop's own size, capped at
@@ -398,7 +399,7 @@ without that doc's temporal design.
   file in force, `missing:<name>` rather than a raise) is what both VL nodes' `IS_CHANGED`
   return: ComfyUI re-executes a node only when an input, a widget or IS_CHANGED changed, so
   before it a settings edit under a fixed seed was served from cache and never ran.
-  `preset_labels()` is the `lru_cache` sibling of `vlm_methods` the Captions test node builds
+  `preset_labels()` is the `lru_cache` sibling of `vlm_methods` the Settings test node builds
   its combo from, same once-per-session cadence for the same reason. THE CAPTION CACHE:
   `generate_caption` stores its final text in a bounded `OrderedDict` (`CAPTION_CACHE_ENTRIES`
   512) keyed by the sha256 of a float32 view of the resampled picture (bfloat16 has no numpy

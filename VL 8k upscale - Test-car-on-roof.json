@@ -57,7 +57,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 24,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
@@ -98,7 +98,7 @@
         150
       ],
       "flags": {},
-      "order": 25,
+      "order": 26,
       "mode": 0,
       "inputs": [
         {
@@ -198,11 +198,11 @@
         "Node name for S&R": "UNETLoader"
       },
       "widgets_values": [
-        "krea2Center_v408bitFp8Int8.safetensors",
+        "jibMixKrea2_v40Habanero.safetensors",
         "default"
       ],
       "widgets_values_named": {
-        "unet_name": "krea2Center_v408bitFp8Int8.safetensors",
+        "unet_name": "jibMixKrea2_v40Habanero.safetensors",
         "weight_dtype": "default"
       },
       "color": "#2a363b",
@@ -339,14 +339,14 @@
         2,
         2048,
         1728,
-        128,
+        32,
         256
       ],
       "widgets_values_named": {
         "upscale_by": 2,
         "max_tile_width": 2048,
         "max_tile_height": 1728,
-        "context_anchor": 128,
+        "context_anchor": 32,
         "context_overlap": 256
       }
     },
@@ -585,14 +585,14 @@
         "dpmpp_2m_sde",
         "sgm_uniform",
         20,
-        2.5,
+        3.5,
         0.35,
         "source image",
-        "vision tokens and captions",
+        "vision tokens",
         20,
         30,
         "1",
-        true
+        false
       ],
       "widgets_values_named": {
         "seed": 42,
@@ -600,14 +600,14 @@
         "sampler_name": "dpmpp_2m_sde",
         "scheduler": "sgm_uniform",
         "steps": 20,
-        "cfg": 2.5,
+        "cfg": 3.5,
         "denoise": 0.35,
         "anchor_source": "source image",
-        "surface": "vision tokens and captions",
+        "surface": "vision tokens",
         "canvas_tokens": 20,
         "crop_tokens": 30,
         "tiles": "1",
-        "with_neighbors": true
+        "with_neighbors": false
       }
     },
     {
@@ -639,10 +639,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        ""
+        "photo, low iso, mirrorless camera photo, photograph, breathtaking vivid cinematic Cyberpunk dark fantasy sci-fi photo of a Cyberpunk city, Cyberpunk cityscape at night, futuristic aerial city photography from a distance, isometric view, deep depth of field, sharp details, dark storm clouds, deep red sunset, bay in the distance, massive tall foreboding dark skyscrapers, futuristic metropolis, futuristic city, buildings in the distance."
       ],
       "widgets_values_named": {
-        "value": ""
+        "value": "photo, low iso, mirrorless camera photo, photograph, breathtaking vivid cinematic Cyberpunk dark fantasy sci-fi photo of a Cyberpunk city, Cyberpunk cityscape at night, futuristic aerial city photography from a distance, isometric view, deep depth of field, sharp details, dark storm clouds, deep red sunset, bay in the distance, massive tall foreboding dark skyscrapers, futuristic metropolis, futuristic city, buildings in the distance."
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -678,10 +678,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
+        "blurry, jpeg compression, scribbles, AI generated, shredded cloth, lightning, rain, cartoon, fire, smoke, birds, lightning, garage, broken, snow"
       ],
       "widgets_values_named": {
-        "value": "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
+        "value": "blurry, jpeg compression, scribbles, AI generated, shredded cloth, lightning, rain, cartoon, fire, smoke, birds, lightning, garage, broken, snow"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -720,11 +720,11 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "ComfyUI-2x_00886_.png",
+        "ComfyUI-2x_00888_.png",
         "image"
       ],
       "widgets_values_named": {
-        "image": "ComfyUI-2x_00886_.png",
+        "image": "ComfyUI-2x_00888_.png",
         "upload": "image"
       }
     },
@@ -1158,8 +1158,8 @@
         "Node name for S&R": "ContextAnchoredTileTestCaptions"
       },
       "widgets_values": [
-        "17",
-        true,
+        "22",
+        false,
         true,
         "",
         "",
@@ -1169,15 +1169,15 @@
         0.99998
       ],
       "widgets_values_named": {
-        "tiles": "17",
-        "with_neighbors": true,
+        "tiles": "22",
+        "with_neighbors": false,
         "position_terms": true,
         "caption_megapixels": "",
         "tile_caption_max_tokens": "",
         "global_style_max_tokens": 0.15,
         "tile_tags_verification_threshold": 0.9,
         "tile_tags_position_threshold": 0.9,
-        "prompt_tags_verification_threshold": 0.9999
+        "prompt_tags_verification_threshold": 0.99998
       }
     },
     {
@@ -1333,7 +1333,7 @@
       ],
       "flags": {},
       "order": 10,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "name": "model",
@@ -1376,7 +1376,7 @@
         850
       ],
       "flags": {},
-      "order": 26,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -1394,10 +1394,9 @@
       ],
       "title": "Preview Blocks",
       "properties": {
-        "cnr_id": "comfy-core",
-        "Node name for S&R": "PreviewImage"
-      },
-      "widgets_values": []
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core"
+      }
     }
   ],
   "links": [
@@ -1530,22 +1529,6 @@
       "IMAGE"
     ],
     [
-      1118,
-      415,
-      8,
-      385,
-      7,
-      "INT"
-    ],
-    [
-      1119,
-      415,
-      9,
-      385,
-      8,
-      "INT"
-    ],
-    [
       1122,
       383,
       0,
@@ -1610,46 +1593,6 @@
       "STRING"
     ],
     [
-      1130,
-      415,
-      7,
-      416,
-      9,
-      "FLOAT"
-    ],
-    [
-      1131,
-      415,
-      3,
-      416,
-      10,
-      "INT"
-    ],
-    [
-      1132,
-      415,
-      1,
-      416,
-      11,
-      "INT"
-    ],
-    [
-      1133,
-      415,
-      10,
-      416,
-      12,
-      "FLOAT"
-    ],
-    [
-      1134,
-      415,
-      11,
-      416,
-      13,
-      "FLOAT"
-    ],
-    [
       1135,
       416,
       0,
@@ -1664,14 +1607,6 @@
       390,
       0,
       "CATR_CAPTIONS"
-    ],
-    [
-      1137,
-      416,
-      2,
-      385,
-      9,
-      "STRING"
     ],
     [
       1142,
@@ -1736,6 +1671,70 @@
       423,
       0,
       "IMAGE"
+    ],
+    [
+      1118,
+      415,
+      8,
+      385,
+      7,
+      "INT"
+    ],
+    [
+      1119,
+      415,
+      9,
+      385,
+      8,
+      "INT"
+    ],
+    [
+      1137,
+      416,
+      2,
+      385,
+      9,
+      "STRING"
+    ],
+    [
+      1130,
+      415,
+      7,
+      416,
+      9,
+      "FLOAT"
+    ],
+    [
+      1131,
+      415,
+      3,
+      416,
+      10,
+      "INT"
+    ],
+    [
+      1132,
+      415,
+      1,
+      416,
+      11,
+      "INT"
+    ],
+    [
+      1133,
+      415,
+      10,
+      416,
+      12,
+      "FLOAT"
+    ],
+    [
+      1134,
+      415,
+      11,
+      416,
+      13,
+      "FLOAT"
     ],
     [
       1152,
@@ -1823,10 +1822,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8860163198567742,
+      "scale": 1.2972164939023056,
       "offset": [
-        -8313.203922192955,
-        -61.91773789828024
+        -8946.953704779084,
+        -202.62854503553388
       ]
     },
     "frontendVersion": "1.53.6"

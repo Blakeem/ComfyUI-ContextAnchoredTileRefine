@@ -2,7 +2,7 @@
   "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
   "revision": 0,
   "last_node_id": 383,
-  "last_link_id": 1063,
+  "last_link_id": 1067,
   "nodes": [
     {
       "id": 291,
@@ -372,10 +372,10 @@
         "Node name for S&R": "PrimitiveFloat"
       },
       "widgets_values": [
-        2.5
+        3.5
       ],
       "widgets_values_named": {
-        "value": 2.5
+        "value": 3.5
       },
       "color": "#2a363b",
       "bgcolor": "#3f5159"
@@ -811,7 +811,7 @@
       ],
       "size": [
         230,
-        185.99997360229494
+        190
       ],
       "flags": {
         "collapsed": false
@@ -861,11 +861,11 @@
       "type": "SaveImage",
       "pos": [
         5120,
-        490
+        620
       ],
       "size": [
         230,
-        40
+        310
       ],
       "flags": {
         "collapsed": true
@@ -904,7 +904,7 @@
       "type": "PlaySound|pysssss",
       "pos": [
         5110,
-        840
+        790
       ],
       "size": [
         240,
@@ -993,8 +993,8 @@
       "id": 371,
       "type": "LiebsPicker",
       "pos": [
-        5110,
-        600
+        5120,
+        340
       ],
       "size": [
         230,
@@ -1009,7 +1009,7 @@
         {
           "name": "images",
           "type": "IMAGE",
-          "link": 1043
+          "link": 1067
         }
       ],
       "outputs": [
@@ -1017,7 +1017,7 @@
           "name": "IMAGES",
           "type": "IMAGE",
           "links": [
-            1042
+            1066
           ]
         },
         {
@@ -1071,7 +1071,7 @@
           "links": [
             947,
             948,
-            1043
+            1067
           ]
         }
       ],
@@ -1367,7 +1367,7 @@
         {
           "name": "image",
           "type": "IMAGE",
-          "link": 1042
+          "link": 1066
         },
         {
           "name": "model",
@@ -1434,7 +1434,7 @@
         2,
         2048,
         1728,
-        128,
+        32,
         256,
         "source image",
         "vision tokens and captions"
@@ -1450,7 +1450,7 @@
         "upscale_by": 2,
         "max_tile_width": 2048,
         "max_tile_height": 1728,
-        "context_anchor": 128,
+        "context_anchor": 32,
         "context_overlap": 256,
         "anchor_source": "source image",
         "vlm_method": "vision tokens and captions"
@@ -1489,10 +1489,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        ""
+        "jpeg compression, scribbles, AI generated"
       ],
       "widgets_values_named": {
-        "value": ""
+        "value": "jpeg compression, scribbles, AI generated"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -1585,7 +1585,7 @@
         32,
         256,
         "live canvas",
-        "vision tokens and captions"
+        "captions"
       ],
       "widgets_values_named": {
         "seed": 42,
@@ -1601,7 +1601,7 @@
         "context_anchor": 32,
         "context_overlap": 256,
         "anchor_source": "live canvas",
-        "vlm_method": "vision tokens and captions"
+        "vlm_method": "captions"
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -1639,11 +1639,11 @@
         "ver": "0.3.19"
       },
       "widgets_values": [
-        23024,
+        23190,
         "fixed"
       ],
       "widgets_values_named": {
-        "noise_seed": 23024,
+        "noise_seed": 23190,
         "control_after_generate": "fixed"
       },
       "color": "#2a363b",
@@ -1677,11 +1677,11 @@
         "Node name for S&R": "UNETLoader"
       },
       "widgets_values": [
-        "jibMixKrea2_v40Habanero.safetensors",
+        "oursecret_v20_int8_convrot_gptq.safetensors",
         "default"
       ],
       "widgets_values_named": {
-        "unet_name": "jibMixKrea2_v40Habanero.safetensors",
+        "unet_name": "oursecret_v20_int8_convrot_gptq.safetensors",
         "weight_dtype": "default"
       },
       "color": "#2a363b",
@@ -1776,7 +1776,7 @@
       ],
       "flags": {},
       "order": 18,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "name": "model",
@@ -1800,11 +1800,11 @@
         "Node name for S&R": "LoraLoaderModelOnly"
       },
       "widgets_values": [
-        "grainscape_krea2.safetensors",
+        "Faded80s.safetensors",
         1
       ],
       "widgets_values_named": {
-        "lora_name": "grainscape_krea2.safetensors",
+        "lora_name": "Faded80s.safetensors",
         "strength_model": 1
       },
       "color": "#2a363b",
@@ -2093,14 +2093,6 @@
       "CONDITIONING"
     ],
     [
-      1031,
-      315,
-      0,
-      374,
-      7,
-      "FLOAT"
-    ],
-    [
       1033,
       374,
       0,
@@ -2121,22 +2113,6 @@
       373,
       0,
       376,
-      0,
-      "IMAGE"
-    ],
-    [
-      1042,
-      371,
-      0,
-      374,
-      0,
-      "IMAGE"
-    ],
-    [
-      1043,
-      328,
-      0,
-      371,
       0,
       "IMAGE"
     ],
@@ -2197,12 +2173,36 @@
       "MODEL"
     ],
     [
+      1031,
+      315,
+      0,
+      374,
+      7,
+      "FLOAT"
+    ],
+    [
       1063,
       315,
       0,
       364,
       7,
       "FLOAT"
+    ],
+    [
+      1066,
+      371,
+      0,
+      374,
+      0,
+      "IMAGE"
+    ],
+    [
+      1067,
+      328,
+      0,
+      371,
+      0,
+      "IMAGE"
     ]
   ],
   "groups": [
@@ -2258,13 +2258,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1,
+      "scale": 1.0640990073669352,
       "offset": [
-        -2502.7898546292863,
-        -50.94915371704518
+        -1825.7595163260391,
+        -17.978820035168066
       ]
     },
-    "frontendVersion": "1.53.6"
+    "frontendVersion": "1.53.10"
   },
   "version": 0.4
 }

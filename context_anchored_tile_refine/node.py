@@ -31,13 +31,9 @@ def _vlm_method():
 
 def _prompt():
     # The image's prompt, defined once so both VL nodes and the Captions test node offer the
-    # same input. It fills {PROMPT} in a caption preset's instructions (captions.with_prompt),
-    # and on a tags preset it anchors the propose question and supplies the prompt fragments
-    # each tile is checked for. It reaches the VL model only, never the DiT. A SOCKET, never a
-    # widget (forceInput): the same text the positive prompt was encoded from is linked in, and
-    # a socket never enters widgets_values, so its place in the input list is free of the
-    # positional restore rule.
-    return ("STRING", {"forceInput": True, "tooltip": "Optional. The prompt the image was made from, as a text link. Connect the positive prompt's text. With the tags preset it anchors the words the VL model tags each tile with, and its phrases are checked against each tile and kept where they are seen. In a caption preset it fills {PROMPT} in the instructions, and a preset with {PROMPT} needs it connected. It reaches the VL model only, never the diffusion model."})
+    # same input. A SOCKET (forceInput), since a socket never enters widgets_values and its
+    # place in the input list is then free of the positional restore rule.
+    return ("STRING", {"forceInput": True, "tooltip": "Optional. The prompt the image was made from, as a text link. Connect the positive prompt's text. With the tags preset the VL model lists the things the prompt names, and a tile adds a listed thing to its tags when the VL model confirms it in that tile. In a caption preset it fills {PROMPT} in the instructions, and a preset with {PROMPT} needs it connected. The diffusion model never reads the prompt text itself."})
 
 
 def _sampling_widgets():

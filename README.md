@@ -2,24 +2,28 @@
 
 ComfyUI nodes for tiled refining and upscaling. An already upscaled image is refined a tile at a time with no visible seams. On the VL nodes, a global prompt is replaced by vision conditioning.
 
-Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes, 4x at denoise 0.5 (6 tiles), then 2x at denoise 0.35 (30 tiles). These are the first two images made with this method and they are not cherry picked. Click to view the full-sized image.
+Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscaled in two passes. Click to view the full-sized image.
 
 <table>
 <tr>
-<td align="center"><a href="samples/cyberpunk-city.webp"><img src="samples/cyberpunk-city.webp" alt="Cyberpunk city, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/cyberpunks-couple.webp"><img src="samples/cyberpunks-couple.webp" alt="Cyberpunks couple, original" width="100%"></a><br><sub>v1.8.0, Original, 1024x576</sub></td>
+<td align="center"><a href="samples/cyberpunks-couple-4k.webp"><img src="samples/cyberpunks-couple-4k-preview.jpg" alt="Cyberpunks couple, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.35, 6 tiles, 4096x2304</sub></td>
+<td align="center"><a href="samples/cyberpunks-couple-8k.webp"><img src="samples/cyberpunks-couple-8k-preview.jpg" alt="Cyberpunks couple, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 24 tiles, 8192x4608</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="samples/dark-city.webp"><img src="samples/dark-city.webp" alt="Dark city, original" width="100%"></a><br><sub>v1.8.0, Original, 1024x576</sub></td>
+<td align="center"><a href="samples/dark-city-4k.webp"><img src="samples/dark-city-4k-preview.jpg" alt="Dark city, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.35, 6 tiles, 4096x2304</sub></td>
+<td align="center"><a href="samples/dark-city-8k.webp"><img src="samples/dark-city-8k-preview.jpg" alt="Dark city, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 24 tiles, 8192x4608</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="samples/cyberpunk-city.webp"><img src="samples/cyberpunk-city.webp" alt="Cyberpunk city, original" width="100%"></a><br><sub>v1.6.0, Original, 1024x576</sub></td>
 <td align="center"><a href="samples/cyberpunk-city-4k.webp"><img src="samples/cyberpunk-city-4k-preview.jpg" alt="Cyberpunk city, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.5, 6 tiles, 4096x2304</sub></td>
 <td align="center"><a href="samples/cyberpunk-city-8k.webp"><img src="samples/cyberpunk-city-8k-preview.jpg" alt="Cyberpunk city, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 30 tiles, 8192x4608</sub></td>
 </tr>
 <tr>
-<td colspan="3"><sub><b>Prompt:</b> Cyberpunk cityscape at night</sub></td>
-</tr>
-<tr>
-<td align="center"><a href="samples/orbital-shipyard-hangar.webp"><img src="samples/orbital-shipyard-hangar.webp" alt="Orbital shipyard hangar, original" width="100%"></a><br><sub>Original, 1024x576</sub></td>
+<td align="center"><a href="samples/orbital-shipyard-hangar.webp"><img src="samples/orbital-shipyard-hangar.webp" alt="Orbital shipyard hangar, original" width="100%"></a><br><sub>v1.6.0, Original, 1024x576</sub></td>
 <td align="center"><a href="samples/orbital-shipyard-hangar-4k.webp"><img src="samples/orbital-shipyard-hangar-4k-preview.jpg" alt="Orbital shipyard hangar, 4x Tile Upscale (VL)" width="100%"></a><br><sub>4x, denoise 0.5, 6 tiles, 4096x2304</sub></td>
 <td align="center"><a href="samples/orbital-shipyard-hangar-8k.webp"><img src="samples/orbital-shipyard-hangar-8k-preview.jpg" alt="Orbital shipyard hangar, 8K Tile Upscale (VL)" width="100%"></a><br><sub>then 2x, denoise 0.35, 30 tiles, 8192x4608</sub></td>
-</tr>
-<tr>
-<td colspan="3"><sub><b>Prompt:</b> Interior of a kilometers-long orbital shipyard hangar, a massive capital starship under construction surrounded by scaffold gantries, crane arms, welding sparks, and swarms of worker mechs, cargo trams and crew walkways at every level, the hangar ceiling dense with lights, pipes, and docking cranes, hull plating covered in panel lines and markings, everything in sharp focus</sub></td>
 </tr>
 </table>
 

@@ -99,10 +99,10 @@ SETTLED_RICH_INSTRUCTION = (
     "and lighting. Then say what fills the left, the centre, the right, the top and the "
     "bottom, giving each part its own description with what is there, its colour and what "
     "its surface is made of.")
-SETTLED_RICH_MAX_TOKENS = 768
 
 # The rich prompt WITH the grouping clause, what every caption surface shipped until the
-# prompts moved into the settings file, and what the (standard) preset there now carries.
+# prompts moved into the settings file, and what the (standard) preset in
+# settings.user.example.toml carries.
 # The owner's explicit decision, taken against the contrary lab measurement. On the record
 # both ways: the owner judged 1-face/17_CaptionOnly+Group_Lead_s42_v3
 # "better across the board" against 14_CaptionOnly_Lead_s42_v3 (ungrouped, which drew a
