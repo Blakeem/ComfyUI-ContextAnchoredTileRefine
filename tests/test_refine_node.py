@@ -1,10 +1,13 @@
 import inspect
+import sys
 
 import pytest
 import torch
+from logit_classifier import UnsupportedModelError
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
+from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
-from context_anchored_tile_refine import sampling
+from context_anchored_tile_refine import captions, sampling
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
     ContextAnchoredTileRefineVL,
@@ -35,22 +38,22 @@ def test_no_vl_selects_on_the_base_node():
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     parameters = inspect.signature(ContextAnchoredTileRefine.refine).parameters
-    for widget in ("anchor_source", "vlm_method"):
+    for widget in ("anchor_source", "vlm_method", "prompt"):
         assert widget not in all_inputs, widget
         assert widget not in parameters, widget
 
 
 @pytest.mark.parametrize("choice", ["source image", "live canvas"])
 @pytest.mark.parametrize("method", ["vision tokens", "vision tokens and captions", "captions"])
-def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
+def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method, caption_settings):
     # The VL refine node's own refine() is driven nowhere else in the suite, so a parameter
     # renamed on one side of the ComfyUI keyword call would only fail in a real workflow.
     recorded = {}
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None, preset=None):
         recorded.update(context_anchor=context_anchor, vl_clip=vl_clip,
                         anchor_source=anchor_source, vlm_method=vlm_method,
-                        progress=type(progress).__name__)
+                        progress=type(progress).__name__, preset=preset)
         return image
 
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
@@ -70,16 +73,99 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method):
         anchor_source=choice,
         vlm_method=method,
         clip=clip,
+        prompt="a fox in the centre",
         mask=None,
     )
 
     assert isinstance(result, tuple) and len(result) == 1
     # The ledger is created HERE and handed down: without the last entry the whole progress
-    # feature would be written but unreachable from this node.
+    # feature would be written but unreachable from this node. The preset is resolved HERE
+    # too, with the prompt written into it, so the engine's pre-pass asks the filled question.
+    expected_preset = captions.with_prompt(captions.resolve_method(method), "a fox in the centre")
     assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
-                        "vlm_method": method, "progress": "Ledger"}
+                        "vlm_method": method, "progress": "Ledger", "preset": expected_preset}
+    if method != "vision tokens":
+        assert "a fox in the centre" in expected_preset.tile_instruction
     # ... and it is the run's ONE bar: nothing else in this call constructs another.
     assert len(comfy_stubs["progress_bars"]) == 1
+
+
+def test_vl_node_refuses_a_blank_prompt_before_the_engine_runs(comfy_stubs, monkeypatch, caption_settings):
+    # The default preset asks for {PROMPT}. A blank prompt against it is named here, before
+    # refine_image and so before any VAE or VL encode spends GPU time.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run with a blank prompt")
+
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+
+    # No prompt keyword at all is what ComfyUI passes for an unconnected optional socket.
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
+        ContextAnchoredTileRefineVL().refine(
+            image=torch.rand(1, 96, 104, 3), guider=FakeGuider(), sampler=object(),
+            sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
+            max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
+            anchor_source="source image", vlm_method="captions", clip=object())
+
+
+def _refine_vl(clip, prompt="a fox in the centre", vlm_method="vision tokens and captions"):
+    return ContextAnchoredTileRefineVL().refine(
+        image=torch.rand(1, 96, 104, 3), guider=FakeGuider(), sampler=object(),
+        sigmas=torch.linspace(1.0, 0.0, 5), vae=FakeVAE(), noise=FakeNoise(),
+        max_tile_width=1024, max_tile_height=1024, context_anchor=64, context_overlap=8,
+        anchor_source="source image", vlm_method=vlm_method, clip=clip, prompt=prompt)
+
+
+@pytest.mark.parametrize("prompt", ["a fox in the centre", None])
+def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs, monkeypatch, prompt):
+    # The shipped default is the tags preset. The prompt is optional there: it rides on the
+    # preset to the engine's tags pass, and an unconnected socket stores "".
+    recorded = {}
+
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, *args, preset=None, **kwargs):
+        recorded["preset"] = preset
+        return image
+
+    monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+    open_toolkit(monkeypatch, FakeClassifier())
+
+    _refine_vl(FakeTagClip(), prompt=prompt)
+
+    assert recorded["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["preset"].prompt == ("" if prompt is None else prompt)
+
+
+@pytest.mark.parametrize(("clip", "missing", "error", "message"), [
+    (object(), False, UnsupportedModelError,
+     r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+])
+def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
+                                                                             clip, missing, error, message):
+    # A CLIP that is not a Qwen3-VL text encoder or a missing library is named here, before
+    # refine_image and so before any VAE or VL encode spends GPU time.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run when the tags preset cannot")
+
+    if missing:
+        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+
+    with pytest.raises(error, match=message):
+        _refine_vl(clip)
+
+
+def test_vl_node_names_the_missing_library_for_a_caption_preset_before_the_engine_runs(
+        comfy_stubs, monkeypatch, caption_settings):
+    # The progress ledger routes core's bars and writes the status line through the library,
+    # so every VL run needs it and a caption preset fails before any GPU time too.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run without the library")
+
+    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+
+    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.4\.0"'):
+        _refine_vl(object())
 
 
 def test_connected_mask_refines(comfy_stubs):

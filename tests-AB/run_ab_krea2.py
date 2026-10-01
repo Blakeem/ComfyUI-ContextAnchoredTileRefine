@@ -68,7 +68,7 @@ UPSCALE_SNAPSHOT = Path(r"C:\Users\Blake\Documents\ComfyUI\input\AB-refine-input
 KREA2_ROOT = Path(r"C:\Users\Blake\ComfyUI-Installs\ComfyUI\ComfyUI")
 
 UNET_NAME = "krea2Center_v408bitFp8Int8.safetensors"   # node 283
-CLIP_NAME = "qwen3-vl-4b-heretic_int8.safetensors"     # node 294
+CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"        # node 294 loaded qwen3-vl-4b-heretic_int8
 CLIP_TYPE = "krea2"                                    # node 294
 VAE_NAME = "krea2RealVae_v10.safetensors"              # node 295
 UPSCALE_MODEL_NAME = "4xFaceUpDAT.safetensors"         # node 325
@@ -382,10 +382,10 @@ def build_slice_caption_conds(clip, padded, tiles, captions):
     """Arm 4 (AB32): the caption tokens ride INSIDE the whole-canvas vision encode
     (one encode per distinct caption), and each tile keeps its slice rows plus the
     caption + template tail. Reuses the production vl helpers so the slice math is
-    the shipped code's; the seq fail-fast mirrors vl._encode_canvas."""
+    the shipped code's; the seq fail-fast mirrors vl._encode_one."""
     from context_anchored_tile_refine import vl
 
-    copy, enc_h, enc_w = vl.resample_for_global(padded)
+    copy, enc_h, enc_w = vl.resample_picture(padded, 768 * 1024)
     grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
     n_rows = grid_h * grid_w
     canvas_h, canvas_w = int(padded.shape[1]), int(padded.shape[2])
@@ -640,6 +640,7 @@ def contact_sheet(arms):
 # ------------------------------------------------------------------ main
 
 def main(argv=None):
+    global CLIP_NAME
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--only", action="append", default=[], metavar="ARM",
                         help="render only these arms (repeatable)")
@@ -647,7 +648,10 @@ def main(argv=None):
     parser.add_argument("--force-upscale", action="store_true", help="rebuild the cached upscale")
     parser.add_argument("--force-captions", action="store_true", help="regenerate the cached captions")
     parser.add_argument("--list", action="store_true", help="show the arms and exit")
+    parser.add_argument("--clip", default=CLIP_NAME, help="the text encoder file in models/text_encoders")
     args = parser.parse_args(argv)
+
+    CLIP_NAME = args.clip
 
     unknown = set(args.only) - set(ARMS)
     if unknown:

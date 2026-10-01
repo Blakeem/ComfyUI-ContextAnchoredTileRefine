@@ -4,60 +4,130 @@
 # Copy this file to settings.user.toml and edit the copy. The nodes read settings.user.toml
 # whenever it exists and ignore this file. A node update replaces settings.toml, so an edit
 # made here is lost. Nothing ever writes settings.user.toml, so your own copy survives.
+# A mistake in this file is a hard error that names the file and the problem, and a VL run
+# stops on it. If ComfyUI starts with the mistake, the VL nodes and the Tile Test: Settings,
+# Captions and Render nodes are missing from the menu until it is fixed, and ComfyUI prints
+# the reason to its console.
+#
+# VISION
+# The [vision] table sets how each tile's conditioning samples the image. It applies to every
+# vlm_method option and is read on every run, so an edit applies on the next queued run.
+# canvas_tokens       Vision tokens each tile takes from one encode of the entire image, as
+#                     its own slice of that encode. The image is sampled at the size where a
+#                     tile's share of it holds about this many tokens, so the sample grows
+#                     with the tile count, up to a cap of 2 megapixels. Past the cap each tile
+#                     gets fewer. These tokens carry the tile's scale and its place in the
+#                     image. Range 0 to 1953. Use 0 to turn them off.
+# crop_tokens         Vision tokens from an encode of the tile's own crop, sampled at
+#                     crop_tokens x 1024 pixels whatever the image size. These tokens hold the
+#                     tile to what it contains, so an empty tile does not grow a copy of an
+#                     object from elsewhere in the image. Too many redraw the tile's own
+#                     subject. Range 0 to 1953. Use 0 to turn them off. At least one of the
+#                     two must be above 0.
+# caption_megapixels  How much of the tile the VL model reads when it writes a tile caption,
+#                     and how much of the entire image it reads for a style caption. Range
+#                     0.01 to 2.0. Use 0 for the picture's own size, capped at 2.0. A larger input
+#                     makes the caption more literal and a smaller one drops detail. The
+#                     default was settled by A/B on three scenes. A tags preset reads it for
+#                     the style caption only, since its tags questions read a fixed copy of
+#                     about 1 megapixel.
+#
+# TOKENS AND MEGAPIXELS
+# One vision token covers 32 x 32 pixels of the picture the encoder reads, so the count is
+# linear in the pixels and a picture of N megapixels gives about N x 977 tokens. The snap to
+# whole 32 pixel cells moves a count by a few percent.
+#   0.1 megapixels   about 98 tokens
+#   1 megapixel      about 977 tokens
+#   2 megapixels     about 1953 tokens, the cap
+# The defaults below were settled on an 8K image with 24 tiles. crop_tokens 165 samples each
+# crop at about 0.17 megapixels, and canvas_tokens 165 samples the image at the 2 megapixel
+# cap. The tiles received about 165 crop tokens and 132 to 195 canvas tokens each.
 #
 # PRESETS
 # Each [presets.<label>] block adds two options to the vlm_method selector on both VL nodes.
-# The FIRST block is the default preset. Its two options carry no label and read "vision
-# tokens and captions" and "captions". Every later block labels its own two options, "vision
-# tokens and captions (<label>)" and "captions (<label>)". The selector follows the order of
-# the blocks below, so a preset's two options sit together.
+# The FIRST block is the default preset, and its two options carry no label: "vision tokens
+# and captions" and "captions". Every other block adds "vision tokens and captions (<label>)"
+# and "captions (<label>)". The selector follows the order of the blocks below, so a preset's
+# two options sit together. settings.user.example.toml carries more presets than this file
+# ships.
 # Move a block to the top to make it the default. Add, rename or remove a block to change
 # what the selector offers.
-# The selector is built when ComfyUI starts, so a new or renamed preset needs a restart.
+# The selector is built when ComfyUI starts, so adding, removing, renaming or moving a block
+# needs a restart.
 # Editing a preset's own wording or numbers applies on the next queued run.
-# A mistake in this file is a hard error that names the file and the problem. It hides both
-# VL nodes from the menu until it is fixed, and ComfyUI prints the reason to its console.
+#
+# TILE TEXT
+# tile_text sets what each tile's text is written from. "caption" asks the VL model one
+# question about the tile and uses its answer. "tags" lists the things in the tile and keeps
+# the ones the VL model confirms. A block without tile_text is "caption".
+# settings.user.example.toml carries the caption presets.
 #
 # KEYS PER PRESET
-# tile_caption_instruction   What the VL model is asked about each tile's own crop. The
-#                            answer becomes that tile's conditioning text.
-# tile_caption_max_tokens    Generation budget for that answer. Default 768, max 4096. The
-#                            budget also covers the model's hidden reasoning turn, so it
-#                            sits far above the visible answer length.
-# tile_caption_megapixels    How much of the tile the VL model reads. Default 0.147456,
-#                            which is 384 x 384 pixels. Range 0.01 to 2.0. Use 0 for the
-#                            tile's own size, capped at 2.0. A larger budget reads finer
-#                            detail and makes every caption slower.
-# global_style_instruction   What the VL model is asked about the whole image, once per
+# tile_caption_instruction   In a caption preset, what the VL model is asked about each
+#                            tile's own crop. The answer becomes that tile's conditioning
+#                            text.
+# tile_caption_max_tokens    In a caption preset, the generation budget for that answer.
+#                            Range 1 to 4096, and the shipped presets use 768. The budget
+#                            also covers the model's hidden reasoning turn, so it sits far
+#                            above the visible answer length. The answer stops at this many
+#                            tokens at most, and the VL model sets the length below that.
+# global_style_instruction   What the VL model is asked about the entire image, once per
 #                            picture. The answer is placed on top of every tile caption so
 #                            that all tiles follow one style description. Use "" to skip it.
 # global_style_max_tokens    Generation budget for the style answer. Same rules as
 #                            tile_caption_max_tokens.
-# global_style_megapixels    How much of the whole image the VL model reads for the style
-#                            answer. Same rules as tile_caption_megapixels.
+# tile_tags_instruction      In a tags preset, the question that asks the VL model to list
+#                            the things in a tile.
+# prompt_tags_instruction    In a tags preset, the question that asks the VL model to list
+#                            the things the prompt names. It must hold {PROMPT}. It is asked
+#                            once per picture when the prompt input is not empty. Every tile
+#                            checks the listed things with the verification statement.
+# tile_tags_verification_statement
+#                            In a tags preset, the statement scored true or false for each
+#                            candidate tag. It must hold {TAG}.
+# tile_tags_verification_threshold
+#                            In a tags preset, the score the verification statement must reach
+#                            on the entire tile to keep a tag the tile's own list names. Above
+#                            0 and at most 1.
+# prompt_tags_verification_threshold
+#                            In a tags preset, the score the verification statement must reach
+#                            on the entire tile to keep a thing from the prompt that the tile's
+#                            own list lacks. Above 0 and at most 1.
+# tile_tags_position_threshold
+#                            In a tags preset, the score the verification statement must reach
+#                            on one of six strips of the tile, three rows and three columns,
+#                            for that strip to hold the tag. A tag no strip holds is dropped.
+#                            On an axis where exactly one strip holds the tag, that strip names
+#                            its position, such as top-left. A center column adds no word
+#                            beside a row word. Range 0 to 1.
+#
+# THE IMAGE'S PROMPT
+# An instruction may hold {PROMPT}. The VL nodes and the Tile Test: Captions node write their
+# prompt input in its place before the VL model reads the instruction, so the caption can
+# follow the prompt the image was made from. The prompt reaches the VL model only. The
+# diffusion model still reads the caption and never the prompt. A preset without {PROMPT}
+# ignores the prompt input. In a tags preset only prompt_tags_instruction and
+# global_style_instruction may hold it. A tags preset skips prompt_tags_instruction when the
+# prompt input is empty. Any other instruction that holds {PROMPT} stops the run when the
+# prompt input is empty.
 #
 # PROMPT RULES
 # A prompt needs its own stop condition, such as a length word (succinct), a count ceiling,
 # or a fixed region list. Without one the answer runs to max_tokens.
 
-# The default preset, since it is the first block. It asks what every caption option asked
-# before the presets existed and it writes no style caption, so a workflow saved then keeps
-# its own value and its own result. EU spelling is deliberate, since it measured better than
-# US spelling in A/B testing.
-[presets.standard]
-tile_caption_instruction = "Describe this image, one short line per part. Start with the overall style, palette and lighting. Then say what fills the left, the centre, the right, the top and the bottom, giving each part its own description with what is there, its colour and what its surface is made of. Name whole objects and count repeated objects as one entry."
-tile_caption_max_tokens = 768
-tile_caption_megapixels = 0.147456
-global_style_instruction = ""
-global_style_max_tokens = 768
-global_style_megapixels = 0.147456
+[vision]
+canvas_tokens = 165
+crop_tokens = 165
+caption_megapixels = 0.786432
 
-# The tile prompt holds placement and demographics, and the style prompt carries one medium
-# to every tile. It tends to read an image as a painting or an illustration.
-[presets.artwork]
-tile_caption_instruction = "succinct prose containing relative and absolute positions of specific things with object and character identifying demographics."
-tile_caption_max_tokens = 768
-tile_caption_megapixels = 0.147456
-global_style_instruction = "succinct flowing prose of only the overall style and artistic medium and physical medium. No objects or items in the scene."
+# The default preset. Each tile's text is the tags the VL model lists and then confirms.
+[presets.tags]
+tile_text = "tags"
+tile_tags_instruction = "Tag this image. List every distinct visible thing in it: objects, people, animals, clothing, materials, and the setting. Use short lowercase noun phrases separated by commas. List each thing once. Do not list moods, styles, or ideas. Output only the tags."
+prompt_tags_instruction = "This is a prompt for an image:\n{PROMPT}\n\nList the physical things the prompt names that could be pointed at in the image: objects, people, animals, plants, clothing, materials, buildings and parts of the scene. Use short lowercase noun phrases of one to four words, separated by commas. Keep each thing's own descriptive words, such as its color. Leave out places and settings, actions, sizes, moods, the image's style, medium, quality, camera and lighting, artist names and position words. List each thing once. Output only the list."
+tile_tags_verification_statement = "This image visibly contains {TAG}"
+tile_tags_verification_threshold = 0.99998
+prompt_tags_verification_threshold = 0.99998
+tile_tags_position_threshold = 0.9
+global_style_instruction = "Concise prose containing only the style of media used and the general style within that type of media."
 global_style_max_tokens = 768
-global_style_megapixels = 0.147456

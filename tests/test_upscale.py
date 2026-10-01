@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from context_anchored_tile_refine import progress, upscale
+from context_anchored_tile_refine import grid, progress, upscale
 
 
 def _oom():
@@ -180,6 +180,27 @@ def test_non_oom_error_is_not_retried(comfy_stubs):
     assert len(comfy_stubs["tiled_scale_calls"]) == 1
 
 
+class RgbOnlyUpscaleModel(FakeUpscaleModel):
+    """A spandrel model's first conv: it rejects any input that is not 3 channels."""
+
+    def __call__(self, samples):
+        if samples.shape[1] != 3:
+            raise RuntimeError(f"expected input to have 3 channels, but got {samples.shape[1]}")
+        return super().__call__(samples)
+
+
+def test_an_rgba_image_upscales_its_rgb_through_the_model_and_its_alpha_bilinear(comfy_stubs):
+    # Core's ImageUpscaleWithModel splits the alpha off, so a 4-channel IMAGE must not reach
+    # the model's first conv.
+    image = torch.rand(1, 64, 48, 4)
+    model = RgbOnlyUpscaleModel(scale=2, patcher=FakePatcher())
+
+    out = upscale._upscale_with_model(model, image)
+
+    assert out.shape == (1, 128, 96, 4)
+    assert comfy_stubs["common_upscale_calls"] == [((1, 1, 64, 48), 96, 128, "bilinear", "disabled")]
+
+
 # --- the OOM tile-halving retry -----------------------------------------------------
 
 def test_oom_halves_the_tile_until_it_fits(comfy_stubs):
@@ -302,6 +323,100 @@ def test_noise_passes_batch_index_through(comfy_stubs):
     upscale.Noise_RandomNoise(99).generate_noise({"samples": samples, "batch_index": [1, 0]})
 
     assert comfy_stubs["prepare_noise_calls"] == [(samples, 99, [1, 0])]
+
+
+# --- SlicedCanvasNoise ---------------------------------------------------------------
+
+# A non-square canvas and a non-square rect inside it, so a swapped axis cannot pass: 256x320
+# px is a 32x40 cell canvas, and the rect keeps cells y 4..16 by x 8..24.
+CANVAS_H, CANVAS_W = 256, 320
+BLOCK_RECT = grid.Rect(x0=64, y0=32, x1=192, y1=128)
+BLOCK_CELLS = (4, 16, 8, 24)
+
+
+class FakeVAE:
+    """The two attributes sampling.build_canvas_noise reads off a VAE: the latent channel count,
+    and latent_dim 3 for a video-family VAE, which encodes an image batch to a 5-D latent."""
+
+    def __init__(self, latent_dim=2, latent_channels=4):
+        self.latent_dim = latent_dim
+        self.latent_channels = latent_channels
+
+
+def _positional_prepare_noise(monkeypatch):
+    # The pure suite's stub draws ZEROS, and zeros against zeros cannot catch a swapped axis
+    # or a missing // 8. arange gives every latent cell a value that names its position.
+    import comfy.sample
+
+    def prepare_noise(latent_image, seed, batch_inds=None):
+        return torch.arange(latent_image.numel(), dtype=torch.float32).reshape(latent_image.shape)
+
+    monkeypatch.setattr(comfy.sample, "prepare_noise", prepare_noise)
+
+
+@pytest.mark.parametrize(("latent_dim", "time_dims"), [(2, ()), (3, (1,))])
+def test_sliced_canvas_noise_keeps_the_full_draws_own_window(comfy_stubs, monkeypatch, latent_dim, time_dims):
+    _positional_prepare_noise(monkeypatch)
+
+    noise = upscale.SlicedCanvasNoise(FakeVAE(latent_dim=latent_dim), 7, CANVAS_H, CANVAS_W, BLOCK_RECT)
+
+    full_shape = (1, 4, *time_dims, CANVAS_H // 8, CANVAS_W // 8)
+    full = torch.arange(4 * (CANVAS_H // 8) * (CANVAS_W // 8), dtype=torch.float32).reshape(full_shape)
+    y0, y1, x0, x1 = BLOCK_CELLS
+    assert noise.seed == 7
+    assert noise.canvas_shape == full_shape
+    assert noise.cell_origin == (y0, x0)
+    assert torch.equal(noise.slice, full[..., y0:y1, x0:x1])
+
+
+def test_sliced_canvas_noise_hands_out_a_fresh_copy_of_the_slice(comfy_stubs, monkeypatch):
+    _positional_prepare_noise(monkeypatch)
+    noise = upscale.SlicedCanvasNoise(FakeVAE(), 7, CANVAS_H, CANVAS_W, BLOCK_RECT)
+    latent = {"samples": torch.zeros(1, 4, 12, 16)}
+
+    first = noise.generate_noise(latent)
+    second = noise.generate_noise(latent)
+
+    assert torch.equal(first, second)
+    assert first is not second
+    assert first is not noise.slice
+
+
+def test_sliced_canvas_noise_rejects_a_latent_the_slice_does_not_fit(comfy_stubs, monkeypatch):
+    _positional_prepare_noise(monkeypatch)
+    noise = upscale.SlicedCanvasNoise(FakeVAE(), 7, CANVAS_H, CANVAS_W, BLOCK_RECT)
+
+    with pytest.raises(RuntimeError, match="does not match the latent") as raised:
+        noise.generate_noise({"samples": torch.zeros(1, 4, 16, 12)})
+
+    assert "(1, 4, 12, 16)" in str(raised.value)
+    assert "(1, 4, 16, 12)" in str(raised.value)
+
+
+@pytest.mark.comfy
+def test_sliced_canvas_noise_fields_read_the_full_canvas_at_the_blocks_origin(comfy_env, monkeypatch):
+    # The block's SDE field: drawn at the FULL canvas shape and read at the block's origin, so
+    # every injection is the one the entire canvas run would have made there.
+    import comfy.k_diffusion.sampling
+    import comfy.samplers
+
+    from context_anchored_tile_refine import stepper
+
+    _positional_prepare_noise(monkeypatch)
+    sigmas = torch.tensor([0.8, 0.5, 0.25, 0.0])
+    noise = upscale.SlicedCanvasNoise(FakeVAE(), 7, CANVAS_H, CANVAS_W, BLOCK_RECT)
+    deterministic = comfy.samplers.KSAMPLER(comfy.k_diffusion.sampling.sample_dpmpp_2m, {}, {})
+    stochastic = comfy.samplers.KSAMPLER(comfy.k_diffusion.sampling.sample_dpmpp_2m_sde, {}, {})
+
+    assert noise.noise_fields(deterministic, sigmas) is None
+
+    fields = noise.noise_fields(stochastic, sigmas)
+    reference = stepper.build_noise_fields(stochastic, noise.canvas_shape, noise.seed, sigmas)
+    y0, y1, x0, x1 = BLOCK_CELLS
+    block = fields.for_window((0, y1 - y0, 0, x1 - x0))(sigmas[0], sigmas[1])
+
+    assert torch.equal(block, reference.for_window(BLOCK_CELLS)(sigmas[0], sigmas[1]))
+    assert not torch.equal(block, reference.for_window((0, y1 - y0, 0, x1 - x0))(sigmas[0], sigmas[1]))
 
 
 # --- build_guider / encode_empty -----------------------------------------------------

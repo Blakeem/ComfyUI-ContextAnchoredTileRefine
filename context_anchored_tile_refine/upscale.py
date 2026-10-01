@@ -48,17 +48,21 @@ def _lanczos_resize(image, width, height):
 
 
 def _upscale_with_model(upscale_model, image, progress=None):
-    # comfy_extras/nodes_upscale_model.py ImageUpscaleWithModel.execute, with model
-    # residency made version-defensive: pyproject only requires ComfyUI >= 0.3.45, and the
-    # UPSCALE_MODEL object gained its `.patcher` after that floor. WITH a patcher the model
-    # is a managed model and load_models_gpu owns residency and eviction. WITHOUT one (the
-    # older loader) the pre-patcher contract applies: reserve the memory by hand, move the
-    # module onto the device, and move it back off in `finally` so a raise cannot strand it
-    # on the GPU.
+    # comfy_extras/nodes_upscale_model.py ImageUpscaleWithModel.execute, alpha split included
+    # (the model takes RGB only), with model residency made version-defensive: pyproject only
+    # requires ComfyUI >= 0.3.45, and the UPSCALE_MODEL object gained its `.patcher` after that
+    # floor. WITH a patcher the model is a managed model and load_models_gpu owns residency
+    # and eviction. WITHOUT one (the older loader) the pre-patcher contract applies: reserve
+    # the memory by hand, move the module onto the device, and move it back off in `finally`
+    # so a raise cannot strand it on the GPU.
     import comfy.model_management
     import comfy.utils
 
     patcher = getattr(upscale_model, "patcher", None)
+    alpha = None
+    if image.shape[-1] == 4:
+        alpha = image[..., 3:4]
+        image = image[..., :3]
     # Core's estimate verbatim; the 384.0 is core's own guess at the per-pixel working set.
     memory_required = (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0
     memory_required += image.nelement() * image.element_size()
@@ -110,7 +114,11 @@ def _upscale_with_model(upscale_model, image, progress=None):
     finally:
         if patcher is None:
             upscale_model.to("cpu")
-    return torch.clamp(upscaled.movedim(-3, -1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
+    result = torch.clamp(upscaled.movedim(-3, -1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
+    if alpha is not None:
+        alpha = comfy.utils.common_upscale(alpha.movedim(-1, -3).to(result), result.shape[2], result.shape[1], "bilinear", "disabled")
+        result = torch.cat((result, alpha.movedim(-3, -1)), dim=-1)
+    return result
 
 
 def prepare_upscaled(image, upscale_model, upscale_by, progress=None):
@@ -148,6 +156,51 @@ class Noise_RandomNoise:
         latent_image = input_latent["samples"]
         batch_inds = input_latent.get("batch_index", None)
         return comfy.sample.prepare_noise(latent_image, self.seed, batch_inds)
+
+
+class SlicedCanvasNoise:
+    """The NOISE a run over ONE BLOCK of a larger canvas needs: the full canvas' single draw
+    at `seed`, sliced to `rect`.
+
+    A block that draws at its own shape starts every lane from cells the full run never gave
+    it, which makes the block a different render rather than a reproduction of the run it
+    stands in for. `rect` is in canvas px on the /8 latent grid the tile solver already
+    lands on.
+    """
+
+    def __init__(self, vae, seed, canvas_h, canvas_w, rect):
+        # The engines' own canvas draw, so the draw is the one the engine itself would have
+        # made.
+        from . import sampling
+
+        self.seed = seed
+        full = sampling.build_canvas_noise(vae, Noise_RandomNoise(seed), canvas_h, canvas_w)
+        self.canvas_shape = tuple(full.shape)
+        self.cell_origin = (rect.y0 // 8, rect.x0 // 8)
+        # .contiguous() because downstream sampler code may .view() the slice.
+        self.slice = full[..., rect.y0 // 8:rect.y1 // 8, rect.x0 // 8:rect.x1 // 8].contiguous()
+
+    def generate_noise(self, input_latent):
+        expected = tuple(input_latent["samples"].shape)
+        if tuple(self.slice.shape) != expected:
+            raise RuntimeError(
+                f"Context-Anchored Tile Refine: the canvas noise slice {tuple(self.slice.shape)} "
+                f"does not match the latent it is drawn for {expected}.")
+        # A clone, never the slice itself: comfy binds the noise it is handed as model_k.noise
+        # and the sync engine's live-canvas ring zeroes cells of it in place.
+        return self.slice.clone()
+
+    def noise_fields(self, sampler, sigmas):
+        # The stochastic sampler's per-step field, sized by the FULL canvas and read at this
+        # block's origin, so every injection is the one the entire canvas run would have made.
+        # A one tile block therefore draws a canvas-sized CPU field per step (about 132 MB at
+        # the owner's 8K config, tens of milliseconds). Accepted: it buys draws identical to
+        # the full run's, and it stays far below one tile's sampling step on the GPU.
+        from . import stepper
+
+        return stepper.offset_noise_fields(
+            stepper.build_noise_fields(sampler, self.canvas_shape, self.seed, sigmas),
+            *self.cell_origin)
 
 
 def build_sigmas(model, scheduler, steps, denoise):

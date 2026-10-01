@@ -2,7 +2,7 @@
   "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
   "revision": 0,
   "last_node_id": 389,
-  "last_link_id": 1054,
+  "last_link_id": 1055,
   "nodes": [
     {
       "id": 291,
@@ -192,7 +192,7 @@
       "type": "PlaySound|pysssss",
       "pos": [
         2020,
-        880
+        860
       ],
       "size": [
         270,
@@ -314,7 +314,7 @@
       "id": 286,
       "type": "SaveImage",
       "pos": [
-        5000,
+        4960,
         430
       ],
       "size": [
@@ -358,7 +358,7 @@
       "type": "PlaySound|pysssss",
       "pos": [
         4940,
-        860
+        810
       ],
       "size": [
         240,
@@ -542,8 +542,6 @@
         "cnr_id": "comfy-core",
         "ver": "0.3.19"
       },
-      "widgets_values": [],
-      "widgets_values_named": {},
       "color": "#432",
       "bgcolor": "#653"
     },
@@ -621,11 +619,11 @@
         "Node name for S&R": "Krea2ControlLoRALoader"
       },
       "widgets_values": [
-        "chroma-flash-heun_r32-fp32.safetensors",
+        "grainscape_krea2.safetensors",
         1
       ],
       "widgets_values_named": {
-        "lora_name": "chroma-flash-heun_r32-fp32.safetensors",
+        "lora_name": "grainscape_krea2.safetensors",
         "strength": 1
       },
       "color": "#2a363b",
@@ -774,12 +772,12 @@
         "Node name for S&R": "CLIPLoader"
       },
       "widgets_values": [
-        "qwen3-vl-4b-heretic_int8.safetensors",
+        "qwen3vl_4b_fp8_scaled.safetensors",
         "krea2",
         "default"
       ],
       "widgets_values_named": {
-        "clip_name": "qwen3-vl-4b-heretic_int8.safetensors",
+        "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
         "type": "krea2",
         "device": "default"
       },
@@ -791,7 +789,7 @@
       "type": "RandomNoise",
       "pos": [
         4060,
-        650
+        720
       ],
       "size": [
         300,
@@ -829,7 +827,7 @@
       "type": "LiebsPicker",
       "pos": [
         1990,
-        1450
+        1410
       ],
       "size": [
         210,
@@ -997,8 +995,8 @@
       "id": 374,
       "type": "BasicScheduler",
       "pos": [
-        4080,
-        900
+        4070,
+        990
       ],
       "size": [
         260,
@@ -1300,8 +1298,8 @@
       "id": 378,
       "type": "MathExpression|pysssss",
       "pos": [
-        4210,
-        1080
+        4370,
+        1070
       ],
       "size": [
         400,
@@ -1361,8 +1359,8 @@
       "id": 379,
       "type": "MathExpression|pysssss",
       "pos": [
-        4210,
-        1150
+        4370,
+        1140
       ],
       "size": [
         400,
@@ -1422,8 +1420,8 @@
       "id": 380,
       "type": "ResizeImageMaskNode",
       "pos": [
-        4910,
-        1030
+        4920,
+        1020
       ],
       "size": [
         270,
@@ -1490,8 +1488,8 @@
       "id": 376,
       "type": "ImageUpscaleWithModel",
       "pos": [
-        4530,
-        1090
+        4640,
+        1080
       ],
       "size": [
         240,
@@ -1560,10 +1558,10 @@
         "Node name for S&R": "PrimitiveStringMultiline"
       },
       "widgets_values": [
-        "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
+        ""
       ],
       "widgets_values_named": {
-        "value": "blurry, jpeg compression, scribbles, AI generated, hredded cloth"
+        "value": ""
       },
       "color": "#322",
       "bgcolor": "#533"
@@ -1573,7 +1571,7 @@
       "type": "KSamplerSelect",
       "pos": [
         4060,
-        790
+        860
       ],
       "size": [
         310,
@@ -1609,11 +1607,11 @@
       "type": "ContextAnchoredTileRefineVL",
       "pos": [
         4040,
-        300
+        280
       ],
       "size": [
         330,
-        320
+        340
       ],
       "flags": {},
       "order": 35,
@@ -1659,6 +1657,12 @@
           "shape": 7,
           "type": "MASK",
           "link": null
+        },
+        {
+          "name": "prompt",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1055
         }
       ],
       "outputs": [
@@ -1734,8 +1738,8 @@
       "id": 338,
       "type": "PrimitiveNode",
       "pos": [
-        2400,
-        440
+        2410,
+        450
       ],
       "size": [
         210,
@@ -1794,7 +1798,8 @@
           "name": "STRING",
           "type": "STRING",
           "links": [
-            863
+            863,
+            1055
           ]
         }
       ],
@@ -2122,30 +2127,6 @@
       "NOISE"
     ],
     [
-      1031,
-      376,
-      0,
-      380,
-      0,
-      "IMAGE"
-    ],
-    [
-      1032,
-      378,
-      0,
-      380,
-      1,
-      "INT"
-    ],
-    [
-      1033,
-      379,
-      0,
-      380,
-      2,
-      "INT"
-    ],
-    [
       1042,
       306,
       0,
@@ -2224,6 +2205,38 @@
       374,
       0,
       "MODEL"
+    ],
+    [
+      1055,
+      344,
+      0,
+      371,
+      8,
+      "STRING"
+    ],
+    [
+      1031,
+      376,
+      0,
+      380,
+      0,
+      "IMAGE"
+    ],
+    [
+      1032,
+      378,
+      0,
+      380,
+      1,
+      "INT"
+    ],
+    [
+      1033,
+      379,
+      0,
+      380,
+      2,
+      "INT"
     ]
   ],
   "groups": [
@@ -2267,13 +2280,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9334480208135802,
+      "scale": 0.8485891098305283,
       "offset": [
-        -1938.2737925953668,
-        -25.797308837271228
+        -2710.635876353691,
+        296.0177306002152
       ]
     },
-    "frontendVersion": "1.49.6"
+    "frontendVersion": "1.53.6"
   },
   "version": 0.4
 }

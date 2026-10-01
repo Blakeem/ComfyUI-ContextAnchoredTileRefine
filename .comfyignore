@@ -6,3 +6,4 @@ conftest.py
 .github/
 .comfyignore
 samples/
+TESTS.md

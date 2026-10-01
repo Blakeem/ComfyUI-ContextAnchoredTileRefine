@@ -1,0 +1,1835 @@
+{
+  "id": "16cbd06a-2e07-40cc-aec8-30040207224f",
+  "revision": 0,
+  "last_node_id": 423,
+  "last_link_id": 1152,
+  "nodes": [
+    {
+      "id": 325,
+      "type": "UpscaleModelLoader",
+      "pos": [
+        2010,
+        740
+      ],
+      "size": [
+        320,
+        70
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "UPSCALE_MODEL",
+          "type": "UPSCALE_MODEL",
+          "slot_index": 0,
+          "links": [
+            1055
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UpscaleModelLoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "widgets_values": [
+        "4xFaceUpDAT.safetensors"
+      ],
+      "widgets_values_named": {
+        "model_name": "4xFaceUpDAT.safetensors"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 375,
+      "type": "SaveImage",
+      "pos": [
+        10450,
+        290
+      ],
+      "size": [
+        230,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1036
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "ComfyUI-2x"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "ComfyUI-2x"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 376,
+      "type": "PlaySound|pysssss",
+      "pos": [
+        10440,
+        910
+      ],
+      "size": [
+        240,
+        150
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "any",
+          "type": "*",
+          "link": 1037
+        }
+      ],
+      "outputs": [
+        {
+          "name": "*",
+          "shape": 6,
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PlaySound|pysssss"
+      },
+      "widgets_values": [
+        "on empty queue",
+        0.5,
+        "notify.mp3"
+      ],
+      "widgets_values_named": {
+        "mode": "on empty queue",
+        "volume": 0.5,
+        "file": "notify.mp3"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 373,
+      "type": "PreviewImage",
+      "pos": [
+        9660,
+        290
+      ],
+      "size": [
+        760,
+        850
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1071
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            1036,
+            1037
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.19"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 283,
+      "type": "UNETLoader",
+      "pos": [
+        1990,
+        300
+      ],
+      "size": [
+        360,
+        90
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1149
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "krea2Center_v408bitFp8Int8.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "krea2Center_v408bitFp8Int8.safetensors",
+        "weight_dtype": "default"
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 295,
+      "type": "VAELoader",
+      "pos": [
+        2010,
+        610
+      ],
+      "size": [
+        320,
+        70
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            1063
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        "krea2RealVae_v10.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "krea2RealVae_v10.safetensors"
+      },
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 294,
+      "type": "CLIPLoader",
+      "pos": [
+        1990,
+        440
+      ],
+      "size": [
+        360,
+        120
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            864,
+            1067,
+            1124
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3vl_4b_fp8_scaled.safetensors",
+        "krea2",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+        "type": "krea2",
+        "device": "default"
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 382,
+      "type": "ContextAnchoredTileTestLayout",
+      "pos": [
+        3000,
+        890
+      ],
+      "size": [
+        270,
+        200
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1053
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "links": [
+            1054,
+            1066,
+            1123
+          ]
+        },
+        {
+          "name": "overlay",
+          "type": "IMAGE",
+          "links": [
+            1069
+          ]
+        },
+        {
+          "name": "tile_count",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestLayout"
+      },
+      "widgets_values": [
+        2,
+        2048,
+        1728,
+        128,
+        256
+      ],
+      "widgets_values_named": {
+        "upscale_by": 2,
+        "max_tile_width": 2048,
+        "max_tile_height": 1728,
+        "context_anchor": 128,
+        "context_overlap": 256
+      }
+    },
+    {
+      "id": 383,
+      "type": "ContextAnchoredTileTestUpscale",
+      "pos": [
+        4850,
+        680
+      ],
+      "size": [
+        240,
+        90
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1073
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1054
+        },
+        {
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": 1055
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1081,
+            1122
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestUpscale"
+      }
+    },
+    {
+      "id": 390,
+      "type": "PreviewAny",
+      "pos": [
+        8470,
+        290
+      ],
+      "size": [
+        790,
+        850
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1136
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Captions",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 391,
+      "type": "LiebsPicker",
+      "pos": [
+        9320,
+        890
+      ],
+      "size": [
+        270,
+        90
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1081
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGES",
+          "type": "IMAGE",
+          "links": [
+            1082
+          ]
+        },
+        {
+          "name": "IMAGES",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LiebsPicker"
+      },
+      "widgets_values": [
+        "none",
+        null,
+        null
+      ],
+      "widgets_values_named": {
+        "selected": "none",
+        "picker_tab_id": null,
+        "title": null
+      }
+    },
+    {
+      "id": 385,
+      "type": "ContextAnchoredTileTestRender",
+      "pos": [
+        9310,
+        300
+      ],
+      "size": [
+        310,
+        530
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1082
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1066
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1150
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1067
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1063
+        },
+        {
+          "name": "captions",
+          "shape": 7,
+          "type": "CATR_CAPTIONS",
+          "link": 1135
+        },
+        {
+          "name": "negative",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 1064
+        },
+        {
+          "name": "canvas_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "canvas_tokens"
+          },
+          "link": 1118
+        },
+        {
+          "name": "crop_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "crop_tokens"
+          },
+          "link": 1119
+        },
+        {
+          "name": "tiles",
+          "type": "STRING",
+          "widget": {
+            "name": "tiles"
+          },
+          "link": 1137
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tiles",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            1071
+          ]
+        },
+        {
+          "name": "blocks",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            1151
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestRender"
+      },
+      "widgets_values": [
+        42,
+        "fixed",
+        "dpmpp_2m_sde",
+        "sgm_uniform",
+        20,
+        2.5,
+        0.35,
+        "source image",
+        "vision tokens and captions",
+        20,
+        30,
+        "1",
+        true
+      ],
+      "widgets_values_named": {
+        "seed": 42,
+        "control_after_generate": "fixed",
+        "sampler_name": "dpmpp_2m_sde",
+        "scheduler": "sgm_uniform",
+        "steps": 20,
+        "cfg": 2.5,
+        "denoise": 0.35,
+        "anchor_source": "source image",
+        "surface": "vision tokens and captions",
+        "canvas_tokens": 20,
+        "crop_tokens": 30,
+        "tiles": "1",
+        "with_neighbors": true
+      }
+    },
+    {
+      "id": 394,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2400,
+        470
+      ],
+      "size": [
+        510,
+        160
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1125
+          ]
+        }
+      ],
+      "title": "Positive Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "value": ""
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 346,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        2400,
+        670
+      ],
+      "size": [
+        520,
+        160
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            865
+          ]
+        }
+      ],
+      "title": "Negative Prompt",
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
+      ],
+      "widgets_values_named": {
+        "value": "blurry, jpeg compression, scribbles, AI generated, shredded cloth"
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 381,
+      "type": "LoadImage",
+      "pos": [
+        2940,
+        310
+      ],
+      "size": [
+        370,
+        510
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1053,
+            1073
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "ComfyUI-2x_00886_.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "ComfyUI-2x_00886_.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 387,
+      "type": "PreviewImage",
+      "pos": [
+        3380,
+        290
+      ],
+      "size": [
+        1400,
+        820
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1069
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Preview Tile Layout",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 318,
+      "type": "CLIPTextEncode",
+      "pos": [
+        2500,
+        920
+      ],
+      "size": [
+        290,
+        110
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 864
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 865
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            1064
+          ]
+        }
+      ],
+      "title": "CLIP Text Encode (Negative Prompt)",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.75"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "text": ""
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 406,
+      "type": "MarkdownNote",
+      "pos": [
+        4810,
+        1550
+      ],
+      "size": [
+        780,
+        230
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note about Custom Input",
+      "properties": {},
+      "widgets_values": [
+        "### Tile Test: Settings\n\nThis node outputs every value of one preset. The presets come from `settings.user.toml` when it exists, or from `settings.toml` when it does not. The files are in `ComfyUI\\custom_nodes\\ComfyUI-ContextAnchoredTileRefine`.\n\n- Copy `settings.toml` to `settings.user.toml` to edit the presets. Your own copy survives a node update.\n- `settings.user.example.toml` holds more presets to copy from.\n- A new or renamed preset appears in the `preset` list after a ComfyUI restart. An edited wording applies on the next run.\n\n### Tile Test: Captions\n\nThis node takes each instruction as an input.\n\n- Wire each input from Tile Test: Settings, or from your own text node to test a wording without editing a file.\n- An input that is connected and holds text is on. Disconnect it to turn that step off.\n- Connect `tile_caption_instruction` or `tile_tags_instruction`, never both. This sets whether each tile gets a caption or tags.\n- The number widgets can be set by hand or wired from Tile Test: Settings."
+      ],
+      "widgets_values_named": {
+        "text": "### Tile Test: Settings\n\nThis node outputs every value of one preset. The presets come from `settings.user.toml` when it exists, or from `settings.toml` when it does not. The files are in `ComfyUI\\custom_nodes\\ComfyUI-ContextAnchoredTileRefine`.\n\n- Copy `settings.toml` to `settings.user.toml` to edit the presets. Your own copy survives a node update.\n- `settings.user.example.toml` holds more presets to copy from.\n- A new or renamed preset appears in the `preset` list after a ComfyUI restart. An edited wording applies on the next run.\n\n### Tile Test: Captions\n\nThis node takes each instruction as an input.\n\n- Wire each input from Tile Test: Settings, or from your own text node to test a wording without editing a file.\n- An input that is connected and holds text is on. Disconnect it to turn that step off.\n- Connect `tile_caption_instruction` or `tile_tags_instruction`, never both. This sets whether each tile gets a caption or tags.\n- The number widgets can be set by hand or wired from Tile Test: Settings."
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 407,
+      "type": "MarkdownNote",
+      "pos": [
+        1880,
+        890
+      ],
+      "size": [
+        590,
+        350
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note about this Workflow",
+      "properties": {},
+      "widgets_values": [
+        "## Tile Test Workflow\n\nThis workflow runs the same process as the VL upscale nodes, with each stage as its own node. Use it to find and fix a problem in one area of an image, or to run a full upscale.\n\n### Nodes\n\n1. **Tile Test: Layout** solves the tile grid and draws it over your image, with each tile's number, row and column.\n2. **Tile Test: Upscale** runs the upscale model. Skip it for an image that is already upscaled, with `upscale_by` at 1.0.\n3. **Tile Test: Settings** outputs the values of one preset from the settings file.\n4. **Tile Test: Captions** writes the text for each tile and shows each step the VL model took to write it.\n5. **Tile Test: Render** refines the tiles you name, or the entire image.\n\n### Fixing a problem area\n\n1. Find the tile number over the problem area in the Layout preview.\n2. Enter that number in `tiles` on the Captions node. Its `tiles` output passes the number to Render.\n3. Read the Captions outputs to see what the VL model wrote for that tile.\n4. Change a setting or a wording, then render the tile again to compare.\n\nTurn on `with_neighbors` on both nodes to render the tile together with its bordering tiles, which is closer to the full run. The seed is only on the Render node, so a new seed reuses the upscale and the captions from the cache.\n\n### Full upscale\n\nLeave `tiles` empty on the Captions node to caption every tile. Render then refines the entire image."
+      ],
+      "widgets_values_named": {
+        "text": "## Tile Test Workflow\n\nThis workflow runs the same process as the VL upscale nodes, with each stage as its own node. Use it to find and fix a problem in one area of an image, or to run a full upscale.\n\n### Nodes\n\n1. **Tile Test: Layout** solves the tile grid and draws it over your image, with each tile's number, row and column.\n2. **Tile Test: Upscale** runs the upscale model. Skip it for an image that is already upscaled, with `upscale_by` at 1.0.\n3. **Tile Test: Settings** outputs the values of one preset from the settings file.\n4. **Tile Test: Captions** writes the text for each tile and shows each step the VL model took to write it.\n5. **Tile Test: Render** refines the tiles you name, or the entire image.\n\n### Fixing a problem area\n\n1. Find the tile number over the problem area in the Layout preview.\n2. Enter that number in `tiles` on the Captions node. Its `tiles` output passes the number to Render.\n3. Read the Captions outputs to see what the VL model wrote for that tile.\n4. Change a setting or a wording, then render the tile again to compare.\n\nTurn on `with_neighbors` on both nodes to render the tile together with its bordering tiles, which is closer to the full run. The seed is only on the Render node, so a new seed reuses the upscale and the captions from the cache.\n\n### Full upscale\n\nLeave `tiles` empty on the Captions node to caption every tile. Render then refines the entire image."
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 415,
+      "type": "ContextAnchoredTileTestSettings",
+      "pos": [
+        4840,
+        290
+      ],
+      "size": [
+        290,
+        300
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "global_style_instruction",
+          "type": "STRING",
+          "links": [
+            1126
+          ]
+        },
+        {
+          "name": "global_style_max_tokens",
+          "type": "INT",
+          "links": [
+            1132
+          ]
+        },
+        {
+          "name": "tile_caption_instruction",
+          "type": "STRING",
+          "links": [
+            1127
+          ]
+        },
+        {
+          "name": "tile_caption_max_tokens",
+          "type": "INT",
+          "links": [
+            1131
+          ]
+        },
+        {
+          "name": "tile_tags_instruction",
+          "type": "STRING",
+          "links": [
+            1128
+          ]
+        },
+        {
+          "name": "prompt_tags_instruction",
+          "type": "STRING",
+          "links": [
+            1142
+          ]
+        },
+        {
+          "name": "tile_tags_verification_statement",
+          "type": "STRING",
+          "links": [
+            1129
+          ]
+        },
+        {
+          "name": "caption_megapixels",
+          "type": "FLOAT",
+          "links": [
+            1130
+          ]
+        },
+        {
+          "name": "canvas_tokens",
+          "type": "INT",
+          "links": [
+            1118
+          ]
+        },
+        {
+          "name": "crop_tokens",
+          "type": "INT",
+          "links": [
+            1119
+          ]
+        },
+        {
+          "name": "tile_tags_verification_threshold",
+          "type": "FLOAT",
+          "links": [
+            1133
+          ]
+        },
+        {
+          "name": "tile_tags_position_threshold",
+          "type": "FLOAT",
+          "links": [
+            1134
+          ]
+        },
+        {
+          "name": "prompt_tags_verification_threshold",
+          "type": "FLOAT",
+          "links": [
+            1152
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestSettings"
+      },
+      "widgets_values": [
+        "tags"
+      ],
+      "widgets_values_named": {
+        "preset": "tags"
+      }
+    },
+    {
+      "id": 416,
+      "type": "ContextAnchoredTileTestCaptions",
+      "pos": [
+        5200,
+        290
+      ],
+      "size": [
+        390,
+        550
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1122
+        },
+        {
+          "name": "layout",
+          "type": "CATR_LAYOUT",
+          "link": 1123
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1124
+        },
+        {
+          "name": "prompt",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1125
+        },
+        {
+          "name": "global_style_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1126
+        },
+        {
+          "name": "tile_caption_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1127
+        },
+        {
+          "name": "tile_tags_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1128
+        },
+        {
+          "name": "prompt_tags_instruction",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1142
+        },
+        {
+          "name": "tile_tags_verification_statement",
+          "shape": 7,
+          "type": "STRING",
+          "link": 1129
+        },
+        {
+          "name": "caption_megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "caption_megapixels"
+          },
+          "link": 1130
+        },
+        {
+          "name": "tile_caption_max_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "tile_caption_max_tokens"
+          },
+          "link": 1131
+        },
+        {
+          "name": "global_style_max_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "global_style_max_tokens"
+          },
+          "link": 1132
+        },
+        {
+          "name": "tile_tags_verification_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "tile_tags_verification_threshold"
+          },
+          "link": 1133
+        },
+        {
+          "name": "tile_tags_position_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "tile_tags_position_threshold"
+          },
+          "link": 1134
+        },
+        {
+          "name": "prompt_tags_verification_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "prompt_tags_verification_threshold"
+          },
+          "link": 1152
+        }
+      ],
+      "outputs": [
+        {
+          "name": "captions",
+          "type": "CATR_CAPTIONS",
+          "links": [
+            1135,
+            1136
+          ]
+        },
+        {
+          "name": "tile_texts",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "tiles",
+          "type": "STRING",
+          "links": [
+            1137
+          ]
+        },
+        {
+          "name": "prompt_tags",
+          "type": "STRING",
+          "links": [
+            1144
+          ]
+        },
+        {
+          "name": "tags_listed",
+          "type": "STRING",
+          "links": [
+            1145
+          ]
+        },
+        {
+          "name": "tags_verified",
+          "type": "STRING",
+          "links": [
+            1146
+          ]
+        },
+        {
+          "name": "tags_final",
+          "type": "STRING",
+          "links": [
+            1147
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ContextAnchoredTileTestCaptions"
+      },
+      "widgets_values": [
+        "17",
+        true,
+        true,
+        "",
+        "",
+        0.15,
+        0.9,
+        0.9,
+        0.99998
+      ],
+      "widgets_values_named": {
+        "tiles": "17",
+        "with_neighbors": true,
+        "position_terms": true,
+        "caption_megapixels": "",
+        "tile_caption_max_tokens": "",
+        "global_style_max_tokens": 0.15,
+        "tile_tags_verification_threshold": 0.9,
+        "tile_tags_position_threshold": 0.9,
+        "prompt_tags_verification_threshold": 0.9999
+      }
+    },
+    {
+      "id": 418,
+      "type": "PreviewAny",
+      "pos": [
+        5630,
+        290
+      ],
+      "size": [
+        710,
+        850
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1144
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Prompt Tags",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 419,
+      "type": "PreviewAny",
+      "pos": [
+        6350,
+        290
+      ],
+      "size": [
+        960,
+        850
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1145
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Listed",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 420,
+      "type": "PreviewAny",
+      "pos": [
+        7320,
+        290
+      ],
+      "size": [
+        450,
+        850
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1146
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Verified",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 421,
+      "type": "PreviewAny",
+      "pos": [
+        7780,
+        290
+      ],
+      "size": [
+        680,
+        850
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 1147
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Tags Final",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 422,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        2410,
+        300
+      ],
+      "size": [
+        490,
+        90
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1149
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1150
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "grainscape_krea2.safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "grainscape_krea2.safetensors",
+        "strength_model": 1
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 423,
+      "type": "PreviewImage",
+      "pos": [
+        9660,
+        1190
+      ],
+      "size": [
+        760,
+        850
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1151
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Preview Blocks",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      864,
+      294,
+      0,
+      318,
+      0,
+      "CLIP"
+    ],
+    [
+      865,
+      346,
+      0,
+      318,
+      1,
+      "STRING"
+    ],
+    [
+      1036,
+      373,
+      0,
+      375,
+      0,
+      "IMAGE"
+    ],
+    [
+      1037,
+      373,
+      0,
+      376,
+      0,
+      "IMAGE"
+    ],
+    [
+      1053,
+      381,
+      0,
+      382,
+      0,
+      "IMAGE"
+    ],
+    [
+      1054,
+      382,
+      0,
+      383,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1055,
+      325,
+      0,
+      383,
+      2,
+      "UPSCALE_MODEL"
+    ],
+    [
+      1063,
+      295,
+      0,
+      385,
+      4,
+      "VAE"
+    ],
+    [
+      1064,
+      318,
+      0,
+      385,
+      6,
+      "CONDITIONING"
+    ],
+    [
+      1066,
+      382,
+      0,
+      385,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1067,
+      294,
+      0,
+      385,
+      3,
+      "CLIP"
+    ],
+    [
+      1069,
+      382,
+      1,
+      387,
+      0,
+      "IMAGE"
+    ],
+    [
+      1071,
+      385,
+      0,
+      373,
+      0,
+      "IMAGE"
+    ],
+    [
+      1073,
+      381,
+      0,
+      383,
+      0,
+      "IMAGE"
+    ],
+    [
+      1081,
+      383,
+      0,
+      391,
+      0,
+      "IMAGE"
+    ],
+    [
+      1082,
+      391,
+      0,
+      385,
+      0,
+      "IMAGE"
+    ],
+    [
+      1118,
+      415,
+      8,
+      385,
+      7,
+      "INT"
+    ],
+    [
+      1119,
+      415,
+      9,
+      385,
+      8,
+      "INT"
+    ],
+    [
+      1122,
+      383,
+      0,
+      416,
+      0,
+      "IMAGE"
+    ],
+    [
+      1123,
+      382,
+      0,
+      416,
+      1,
+      "CATR_LAYOUT"
+    ],
+    [
+      1124,
+      294,
+      0,
+      416,
+      2,
+      "CLIP"
+    ],
+    [
+      1125,
+      394,
+      0,
+      416,
+      3,
+      "STRING"
+    ],
+    [
+      1126,
+      415,
+      0,
+      416,
+      4,
+      "STRING"
+    ],
+    [
+      1127,
+      415,
+      2,
+      416,
+      5,
+      "STRING"
+    ],
+    [
+      1128,
+      415,
+      4,
+      416,
+      6,
+      "STRING"
+    ],
+    [
+      1129,
+      415,
+      6,
+      416,
+      8,
+      "STRING"
+    ],
+    [
+      1130,
+      415,
+      7,
+      416,
+      9,
+      "FLOAT"
+    ],
+    [
+      1131,
+      415,
+      3,
+      416,
+      10,
+      "INT"
+    ],
+    [
+      1132,
+      415,
+      1,
+      416,
+      11,
+      "INT"
+    ],
+    [
+      1133,
+      415,
+      10,
+      416,
+      12,
+      "FLOAT"
+    ],
+    [
+      1134,
+      415,
+      11,
+      416,
+      13,
+      "FLOAT"
+    ],
+    [
+      1135,
+      416,
+      0,
+      385,
+      5,
+      "CATR_CAPTIONS"
+    ],
+    [
+      1136,
+      416,
+      0,
+      390,
+      0,
+      "CATR_CAPTIONS"
+    ],
+    [
+      1137,
+      416,
+      2,
+      385,
+      9,
+      "STRING"
+    ],
+    [
+      1142,
+      415,
+      5,
+      416,
+      7,
+      "STRING"
+    ],
+    [
+      1144,
+      416,
+      3,
+      418,
+      0,
+      "STRING"
+    ],
+    [
+      1145,
+      416,
+      4,
+      419,
+      0,
+      "STRING"
+    ],
+    [
+      1146,
+      416,
+      5,
+      420,
+      0,
+      "STRING"
+    ],
+    [
+      1147,
+      416,
+      6,
+      421,
+      0,
+      "STRING"
+    ],
+    [
+      1149,
+      283,
+      0,
+      422,
+      0,
+      "MODEL"
+    ],
+    [
+      1150,
+      422,
+      0,
+      385,
+      2,
+      "MODEL"
+    ],
+    [
+      1151,
+      385,
+      1,
+      423,
+      0,
+      "IMAGE"
+    ],
+    [
+      1152,
+      415,
+      12,
+      416,
+      14,
+      "FLOAT"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 8,
+      "title": "Caption Customization",
+      "bounding": [
+        4810,
+        210,
+        800,
+        640
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 9,
+      "title": "Configuration",
+      "bounding": [
+        1950,
+        210,
+        1400,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 12,
+      "title": "Generate",
+      "bounding": [
+        9280,
+        210,
+        1450,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 13,
+      "title": "Caption Debug",
+      "bounding": [
+        5620,
+        210,
+        3650,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 14,
+      "title": "Tile Layout",
+      "bounding": [
+        3360,
+        210,
+        1440,
+        940
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 15,
+      "title": "Custom Input",
+      "bounding": [
+        4810,
+        860,
+        800,
+        640
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8860163198567742,
+      "offset": [
+        -8313.203922192955,
+        -61.91773789828024
+      ]
+    },
+    "frontendVersion": "1.53.6"
+  },
+  "version": 0.4
+}

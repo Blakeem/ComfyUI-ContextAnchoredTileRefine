@@ -1,8 +1,8 @@
-"""vl.py: global-slice conditioning. The slice layout the whole feature rests on is
+"""vl.py: vision conditioning. The slice layout the whole feature rests on is
 [0]=vision_start, [1..N]=grid rows (raster), [N+1]=vision_end, [N+2..]=template tail;
-these tests pin the rect->cell mapping, the shared boundary cells, the fail-fast
-guards, and the per-tile tensor selection (fake duck-typed clip; _convert stubbed to
-identity so no comfy is needed)."""
+these tests pin the rect->cell mapping, the shared boundary cells, the per-tile crop encode
+beside the canvas slice, the canvas budget math, the fail-fast guards, and the per-tile
+tensor selection (fake duck-typed clip; _convert stubbed to identity so no comfy is needed)."""
 import logging
 
 import pytest
@@ -11,7 +11,7 @@ from test_conds import FakeControl
 from test_tiling import GridNoise, GridVAE
 
 from conftest import BaseModel
-from context_anchored_tile_refine import sampling, vl
+from context_anchored_tile_refine import captions, grid, sampling, vl
 from context_anchored_tile_refine.grid import Rect
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
@@ -25,6 +25,34 @@ ENC_H, ENC_W = 64, 96
 N_ROWS = 6
 EXPECTED_SEQ = 12
 TAIL = [8, 9, 10, 11]
+
+
+class Tile:
+    """grid.Tile cut to what the conditioning pre-pass reads: the crop rect it slices and
+    encodes by."""
+
+    def __init__(self, rect):
+        self.crop_rect = rect
+
+
+def strip_tiles(*rects):
+    return [Tile(rect) for rect in rects]
+
+
+def layout_tiles(cols, rows, w=CANVAS_W, h=CANVAS_H, ctx=8, overlap=8):
+    # REAL tiles at an exact grid size: build_layout reads only n and base off each axis
+    # solution, so handing it the counts directly is the production assembler on a chosen
+    # grid rather than a solver search for one.
+    r = ctx + overlap
+    sx = grid.AxisSolution(n=cols, base=w // cols, last=w // cols, overhead=0, r=r)
+    sy = grid.AxisSolution(n=rows, base=h // rows, last=h // rows, overhead=0, r=r)
+    return grid.build_layout(w, h, sx, sy, ctx, overlap).tiles
+
+
+def vision(canvas=1, crop=0):
+    # The [vision] table a test hands the pre-pass. Under the stubbed resample only on/off
+    # matters, so the counts are 1 or 0.
+    return captions.VisionSettings(canvas_tokens=canvas, crop_tokens=crop, caption_megapixels=0.786432)
 
 
 def test_full_canvas_tile_selects_every_row():
@@ -68,10 +96,49 @@ def test_offset_overreach_from_padding_clamps_to_the_grid():
     assert indices == [0, 5, 6, 7, *TAIL]
 
 
+def test_a_tail_free_expected_seq_leaves_the_template_tail_out():
+    # expected_seq = n_rows + 2 empties the trailing range: what every block but the last
+    # of a tile's positive is sliced with, so the one tail arrives last.
+    indices = vl.slice_indices(Rect(0, 0, 96, CANVAS_H), CANVAS_H, CANVAS_W, ENC_H, ENC_W, N_ROWS + 2)
+    assert indices == [0, 1, 2, 4, 5, 7]
+
+
+# --- canvas_budget_pixels: pure budget math ------------------------------------------
+
+def test_a_lone_tile_covering_the_canvas_is_sampled_at_its_tokens():
+    tiles = strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H))
+    assert vl.canvas_budget_pixels(tiles, CANVAS_H, CANVAS_W, 165) == 165 * vl.PIXELS_PER_TOKEN
+
+
+def test_the_canvas_budget_grows_with_the_tile_count():
+    # Four quarter tiles: each holds a quarter of the picture, so the picture is sampled
+    # four times larger to hand each its tokens.
+    tiles = strip_tiles(Rect(0, 0, 96, 64), Rect(96, 0, 192, 64), Rect(0, 64, 96, 128), Rect(96, 64, 192, 128))
+    assert vl.canvas_budget_pixels(tiles, CANVAS_H, CANVAS_W, 165) == 4 * 165 * vl.PIXELS_PER_TOKEN
+
+
+def test_the_canvas_budget_is_sized_off_the_mean_crop_area():
+    # 3/4 and 1/4 of the canvas average to a half, so the sample is twice the tokens.
+    tiles = strip_tiles(Rect(0, 0, 144, CANVAS_H), Rect(144, 0, CANVAS_W, CANVAS_H))
+    assert vl.canvas_budget_pixels(tiles, CANVAS_H, CANVAS_W, 100) == 2 * 100 * vl.PIXELS_PER_TOKEN
+
+
+def test_the_canvas_budget_is_capped_at_the_picture_cap():
+    # An 8x8 tile is 1/384 of the canvas, so the uncapped sample would be 65 MP.
+    tiles = strip_tiles(Rect(0, 0, 8, 8))
+    assert vl.canvas_budget_pixels(tiles, CANVAS_H, CANVAS_W, 165) == vl.PICTURE_CAP_PIXELS
+    assert vl.MAX_VISION_TOKENS == vl.PICTURE_CAP_PIXELS // vl.PIXELS_PER_TOKEN == 1953
+
+
+def test_the_canvas_budget_needs_a_tile():
+    with pytest.raises(ValueError, match="at least one tile"):
+        vl.canvas_budget_pixels([], CANVAS_H, CANVAS_W, 165)
+
+
 # --- fake clip: build_global_slices end to end (comfy-free) -------------------------
 
 class FakeVLClip:
-    """Duck-typed VL clip. Token stream mirrors the Krea 2 layout _encode_canvas
+    """Duck-typed VL clip. Token stream mirrors the Krea 2 layout _encode_one
     parses: template prefix, vision_start, ONE dict image token, vision_end, tail.
     The encode is deterministic: feature value == sequence position."""
 
@@ -95,11 +162,14 @@ class FakeVLClip:
 
 
 class RecordingVLClip(FakeVLClip):
-    """FakeVLClip that records every canvas it is handed and tags each encode with its call
-    index (+100 per row), so a batched build has to show one encode per row, in row order."""
+    """FakeVLClip that records every picture it is handed and tags each encode with its call
+    index (+100 per call), so a build has to show which encode every row came from, in
+    order. `tag_pooled` gives each encode a real pooled_output as well, for the batch cat
+    test alone: Krea 2 returns None there, which is what lets two blocks concatenate."""
 
-    def __init__(self, tail_len=4):
-        super().__init__(tail_len=tail_len)
+    def __init__(self, tail_len=4, seq_override=None, tag_pooled=False):
+        super().__init__(tail_len=tail_len, seq_override=seq_override)
+        self.tag_pooled = tag_pooled
         self.canvases = []
 
     def tokenize(self, text, images=None, llama_template=None):
@@ -107,32 +177,33 @@ class RecordingVLClip(FakeVLClip):
         return super().tokenize(text, images=images, llama_template=llama_template)
 
     def encode_from_tokens_scheduled(self, tokens):
-        row = len(self.canvases) - 1
+        call = len(self.canvases) - 1
         encoded = super().encode_from_tokens_scheduled(tokens)
-        encoded[0][0] += 100.0 * row
-        encoded[0][1]["pooled_output"] = torch.full((1, 4), float(row))
+        encoded[0][0] += 100.0 * call
+        if self.tag_pooled:
+            encoded[0][1]["pooled_output"] = torch.full((1, 4), float(call))
         return encoded
 
 
 @pytest.fixture
-def stubbed_vl(monkeypatch):
-    # Encode geometry pinned to the fixture grid; _convert identity so the slice
-    # tensors stay inspectable without comfy.
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, ENC_H, ENC_W))
+def stubbed_vl(comfy_stubs, monkeypatch):
+    # Encode geometry pinned to the fixture grid whatever the budget; _convert identity so
+    # the slice tensors stay inspectable. comfy_stubs serves encode_picture's interrupt check.
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, ENC_H, ENC_W))
     monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
     return vl
 
 
-def test_build_global_slices_selects_each_tiles_rows(stubbed_vl):
+def test_canvas_rows_alone_select_each_tiles_slice(stubbed_vl):
+    # crop_tokens 0: the positive is the tile's slice of ONE canvas encode and nothing else,
+    # which is the whole-canvas method of 1.6.1.
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    class Tile:
-        def __init__(self, rect):
-            self.crop_rect = rect
-
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
-    positives = stubbed_vl.build_global_slices(FakeVLClip(), source, tiles)
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
+    clip = RecordingVLClip()
+    positives = stubbed_vl.build_global_slices(clip, source, tiles, vision(canvas=1, crop=0))
     assert len(positives) == 2
+    assert [tuple(canvas.shape) for canvas in clip.canvases] == [(1, CANVAS_H, CANVAS_W, 3)]
     expected = [[0, 1, 2, 4, 5, 7, *TAIL], [0, 2, 3, 5, 6, 7, *TAIL]]
     for positive, indices in zip(positives, expected, strict=True):
         tensor, extras = positive[0]
@@ -143,18 +214,120 @@ def test_build_global_slices_selects_each_tiles_rows(stubbed_vl):
         assert "pooled_output" in extras
 
 
+def test_crop_rows_alone_are_every_cell_of_the_tiles_own_crop(stubbed_vl):
+    # canvas_tokens 0: one encode per tile of exactly its crop's pixels, and the positive is
+    # every cell of it plus the tail, out of its OWN encode (the +100 tag per call).
+    source = torch.arange(CANVAS_H * CANVAS_W * 3, dtype=torch.float32).reshape(1, CANVAS_H, CANVAS_W, 3)
+
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
+    clip = RecordingVLClip()
+    positives = stubbed_vl.build_global_slices(clip, source, tiles, vision(canvas=0, crop=1))
+
+    assert len(clip.canvases) == 2
+    assert torch.equal(clip.canvases[0], source[:, :, 0:96, :])
+    assert torch.equal(clip.canvases[1], source[:, :, 96:CANVAS_W, :])
+    for call, positive in enumerate(positives):
+        tensor, extras = positive[0]
+        assert tensor[0, :, 0].tolist() == [100.0 * call + row for row in range(EXPECTED_SEQ)]
+        assert "attention_mask" not in extras
+
+
+def test_a_tile_concatenates_its_crop_rows_its_canvas_slice_and_one_tail(stubbed_vl):
+    # Both sources on: the canvas is encoded first (call 0), then each tile's crop (calls 1
+    # and 2). A tile's rows are [vision_start][its crop's cells][vision_end] out of its crop
+    # encode, then [vision_start][its slice][vision_end] out of the canvas encode, then the
+    # template tail ONCE, from the canvas encode. The extras are the first block's.
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
+    clip = RecordingVLClip()
+
+    positives = stubbed_vl.build_global_slices(clip, source, tiles, vision(canvas=1, crop=1))
+
+    assert [tuple(canvas.shape) for canvas in clip.canvases] == [
+        (1, CANVAS_H, CANVAS_W, 3), (1, CANVAS_H, 96, 3), (1, CANVAS_H, 96, 3)]
+    canvas_slices = [[0, 1, 2, 4, 5, 7], [0, 2, 3, 5, 6, 7]]
+    for index, positive in enumerate(positives):
+        tensor, extras = positive[0]
+        crop_block = [100.0 * (index + 1) + row for row in range(N_ROWS + 2)]
+        assert tensor[0, :, 0].tolist() == [*crop_block, *canvas_slices[index], *TAIL]
+        assert "attention_mask" not in extras
+        assert "pooled_output" in extras
+
+
+def test_each_encode_is_handed_its_own_budget(comfy_stubs, monkeypatch):
+    # The wiring between the [vision] table's two counts and the two sample sizes, pinned
+    # end to end: the canvas at canvas_budget_pixels for its tokens, every crop at exactly
+    # crop_tokens x PIXELS_PER_TOKEN.
+    budgets = []
+    monkeypatch.setattr(vl, "resample_picture",
+                        lambda source, budget: (budgets.append(budget), (source, ENC_H, ENC_W))[1])
+    monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
+
+    vl.build_global_slices(RecordingVLClip(), source, tiles, vision(canvas=165, crop=100))
+
+    canvas_budget = vl.canvas_budget_pixels(tiles, CANVAS_H, CANVAS_W, 165)
+    assert canvas_budget == 2 * 165 * vl.PIXELS_PER_TOKEN        # two half-canvas tiles
+    assert budgets == [canvas_budget, 100 * vl.PIXELS_PER_TOKEN, 100 * vl.PIXELS_PER_TOKEN]
+
+
+def test_the_caption_probe_is_the_smallest_copy_of_the_run(stubbed_vl):
+    # The caption surface tokenizes the probe once per tile, so it is a crop copy whenever
+    # the crop rows are on, and the canvas copy only when they are off.
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
+
+    _rows, probe = stubbed_vl.build_vision_rows(RecordingVLClip(), source, tiles, vision(canvas=1, crop=1))
+    assert tuple(probe.shape) == (1, CANVAS_H, 96, 3)
+    _rows, probe = stubbed_vl.build_vision_rows(RecordingVLClip(), source, tiles, vision(canvas=1, crop=0))
+    assert tuple(probe.shape) == (1, CANVAS_H, CANVAS_W, 3)
+
+
+def test_both_sources_off_is_rejected(stubbed_vl):
+    with pytest.raises(ValueError, match="both 0"):
+        stubbed_vl.build_global_slices(RecordingVLClip(), torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                       strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)), vision(canvas=0, crop=0))
+
+
+def test_a_region_tiles_crop_is_cut_from_the_full_image_at_the_bbox_offset(stubbed_vl):
+    # Mask path: the tile indexes the bbox crop while the source is the FULL image, so its
+    # crop picture is the offset rect of that image and its canvas slice the offset cells.
+    source = torch.arange(CANVAS_H * CANVAS_W * 3, dtype=torch.float32).reshape(1, CANVAS_H, CANVAS_W, 3)
+    tile = Tile(Rect(0, 0, 32, 32))
+    clip = RecordingVLClip()
+
+    positives = stubbed_vl.build_global_slices(clip, source, [tile], vision(canvas=1, crop=1),
+                                               offset_x=96, offset_y=48)
+
+    assert torch.equal(clip.canvases[0], source)
+    assert torch.equal(clip.canvases[1], source[:, 48:80, 96:128, :])
+    # 96..128 x 48..80 covers grid column 1 over both rows: cells (0,1) and (1,1).
+    crop_block = [100.0 + row for row in range(N_ROWS + 2)]
+    assert positives[0][0][0][0, :, 0].tolist() == [*crop_block, 0, 2, 5, 7, *TAIL]
+
+
+def test_a_region_crop_that_overruns_the_image_is_clamped(stubbed_vl):
+    # A region canvas padded to /8 lets a tile reach up to 7px past the image.
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    tile = Tile(Rect(0, 0, 16 + 7, 16 + 7))
+    clip = RecordingVLClip()
+
+    stubbed_vl.build_global_slices(clip, source, [tile], vision(canvas=0, crop=1),
+                                   offset_x=CANVAS_W - 16, offset_y=CANVAS_H - 16)
+
+    assert tuple(clip.canvases[0].shape) == (1, 16, 16, 3)
+
+
 def test_batched_canvas_is_encoded_one_row_at_a_time(stubbed_vl):
     # Core's tokenizer attaches images[0] alone (qwen_vl.process_qwen2vl_images), so handing
     # over the whole [B,H,W,3] canvas would condition EVERY image on row 0's picture. Each
     # row is encoded on its own and the results are concatenated on the batch axis, in order.
     source = torch.zeros(2, CANVAS_H, CANVAS_W, 3)
 
-    class Tile:
-        def __init__(self, rect):
-            self.crop_rect = rect
-
-    clip = RecordingVLClip()
-    positives = stubbed_vl.build_global_slices(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))])
+    clip = RecordingVLClip(tag_pooled=True)
+    positives = stubbed_vl.build_global_slices(clip, source, strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)),
+                                               vision(canvas=1, crop=0))
 
     assert len(clip.canvases) == 2
     assert [tuple(canvas.shape) for canvas in clip.canvases] == [(1, CANVAS_H, CANVAS_W, 3)] * 2
@@ -172,12 +345,9 @@ def test_single_row_canvas_takes_one_unconcatenated_encode(stubbed_vl):
     # B=1 must stay on the single encode with no cat at all -- the byte-for-byte path.
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    class Tile:
-        def __init__(self, rect):
-            self.crop_rect = rect
-
     clip = RecordingVLClip()
-    positives = stubbed_vl.build_global_slices(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))])
+    positives = stubbed_vl.build_global_slices(clip, source, strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)),
+                                               vision(canvas=1, crop=0))
 
     assert len(clip.canvases) == 1
     tensor, _ = positives[0][0]
@@ -188,12 +358,9 @@ def test_single_row_canvas_takes_one_unconcatenated_encode(stubbed_vl):
 def test_build_global_slices_rejects_wrong_encoder_seq(stubbed_vl):
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    class Tile:
-        def __init__(self, rect):
-            self.crop_rect = rect
-
     with pytest.raises(RuntimeError, match=f"expected {EXPECTED_SEQ}"):
-        stubbed_vl.build_global_slices(FakeVLClip(seq_override=EXPECTED_SEQ + 3), source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))])
+        stubbed_vl.build_global_slices(FakeVLClip(seq_override=EXPECTED_SEQ + 3), source,
+                                       strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)), vision())
 
 
 def test_build_global_slices_rejects_clip_whose_tokenizer_signature_refuses_images(stubbed_vl):
@@ -206,7 +373,8 @@ def test_build_global_slices_rejects_clip_whose_tokenizer_signature_refuses_imag
 
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
     with pytest.raises(RuntimeError, match="does not accept images"):
-        stubbed_vl.build_global_slices(StrictSignatureClip(), source, [])
+        stubbed_vl.build_global_slices(StrictSignatureClip(), source,
+                                       strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)), vision())
 
 
 def test_build_global_slices_rejects_clip_without_image_tokens(stubbed_vl):
@@ -216,20 +384,72 @@ def test_build_global_slices_rejects_clip_without_image_tokens(stubbed_vl):
 
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
     with pytest.raises(RuntimeError, match="no image tokens"):
-        stubbed_vl.build_global_slices(NoImageTokenClip(), source, [])
+        stubbed_vl.build_global_slices(NoImageTokenClip(), source,
+                                       strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)), vision())
 
 
-# --- resample_for_global: real comfy resample ---------------------------------------
+# --- the pre-pass is cancellable per encode ------------------------------------------
+
+@pytest.mark.parametrize(("settings", "checks"), [
+    (vision(canvas=1, crop=1), 4),
+    (vision(canvas=1, crop=0), 1),
+    (vision(canvas=0, crop=1), 3),
+])
+def test_the_vision_pre_pass_checks_for_a_cancel_before_every_encode(stubbed_vl, comfy_stubs, settings, checks):
+    # One tower pass per canvas and per tile crop, so a check per pass is what makes the
+    # pre-pass cancellable at all; a source at 0 tokens runs no pass and costs no check.
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    before = comfy_stubs["interrupt_calls"]
+
+    stubbed_vl.build_global_slices(RecordingVLClip(), source, layout_tiles(3, 1), settings)
+
+    assert comfy_stubs["interrupt_calls"] - before == checks
+
+
+def test_a_cancel_stops_the_vision_pre_pass_at_the_encode_it_arrives_on(stubbed_vl, monkeypatch):
+    # The check has to come BEFORE the tower pass it guards, or a cancel still pays for the
+    # encode it arrived on.
+    import comfy.model_management
+
+    checks = []
+
+    def cancel_on_the_second():
+        checks.append(1)
+        if len(checks) == 2:
+            raise RuntimeError("Processing interrupted")
+
+    monkeypatch.setattr(comfy.model_management, "throw_exception_if_processing_interrupted",
+                        cancel_on_the_second)
+    clip = RecordingVLClip()
+
+    with pytest.raises(RuntimeError, match="Processing interrupted"):
+        stubbed_vl.build_global_slices(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                       layout_tiles(3, 1), vision(canvas=1, crop=1))
+
+    assert len(clip.canvases) == 1
+
+
+# --- resample_picture: real comfy resample ------------------------------------------
 
 @pytest.mark.comfy
-def test_resample_for_global_snaps_to_merged_cells(comfy_env):
-    # The production shape: 2304x3072 -> exactly 768x1024 (scale 1/3), grid 24x32.
+def test_resample_picture_snaps_to_merged_cells(comfy_env):
+    # The old whole-canvas shape: 2304x3072 at 768x1024 px -> exactly 768x1024 (scale
+    # 1/3), grid 24x32.
     source = torch.rand(1, 3072, 2304, 3)
-    copy, enc_h, enc_w = vl.resample_for_global(source)
+    copy, enc_h, enc_w = vl.resample_picture(source, 768 * 1024)
     assert (enc_h, enc_w) == (1024, 768)
     assert enc_h % vl.MERGED_CELL == 0 and enc_w % vl.MERGED_CELL == 0
     assert copy.shape == (1, 1024, 768, 3)
-    assert enc_h * enc_w == vl.GLOBAL_SLICE_BUDGET
+    assert enc_h * enc_w == 768 * 1024
+
+
+@pytest.mark.comfy
+def test_a_crop_budget_of_one_hundred_tokens_is_about_one_hundred_cells(comfy_env):
+    # The [vision] contract: crop_tokens x PIXELS_PER_TOKEN, snapped to whole cells. The
+    # owner's 8K tile (1944x1440) lands on a 12x9 grid.
+    source = torch.rand(1, 1440, 1944, 3)
+    _copy, enc_h, enc_w = vl.resample_picture(source, 100 * vl.PIXELS_PER_TOKEN)
+    assert (enc_h // vl.MERGED_CELL) * (enc_w // vl.MERGED_CELL) == 108
 
 
 # --- through the pipeline: the VL dispatch into the sync engine -----------------------
@@ -326,7 +546,7 @@ def pipeline_clip(monkeypatch):
     # The clip these tests drive, plus the encode geometry pinned to match its sequence
     # length. _convert is deliberately NOT stubbed here: these tests run through
     # comfy.sampler_helpers.convert_cond (comfy_stubs') exactly like production does.
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, PIPE_ENC, PIPE_ENC))
     return FakeVLClip(seq_override=PIPE_SEQ)
 
 
@@ -406,3 +626,55 @@ def test_the_vl_dispatch_rejects_a_schedule_the_lanes_cannot_share(comfy_stubs, 
             max_tile_height=56, context_anchor=0, context_overlap=16, vl_clip=pipeline_clip)
 
     assert vae.encode_calls == [] and noise.calls == []
+
+
+def test_budget_tiles_size_the_canvas_sample_off_another_layouts_tiles(comfy_stubs, monkeypatch):
+    # A run over one BLOCK of a larger grid must sample the canvas as the full grid would:
+    # the budget is sized off the MEAN crop area, so the block's own two tiles would ask for a
+    # smaller picture than the four the grid holds. With budget_tiles None nothing moves.
+    budgets = []
+    monkeypatch.setattr(vl, "resample_picture",
+                        lambda source, budget: (budgets.append(budget), (source, ENC_H, ENC_W))[1])
+    monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
+    source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
+    full = layout_tiles(3, 1)
+    block = full[:1]
+
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=165, crop=0),
+                           budget_tiles=full)
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=165, crop=0))
+
+    assert budgets == [vl.canvas_budget_pixels(full, CANVAS_H, CANVAS_W, 165),
+                       vl.canvas_budget_pixels(block, CANVAS_H, CANVAS_W, 165)]
+    assert budgets[0] != budgets[1]
+
+
+def test_budget_tiles_hold_the_full_grids_density_once_the_picture_cap_binds(comfy_stubs, monkeypatch):
+    # Past PICTURE_CAP_PIXELS the full grid's budget stops growing with its source area, so a
+    # block sized off its own smaller area alone stays under the cap and out-samples the run
+    # it reproduces. The block run therefore rescales the full grid's budget by the source
+    # areas, which holds the density in both regimes.
+    tokens = 600
+    budgets = []
+    monkeypatch.setattr(vl, "resample_picture",
+                        lambda source, budget: (budgets.append(budget), (source, ENC_H, ENC_W))[1])
+    monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
+    full = layout_tiles(4, 2)
+    block_h, block_w = CANVAS_H, CANVAS_W // 2
+    block = layout_tiles(2, 2, w=block_w, h=block_h)
+    source = torch.zeros(1, 1, 1, 3).expand(1, block_h, block_w, 3)
+
+    full_budget = vl.canvas_budget_pixels(full, CANVAS_H, CANVAS_W, tokens)
+    naive = vl.canvas_budget_pixels(full, block_h, block_w, tokens)
+    assert full_budget == vl.PICTURE_CAP_PIXELS and naive > round(full_budget / 2)
+
+    vl.build_global_slices(RecordingVLClip(), source, block, vision(canvas=tokens, crop=0),
+                           budget_tiles=full)
+
+    assert budgets == [round(full_budget / 2)]
+    assert budgets[0] / (block_h * block_w) == full_budget / (CANVAS_H * CANVAS_W)
+
+
+def test_block_budget_pixels_needs_the_full_grids_tiles():
+    with pytest.raises(ValueError, match="at least one tile"):
+        vl.block_budget_pixels([], 128, 192, 165)

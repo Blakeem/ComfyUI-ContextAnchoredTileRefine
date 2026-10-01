@@ -484,6 +484,36 @@ def _aa_alpha(sub_mask):
     return x[:, 0]
 
 
+def refine_masked_region(image, mask, context_anchor, refine_crop):
+    # The mask wrapper both engines share: harden (>=0.5) → bbox of THIS picture's mask row →
+    # crop to bbox + context_anchor (frozen-background halo) → refine_crop(sub_image, sub_mask,
+    # (y0, y1, x0, x1)) → composite the refined crop back through a 1px anti-aliased edge. The
+    # mask=0 background survives from the ORIGINAL pixels (never the VAE-decoded crop), so it
+    # is never re-diffused, and the boundary gets no feather (CLAUDE.md prime directive 3).
+    # Harden a soft input at 0.5 — a fractional denoise mask would leave the under-refined halo
+    # we reject for turbo (finding-dd-fade-artifacts-turbo).
+    mask_bin = mask >= 0.5
+    bbox = _mask_bbox(mask_bin)
+    if bbox is None:
+        # Empty mask: nothing to refine, and (unlike the input) a clone is a safe no-op.
+        # RGB-narrowed like every sampled path, so the output channel count never depends on
+        # the mask's content.
+        return image[..., :3].clone()
+    height, width = int(image.shape[1]), int(image.shape[2])
+    y0, y1, x0, x1 = _expand_snap_clamp(bbox, context_anchor, height, width)
+    sub_image = image[:, y0:y1, x0:x1, :]
+    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
+    refined_sub = refine_crop(sub_image, sub_mask, (y0, y1, x0, x1))
+    # Outside the crop, and wherever aa == 0 inside it, the output is the byte-identical
+    # original image. Narrow to RGB: the crop comes back 3-channel (a 4-channel input's alpha
+    # is dropped exactly as on the no-mask path), so the composite and the output stay 3-channel.
+    rgb = image[..., :3]
+    out = rgb.clone()
+    aa = _aa_alpha(sub_mask)[..., None]
+    out[:, y0:y1, x0:x1, :] = aa * refined_sub + (1.0 - aa) * rgb[:, y0:y1, x0:x1, :]
+    return out
+
+
 def seam_displacements(tile, sub, region):
     # Per-kept-seam displacement, in band-normalized units: [w] for the top seam, [h] for the
     # left seam, None where that side has no already-processed neighbor. This is what bends
@@ -667,6 +697,50 @@ def encode_pixels(vae, pixels):
     return vae.encode(pixels)
 
 
+def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, batch_index=0):
+    # ONE canvas-wide draw, sliced per tile by both engines: per-tile draws would give every
+    # same-shaped tile identical noise, and slices are spatially anchored so overlapping crops
+    # agree. prepare_noise reads only size/dtype/layout, so the zeros dummy (encode outputs
+    # float32) keeps a 1x1 grid bit-identical to the whole-image {"samples": latent} draw.
+    # The dummy mirrors vae.encode's latent layout: a video-family VAE (latent_dim 3, e.g.
+    # Krea 2's Wan VAE) encodes an image batch to a 5-D [B,C,1,h,w] latent, and a 4-D draw
+    # against it would broadcast the sampler's sigma*noise + latent mix into a fake C-frame
+    # temporal axis, which temporal models then fold into the batch (a batch-mismatch crash).
+    # It is drawn at the FULL batch with row batch_index selected, so a picture inside
+    # refine_image's picture loop keeps the noise it would have drawn in one shared call:
+    # prepare_noise draws a SINGLE randn over the whole latent size. batch_size == 1 draws at
+    # `batch` and takes no slice.
+    latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
+    draw_batch = batch_size if batch_size > 1 else batch
+    dummy = torch.zeros((draw_batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
+    canvas_noise = noise.generate_noise({"samples": dummy})
+    if batch_size > 1:
+        canvas_noise = canvas_noise[batch_index:batch_index + 1]
+    return canvas_noise
+
+
+def region_gates(region_pixel, canvas_h, canvas_w):
+    # The region gate at pixel and at latent resolution, as (region_padded, region_latent).
+    # The pixel mask is padded onto the /8 canvas with constant 0 (the padded strip is always
+    # cropped away), then cover-downsampled by 8 with max_pool2d, NOT avg+threshold, so every
+    # pixel with region == 1 lands in a DIFFUSED latent cell. Else a subject-edge pixel would be
+    # frozen yet composited back. Over-cover is harmless: the extra diffused cells fall outside
+    # the mask and the anti-aliased composite discards them.
+    height, width = region_pixel.shape[-2], region_pixel.shape[-1]
+    region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
+    region_latent = (torch.nn.functional.max_pool2d(region_padded[:, None].float(), 8) > 0).float()[:, 0]
+    return region_padded, region_latent
+
+
+def fold_decoded_frames(decoded):
+    # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]. T is folded into the batch
+    # exactly as core's VAEDecode node does. Both engines pin one latent row per image with
+    # their noise/latent shape check, so T is 1 and this is a view.
+    if decoded.ndim == 5:
+        return decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
+    return decoded
+
+
 def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, *, hint_canvas=None, batch_size=1, batch_index=0):
     # Tiled img2img: pad to /8 → solve the grid → encode/sample/decode each tile in
     # raster order from a live canvas → DC-match onto the already-placed neighbors →
@@ -707,46 +781,16 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     if hint_canvas is not None:
         hint_canvas = conds.pad_hint_canvas(hint_canvas, (height, width), (canvas_h, canvas_w))
 
-    # Region gate at latent resolution. Pad the pixel mask to the /8 canvas with constant
-    # 0 (the padded strip is always cropped away), then cover-downsample by 8. max_pool2d
-    # (NOT avg+threshold) so every pixel with region==1 lands in a DIFFUSED latent cell —
-    # else a subject-edge pixel would be frozen yet pasted. Over-cover is harmless: extra
-    # diffused cells fall outside the mask and are discarded by the AA composite.
-    # region_padded (the PIXEL-resolution gate) is kept as well, because the DC measurement
-    # has to be gated at pixel resolution: region_latent over-covers by up to 8px, and those
-    # extra pixels are exactly the frozen ones that must not enter the estimate.
+    # region_padded (the PIXEL-resolution gate) is kept beside region_latent because the DC
+    # measurement has to be gated at pixel resolution: region_latent over-covers by up to 8px,
+    # and those extra pixels are exactly the frozen ones that must not enter the estimate.
     region_padded = None
     region_latent = None
     if region_pixel is not None:
-        region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
-        region_latent = (torch.nn.functional.max_pool2d(region_padded[:, None].float(), 8) > 0).float()[:, 0]
+        region_padded, region_latent = region_gates(region_pixel, canvas_h, canvas_w)
 
-    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, axis="width")
-    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, axis="height")
-    layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
-
-    # One noise draw for the whole canvas, then sliced per tile: per-tile draws would
-    # give every same-shaped tile identical noise, and slices are spatially anchored
-    # so overlapping crop regions of fade-expanded tiles agree on noise. prepare_noise
-    # reads only size/dtype/layout, so the zeros dummy (encode outputs float32) keeps
-    # a 1x1 grid bit-identical to the whole-image {"samples": latent} draw.
-    # The dummy mirrors vae.encode's latent layout exactly: a video-family VAE
-    # (latent_dim 3 — Wan/Qwen-Image, used by e.g. Krea 2) encodes an image batch to a
-    # 5-D [B,C,1,h,w] latent, and a 4-D draw against that 5-D tile latent would
-    # broadcast the sampler's sigma*noise + latent mix into a fake C-frame temporal
-    # axis, which temporal models then fold into the batch (a batch-mismatch crash).
-    latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
-    # Rows the draw covers. Under refine_image's picture loop this call holds ONE picture of a
-    # batch_size-picture run, and the dummy is still built at the FULL batch so picture b gets
-    # the row it would have drawn in one shared call: prepare_noise draws a SINGLE torch.randn
-    # over the whole latent size, so a [1,...] dummy would hand every picture the same noise.
-    # batch_size == 1 (no loop, or a direct _refine_tiles call) draws at `batch` and takes no
-    # slice — byte-for-byte the pre-loop path.
-    draw_batch = batch_size if batch_size > 1 else batch
-    dummy = torch.zeros((draw_batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
-    canvas_noise = noise.generate_noise({"samples": dummy})
-    if batch_size > 1:
-        canvas_noise = canvas_noise[batch_index:batch_index + 1]
+    layout = grid.solve_layout(canvas_w, canvas_h, max_tile_width, max_tile_height, context_anchor, context_overlap)
+    canvas_noise = build_canvas_noise(vae, noise, canvas_h, canvas_w, batch, batch_size, batch_index)
 
     steps = sigmas.shape[-1] - 1
     for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles), batch_size, batch_index)
@@ -853,14 +897,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds
-        decoded = vae.decode(samples)
-        # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]; fold T into the
-        # batch exactly as core's VAEDecode node does. T is 1 by construction here
-        # (the fail-fast noise/latent check above pins one latent row per image), so
-        # this is a pure view and the composite below sees the same [B,H,W,C] contract
-        # as a 2-D VAE's output.
-        if decoded.ndim == 5:
-            decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
+        decoded = fold_decoded_frames(vae.decode(samples))
         if expanded:
             # Directional feather (docs/CLAUDE.md prime directive 2): write paste_rect
             # — the core plus the context_overlap band ONLY on sides bordering an
@@ -954,12 +991,9 @@ def _check_sync_intake(sampler, sigmas, sampler_name=None):
     #     per-scheduler knowledge. The engine's own preconditions re-check it.
     from . import stepper
 
-    if sampler_name is not None and sampler_name not in stepper.EVALS_PER_STEP:
-        raise ValueError(
-            f"Context-Anchored Tile Refine (VL): sampler '{sampler_name}' is not supported by "
-            f"the synchronized tile engine. Supported: {', '.join(stepper.SUPPORTED_SAMPLERS)}. "
-            f"{', '.join(stepper.UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN. They own "
-            "their own schedule or internal history, so no evals-per-step entry can time them.")
+    sampler_message = None if sampler_name is None else stepper.unsupported_sampler_message(sampler_name)
+    if sampler_message is not None:
+        raise ValueError(sampler_message)
     stepper._resolve_sampler_name(sampler)
     if not bool(torch.all(sigmas[1:] < sigmas[:-1])) or float(sigmas[-1]) != 0.0:
         raise ValueError(
@@ -969,7 +1003,7 @@ def _check_sync_intake(sampler, sigmas, sampler_name=None):
             f"{float(sigmas.reshape(-1)[-1])}.")
 
 
-def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None):
+def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None, preset=None, tile_captions=None, layout=None, noise_fields=None):
     # Entry point, and the ONE place all three nodes meet. With a vl_clip the whole refine is
     # handed to the sync engine (sync.py) — mask or no mask — and everything below it is the
     # BASE node's raster path.
@@ -992,6 +1026,26 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # progress is the VL run's progress ledger (progress.py), created by node.py and only ever
     # PASSED THROUGH here — including across the picture loop, so a batch shares ONE bar. It is
     # inert without vl_clip: the base raster path keeps its own per-tile bar untouched.
+    # preset/tile_captions/layout/noise_fields are the sync engine's overrides, for a caller
+    # that runs one block of a larger grid and must hand the block the settings block, the
+    # captions, the tile rects and the SDE field that grid's own run would have used. They are
+    # rejected here rather than ignored, because a dropped override samples the wrong thing
+    # silently.
+    overrides = {"preset": preset, "tile_captions": tile_captions, "layout": layout,
+                 "noise_fields": noise_fields}
+    given = sorted(name for name, value in overrides.items() if value is not None)
+    if given and vl_clip is None:
+        raise ValueError(
+            f"Context-Anchored Tile Refine: {given} reach the sync engine only, which needs a "
+            "vl_clip. The base node's raster path reads none of them.")
+    # Only the preset survives the picture loop below: the other three describe ONE picture's
+    # captions, grid and noise field, so a batch cannot carry them.
+    per_picture = [name for name in given if name != "preset"]
+    if per_picture and image.shape[0] > 1:
+        raise ValueError(
+            f"Context-Anchored Tile Refine: {per_picture} describe ONE picture, and this call "
+            f"carries a batch of {int(image.shape[0])}. Refine one picture per call to use them.")
+
     if sigmas.numel() < 2:
         # Zero steps: nothing to sample, and the lossy VAE roundtrip would degrade the image.
         # Narrowed to RGB like every sampled path, so the output channel count never depends
@@ -1009,7 +1063,7 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     # single-picture IMAGE never enters the loop, so its path is untouched.
     if image.shape[0] > 1:
         pictures = [
-            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b, progress=progress)
+            refine_image(image[b:b + 1], guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=_mask_row(mask, b), vl_clip=vl_clip, vlm_method=vlm_method, anchor_source=anchor_source, sampler_name=sampler_name, batch_size=image.shape[0], batch_index=b, progress=progress, preset=preset)
             for b in range(image.shape[0])
         ]
         return torch.cat(pictures, dim=0)
@@ -1054,7 +1108,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
             image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
             context_anchor, context_overlap, vl_clip, mask=mask, vlm_method=vlm_method,
             anchor_source=sync.ANCHOR_SOURCE_IMAGE if anchor_source is None else anchor_source,
-            batch_size=batch_size, batch_index=batch_index, progress=progress)
+            batch_size=batch_size, batch_index=batch_index, progress=progress,
+            preset=preset, tile_captions=tile_captions, layout=layout, noise_fields=noise_fields)
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped
@@ -1063,28 +1118,11 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
             hint_canvas = conds.slice_hint_row(hint_canvas, batch_index)
         return _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=None, hint_canvas=hint_canvas, batch_size=batch_size, batch_index=batch_index)
 
-    # Region-mask path. Harden a soft input at 0.5 — a fractional denoise mask would leave
-    # the under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
-    mask_bin = mask >= 0.5
-    bbox = _mask_bbox(mask_bin)
-    if bbox is None:
-        # Empty mask: nothing to refine, and (unlike the input) a clone is a safe no-op.
-        # RGB-narrowed for the same reason as the zero-step return above.
-        return image[..., :3].clone()
-    height, width = image.shape[1], image.shape[2]
-    y0, y1, x0, x1 = _expand_snap_clamp(bbox, context_anchor, height, width)
-    sub_image = image[:, y0:y1, x0:x1, :]
-    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    hint_canvas = conds.prepare_hint_canvas(original_conds, (height, width), (y0, y1, x0, x1)) if control_active else None
-    if batch_size > 1 and hint_canvas is not None:
-        hint_canvas = conds.slice_hint_row(hint_canvas, batch_index)
-    refined_sub = _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas, batch_size=batch_size, batch_index=batch_index)
-    # Composite the refined crop back through the anti-aliased mask edge. Outside the crop,
-    # and wherever aa == 0 inside it, the output is the byte-identical original image.
-    # Narrow to RGB: _refine_tiles decodes a 3-channel refined_sub (as the no-mask path does,
-    # dropping a 4-channel input's alpha), so the composite and the output stay 3-channel.
-    rgb = image[..., :3]
-    out = rgb.clone()
-    aa = _aa_alpha(sub_mask)[..., None]
-    out[:, y0:y1, x0:x1, :] = aa * refined_sub + (1.0 - aa) * rgb[:, y0:y1, x0:x1, :]
-    return out
+    def refine_crop(sub_image, sub_mask, crop_box):
+        # The hints take the same bbox slice the image does.
+        hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2]), crop_box) if control_active else None
+        if batch_size > 1 and hint_canvas is not None:
+            hint_canvas = conds.slice_hint_row(hint_canvas, batch_index)
+        return _refine_tiles(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, region_pixel=sub_mask, hint_canvas=hint_canvas, batch_size=batch_size, batch_index=batch_index)
+
+    return refine_masked_region(image, mask, context_anchor, refine_crop)

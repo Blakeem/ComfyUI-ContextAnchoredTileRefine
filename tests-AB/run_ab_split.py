@@ -453,10 +453,10 @@ def make_split_builder(mode, cut_sigma=None):
         from context_anchored_tile_refine import captions, vl
 
         started = time.perf_counter()
-        canvas_copy, enc_h, enc_w = vl.resample_for_global(encode_source)
+        canvas_copy, enc_h, enc_w = vl.resample_picture(encode_source, 768 * 1024)
         grid_h, grid_w = enc_h // vl.MERGED_CELL, enc_w // vl.MERGED_CELL
         n_rows = grid_h * grid_w
-        encoded, _seq = vl._encode_canvas(clip, canvas_copy, grid_h, grid_w)
+        encoded, _seq = vl._encode_one(clip, canvas_copy, grid_h, grid_w)
         canvas_h, canvas_w = int(encode_source.shape[1]), int(encode_source.shape[2])
 
         if any(len(row_captions) != 1 for row_captions in tile_captions):

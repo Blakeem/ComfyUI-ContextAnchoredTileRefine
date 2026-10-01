@@ -1,3 +1,7 @@
+import pytest
+import torch
+
+from context_anchored_tile_refine import captions, sampling, stepper
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
     ContextAnchoredTileRefineVL,
@@ -53,13 +57,11 @@ TYPE_BY_NAME = {
 ANCHOR_SOURCE_OPTIONS = ["source image", "live canvas"]
 # One option per caption surface per settings.toml preset, grouped by preset and in file
 # order, with the vision-only surface leading. Pinned as the SHIPPED file writes it: a preset
-# added or renamed there changes what every saved workflow's combo can hold. The FIRST
-# preset's two options carry no label, so they are byte-identical to what the widget offered
-# before the presets existed.
+# added or renamed there changes what every saved workflow's combo can hold. The shipped file
+# holds one preset, the tags preset, which is the default, so its two options carry no label.
 VLM_METHOD_OPTIONS = [
     "vision tokens",
     "vision tokens and captions", "captions",
-    "vision tokens and captions (artwork)", "captions (artwork)",
 ]
 
 INT_WIDGET_OPTIONS = {
@@ -109,17 +111,10 @@ def test_seam_behaviour_is_not_exposed_as_widgets():
         assert retired not in all_inputs, retired
 
 
-# Widgets that carry NO tooltip on purpose. Each is a core sampling widget that behaves
-# exactly as it does on every other node, so a tooltip there is noise the reader has to skip
-# past to reach the ones that say something. Owner's call, 2026-08-22. A new input still has
-# to explain itself, which is what the tests below keep enforcing.
-NO_TOOLTIP = {"sampler_name", "scheduler", "steps", "cfg", "denoise"}
-
-
-def has_tooltip(name, definition):
+def has_tooltip(definition):
+    # The sampling widgets carry tooltips too: sampler_name has to list the samplers the
+    # synchronized engine supports, since the combo keeps core's entire list.
     tooltip = definition[1].get("tooltip")
-    if name in NO_TOOLTIP:
-        return tooltip is None
     return isinstance(tooltip, str) and bool(tooltip)
 
 
@@ -127,7 +122,7 @@ def test_every_input_has_a_tooltip():
     input_types = ContextAnchoredTileRefine.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        assert has_tooltip(name, definition), name
+        assert has_tooltip(definition), name
 
 
 def test_node_class_attributes():
@@ -166,11 +161,11 @@ def test_validate_inputs_rejects_below_min():
 
 def test_validate_inputs_accepts_a_caption_option_the_selector_no_longer_offers():
     # Naming vlm_method in VALIDATE_INPUTS is what bypasses core's own combo-list check
-    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). The
-    # default preset's LABELED form is the case that needs it: the selector offers that preset
-    # unlabeled, so a workflow saved while it was labeled would otherwise fail to queue with
-    # "Value not in list" even though resolve_method finds its block.
-    for saved in ("vision tokens and captions (standard)", "captions (standard)"):
+    # (execution.py:1047 sits inside the `x not in validate_function_inputs` guard). The first
+    # preset's labeled options are the case that needs it: a workflow saved while every preset
+    # was labeled holds them, the selector no longer offers them, and they would otherwise fail
+    # to queue with "Value not in list" even though resolve_method still resolves them.
+    for saved in ("vision tokens and captions (prompted)", "captions (prompted)"):
         assert ContextAnchoredTileRefineVL.VALIDATE_INPUTS(vlm_method=saved) is True, saved
     for current in VLM_METHOD_OPTIONS:
         assert ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(vlm_method=current) is True, current
@@ -192,18 +187,19 @@ def test_vl_required_order_is_pinned():
     assert input_types["required"]["clip"][0] == "CLIP"
 
 
-def test_vl_optional_is_mask_only():
+def test_vl_optional_is_mask_then_prompt():
     # The masked VL refine encodes the whole image and offsets the region's tiles
-    # into its frame (vl.py slice_indices offsets), so the mask input is supported.
+    # into its frame (vl.py slice_indices offsets), so the mask input is supported. The prompt
+    # is a socket, so its place carries no positional-restore risk.
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
-    assert list(input_types["optional"]) == ["mask"]
+    assert list(input_types["optional"]) == ["mask", "prompt"]
 
 
 def test_vl_every_input_has_a_tooltip():
     input_types = ContextAnchoredTileRefineVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        assert has_tooltip(name, definition), name
+        assert has_tooltip(definition), name
 
 
 def test_vl_method_widget_is_pinned(comfy_stubs):
@@ -266,11 +262,11 @@ def test_the_hidden_node_id_adds_no_socket_and_no_widget(comfy_stubs):
     # extra name in either one would shift every saved workflow's tuned values.
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
     assert list(vl["required"]) == VL_REQUIRED_ORDER
-    assert list(vl["optional"]) == ["mask"]
+    assert list(vl["optional"]) == ["mask", "prompt"]
 
     upscale = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     assert list(upscale["required"]) == UPSCALE_REQUIRED_ORDER
-    assert list(upscale["optional"]) == ["upscale_model", "negative"]
+    assert list(upscale["optional"]) == ["upscale_model", "negative", "prompt"]
 
 
 def test_vl_node_class_attributes():
@@ -278,6 +274,23 @@ def test_vl_node_class_attributes():
     assert ContextAnchoredTileRefineVL.FUNCTION == "refine"
     assert callable(ContextAnchoredTileRefineVL.refine)
     assert ContextAnchoredTileRefineVL.CATEGORY == "image/upscaling"
+
+
+def test_the_vl_nodes_report_the_settings_file_in_their_cache_key():
+    # ComfyUI folds IS_CHANGED into the cache key, so an edit to the settings file is what
+    # re-runs a VL node whose widgets nobody touched. The base node reads no settings file,
+    # and its ABSENCE of IS_CHANGED is pinned in test_node_class_attributes.
+    expected = captions.settings_fingerprint()
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        assert node.IS_CHANGED() == expected, node.__name__
+
+
+def test_the_cache_key_accepts_the_nodes_own_inputs():
+    # Core calls IS_CHANGED as f(**inputs), so every widget on the node arrives as a keyword.
+    expected = captions.settings_fingerprint()
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        fingerprint = node.IS_CHANGED(image=None, vlm_method="captions", context_anchor=32)
+        assert fingerprint == expected, node.__name__
 
 
 def test_vl_input_types_does_not_leak_into_base():
@@ -332,6 +345,7 @@ UPSCALE_TYPE_BY_NAME = {
     "vlm_method": VLM_METHOD_OPTIONS,
     "context_anchor": "INT",
     "context_overlap": "INT",
+    "prompt": "STRING",
     "upscale_model": "UPSCALE_MODEL",
     "negative": "CONDITIONING",
 }
@@ -359,19 +373,35 @@ def test_upscale_required_order_is_pinned(comfy_stubs):
     assert list(input_types["required"]) == UPSCALE_REQUIRED_ORDER
 
 
-def test_upscale_optional_is_model_and_negative(comfy_stubs):
+def test_upscale_optional_is_model_negative_then_prompt(comfy_stubs):
+    # The prompt sits under the negative, where the two text links read together.
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
-    assert list(input_types["optional"]) == ["upscale_model", "negative"]
+    assert list(input_types["optional"]) == ["upscale_model", "negative", "prompt"]
 
 
-def test_upscale_has_no_mask_or_prompt_input(comfy_stubs):
+def test_upscale_has_no_mask_or_positive_text_input(comfy_stubs):
     # Both absences are design decisions, not omissions: a mask needs the refine node
     # (region/vision-grid coordinates are unresolved), and any positive text re-admits the
-    # phantom objects the vision-only positive exists to remove.
+    # phantom objects the vision-only positive exists to remove. `prompt` is not that text:
+    # it is a STRING for the caption question only (captions.with_prompt), never a
+    # CONDITIONING, and it is pinned on both VL nodes below.
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
-    for absent in ("mask", "positive", "text", "prompt"):
+    for absent in ("mask", "positive", "text"):
         assert absent not in all_inputs, absent
+
+
+def test_prompt_socket_is_pinned_on_both_vl_nodes(comfy_stubs):
+    # ONE definition (node._prompt) serves both nodes and the Captions test node, so the
+    # tooltip cannot drift. forceInput makes it a socket with no widget, so it never enters
+    # widgets_values and an older saved workflow loads with it unconnected.
+    for node in (ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        definition = node.INPUT_TYPES()["optional"]["prompt"]
+        assert definition[0] == "STRING", node.__name__
+        assert definition[1]["forceInput"] is True, node.__name__
+        assert "default" not in definition[1], node.__name__
+        assert definition[1]["tooltip"].startswith("Optional."), node.__name__
+        assert "{PROMPT}" in definition[1]["tooltip"], node.__name__
 
 
 def test_upscale_input_type_strings(comfy_stubs):
@@ -406,7 +436,7 @@ def test_upscale_every_input_has_a_tooltip(comfy_stubs):
     input_types = ContextAnchoredTileUpscaleVL.INPUT_TYPES()
     all_inputs = {**input_types["required"], **input_types["optional"]}
     for name, definition in all_inputs.items():
-        assert has_tooltip(name, definition), name
+        assert has_tooltip(definition), name
 
 
 def test_upscale_node_class_attributes(comfy_stubs):
@@ -448,4 +478,45 @@ def test_upscale_input_types_does_not_leak_into_the_other_nodes(comfy_stubs):
 
     vl = ContextAnchoredTileRefineVL.INPUT_TYPES()
     assert list(vl["required"]) == VL_REQUIRED_ORDER
-    assert list(vl["optional"]) == ["mask"]
+    assert list(vl["optional"]) == ["mask", "prompt"]
+
+
+# --- the sampler check ----------------------------------------------------------------
+# The engine's intake message, pinned word for word: the queue-time check returns this same
+# text, so a workflow rejected at queue time and one rejected by a direct engine caller read
+# the same.
+DPM_FAST_MESSAGE = (
+    "Context-Anchored Tile Refine (VL): sampler 'dpm_fast' is not supported by the "
+    "synchronized tile engine. Supported: euler, dpmpp_2m, heun, dpm_2, exp_heun_2_x0, "
+    "dpmpp_2m_sde, dpmpp_2m_sde_gpu, dpmpp_2m_sde_heun, dpmpp_2m_sde_heun_gpu, "
+    "exp_heun_2_x0_sde. dpm_fast, dpm_adaptive, uni_pc are unsupported BY DESIGN. They own "
+    "their own schedule or internal history, so no evals-per-step entry can time them.")
+
+
+def test_the_engine_intake_message_is_unchanged():
+    with pytest.raises(ValueError) as excinfo:
+        sampling._check_sync_intake(None, torch.tensor([1.0, 0.0]), sampler_name="dpm_fast")
+
+    assert str(excinfo.value) == DPM_FAST_MESSAGE
+
+
+def test_the_upscale_node_rejects_an_unsupported_sampler_at_queue_time():
+    # Naming sampler_name in VALIDATE_INPUTS turns off core's combo-list check, so a name
+    # outside core's list has to be rejected here too.
+    assert ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(sampler_name="dpm_fast") == DPM_FAST_MESSAGE
+    assert "'not_a_sampler' is not supported" in ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(sampler_name="not_a_sampler")
+    for supported in stepper.SUPPORTED_SAMPLERS:
+        assert ContextAnchoredTileUpscaleVL.VALIDATE_INPUTS(sampler_name=supported) is True, supported
+
+
+def test_a_linked_sampler_name_is_left_to_the_engine():
+    # Core hands VALIDATE_INPUTS None for a linked value, and the base and Refine (VL) nodes
+    # have no sampler_name at all, so None passes and the engine's intake check still runs.
+    for node_class in (ContextAnchoredTileRefine, ContextAnchoredTileRefineVL, ContextAnchoredTileUpscaleVL):
+        assert node_class.VALIDATE_INPUTS(sampler_name=None) is True, node_class.__name__
+
+
+def test_the_sampler_tooltip_lists_every_supported_sampler(comfy_stubs):
+    tooltip = ContextAnchoredTileUpscaleVL.INPUT_TYPES()["required"]["sampler_name"][1]["tooltip"]
+
+    assert ", ".join(stepper.SUPPORTED_SAMPLERS) in tooltip

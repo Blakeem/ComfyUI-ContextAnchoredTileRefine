@@ -8,12 +8,14 @@ fail-fast guard. A duck-typed clip stands in for the VL text encoder; no comfy i
 no model are needed.
 """
 import dataclasses
+import sys
+import types
 
 import pytest
 import torch
-from test_vl import VLGuider, sync_sampler
+from test_vl import Tile, VLGuider, layout_tiles, strip_tiles, sync_sampler
 
-from context_anchored_tile_refine import captions, sampling, vl
+from context_anchored_tile_refine import captions, grid, sampling, vl
 from context_anchored_tile_refine.grid import Rect
 
 SIGMAS = torch.linspace(1.0, 0.0, 5)  # 4 steps
@@ -26,23 +28,25 @@ N_ROWS = 6
 TAIL = 4
 
 
-class Tile:
-    def __init__(self, rect):
-        self.crop_rect = rect
+def a_vision(canvas=1, crop=0, caption_mp=None):
+    # The [vision] table a test hands the pre-pass: under the stubbed resample only on/off
+    # matters for the two token counts, and the caption picture defaults to the 384-budget
+    # every test that predates the presets captioned at.
+    return captions.VisionSettings(
+        canvas_tokens=canvas, crop_tokens=crop,
+        caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS if caption_mp is None else caption_mp)
 
 
 def a_preset(tile="describe", tile_tokens=256, style="", style_tokens=128,
-             surface=None, tile_mp=None, style_mp=None):
+             surface=None, caption_mp=None):
     # A resolved settings block, which is what the caption pipeline takes. The defaults keep
     # every test that predates the presets asking its own question at its own budget.
-    default_mp = captions.VL_INPUT_BUDGET_MEGAPIXELS
     return captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS if surface is None else surface,
         label="test",
+        vision=a_vision(caption_mp=caption_mp),
         tile_instruction=tile, tile_max_tokens=tile_tokens,
-        tile_megapixels=default_mp if tile_mp is None else tile_mp,
-        style_instruction=style, style_max_tokens=style_tokens,
-        style_megapixels=default_mp if style_mp is None else style_mp)
+        style_instruction=style, style_max_tokens=style_tokens)
 
 
 class FakeCaptionClip:
@@ -105,16 +109,18 @@ class FakeCaptionClip:
                           attention_mask=torch.ones(1, seq))
         else:
             seq = 1 + self.n_rows + 1 + tail_rows if self.seq_override is None else self.seq_override
-            extras = {"pooled_output": torch.zeros(1, 4), "attention_mask": torch.ones(1, seq)}
+            # Krea 2 returns pooled_output None on an image encode as well (measured), which is
+            # what lets two vision blocks and a caption concatenate.
+            extras = {"pooled_output": None, "attention_mask": torch.ones(1, seq)}
         tensor = torch.arange(seq, dtype=torch.float32).reshape(1, seq, 1).expand(1, seq, 8).clone()
         return [[tensor, extras]]
 
 
 @pytest.fixture
-def stubbed_slices(monkeypatch):
+def stubbed_slices(comfy_stubs, monkeypatch):
     # Encode geometry pinned to the fixture grid; _convert identity so the slice tensors
-    # stay inspectable without comfy.
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, ENC_H, ENC_W))
+    # stay inspectable. comfy_stubs serves vl.encode_picture's interrupt check.
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, ENC_H, ENC_W))
     monkeypatch.setattr(vl, "_convert", lambda cond_list: cond_list)
 
 
@@ -139,20 +145,25 @@ def test_settled_instructions_are_the_ab_settled_strings():
     assert "centre" in captions.SETTLED_RICH_INSTRUCTION
     assert "colour" in captions.SETTLED_RICH_INSTRUCTION
     assert captions.SETTLED_POSITION_MAX_TOKENS == 512
-    assert captions.SETTLED_RICH_MAX_TOKENS == 768
 
 
 # --- the settings file ------------------------------------------------------------------
 
-# One valid preset block, as a template every broken-file case below edits one line of.
-GOOD_PRESET = (
+# One valid file, as a template every broken-file case below edits one line of: the
+# [vision] table, then one preset block.
+VISION = (
+    '[vision]\n'
+    'canvas_tokens = 165\n'
+    'crop_tokens = 100\n'
+    'caption_megapixels = 0.147456\n'
+    '\n')
+PRESET = (
     '[presets.demo]\n'
     'tile_caption_instruction = "ask about the tile"\n'
     'tile_caption_max_tokens = 768\n'
-    'tile_caption_megapixels = 0.147456\n'
     'global_style_instruction = ""\n'
-    'global_style_max_tokens = 512\n'
-    'global_style_megapixels = 0.147456\n')
+    'global_style_max_tokens = 512\n')
+GOOD_SETTINGS = VISION + PRESET
 
 
 def write_settings(tmp_path, body, monkeypatch=None):
@@ -169,72 +180,199 @@ def write_settings(tmp_path, body, monkeypatch=None):
 def test_settings_toml_ships_the_owner_tested_wording():
     # The live prompts, pinned character for character: the owner's testing found small
     # wording changes lose consistency, so an accidental edit fails here. A deliberate
-    # prompt change updates this pin alongside settings.toml.
-    presets = captions.load_settings()
-    # `standard` is FIRST, which is what makes it the default preset the selector offers
-    # unlabeled. Its block is the pre-settings-file constants character for character, so the
-    # unlabeled options a pre-preset workflow carries still ask what they asked then.
-    assert list(presets) == ["standard", "artwork"]
-    assert presets["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
-    assert presets["standard"]["global_style_instruction"] == ""
-    artwork = presets["artwork"]
-    assert artwork["tile_caption_instruction"] == (
+    # prompt change updates this pin alongside the settings files.
+    settings = captions.load_settings()
+    # The [vision] table: equal canvas and crop rows, which kept the canvas slice's phantom
+    # cars off a flat roof on three seeds, and the caption picture at the vision encode's old
+    # size, the three-scene A/B's winner.
+    assert settings.vision == captions.VisionSettings(
+        canvas_tokens=165, crop_tokens=165, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
+    assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
+
+    # The example file: the tags preset first, then every caption preset, copied from the
+    # owner's own settings.user.toml. The tags wording is the Logit Tagger's, placeholders
+    # renamed to this file's upper case.
+    example = captions.load_settings(captions.SETTINGS_DIR / captions.EXAMPLE_SETTINGS_NAME)
+    assert example.vision == settings.vision
+    examples = example.presets
+    assert list(examples) == ["tags", "prompted", "standard", "artwork", "grounded",
+                              "artwork grounded"]
+    assert examples["tags"] == {
+        "tile_text": "tags",
+        "tile_tags_instruction": (
+            "Tag this image. List every distinct visible thing in it: objects, people, animals, "
+            "clothing, materials, and the setting. Use short lowercase noun phrases separated by "
+            "commas. List each thing once. Do not list moods, styles, or ideas. Output only the "
+            "tags."),
+        "prompt_tags_instruction": (
+            "This is a prompt for an image:\n{PROMPT}\n\nList the physical things the prompt "
+            "names that could be pointed at in the image: objects, people, animals, plants, "
+            "clothing, materials, buildings and parts of the scene. Use short lowercase noun "
+            "phrases of one to four words, separated by commas. Keep each thing's own descriptive "
+            "words, such as its color. Leave out places and settings, actions, sizes, moods, the "
+            "image's style, medium, quality, camera and lighting, artist names and position words. "
+            "List each thing once. Output only the list."),
+        "tile_tags_verification_statement": "This image visibly contains {TAG}",
+        # The library's strict pair, which replaced the former 0.999 and 0.9999 prompt-only pair
+        # (tests-AB/tags-bench-log.md, section 13).
+        "tile_tags_verification_threshold": 0.99998,
+        "prompt_tags_verification_threshold": 0.99998,
+        # The owner's 8K storm sky tile: every tag under 0.9 on every strip named a bay or
+        # buildings the tile lacks.
+        "tile_tags_position_threshold": 0.9,
+        "global_style_instruction": (
+            "Concise prose containing only the style of media used and the general style within "
+            "that type of media."),
+        "global_style_max_tokens": 768,
+    }
+    assert (captions.SHIPPED_TAGS_VERIFICATION_THRESHOLD, captions.SHIPPED_TAGS_POSITION_THRESHOLD,
+            captions.SHIPPED_PROMPT_TAGS_VERIFICATION_THRESHOLD) == (0.99998, 0.9, 0.99998)
+    # The shipped file is that one tags preset and nothing else, so it is the default.
+    assert settings.presets == {"tags": examples["tags"]}
+
+    # `prompted` asks for the image's prompt and holds the caption to the crop. `standard` is
+    # the pre-settings-file constants character for character, so a workflow that spells its
+    # label out still asks what it asked then.
+    assert examples["prompted"]["tile_caption_instruction"] == (
+        "Concise prose containing object's relative and absolute positions within the "
+        'foreground and background of the cropped image. Full prompt: "{PROMPT}". Keep it '
+        "concise. Do not include anything not in the crop.")
+    assert examples["prompted"]["global_style_instruction"] == (
+        "Concise prose containing only the style of media used and the general style within "
+        "that type of media.")
+    assert examples["standard"]["tile_caption_instruction"] == captions.RICH_GROUPED_INSTRUCTION
+    assert examples["standard"]["global_style_instruction"] == ""
+    assert examples["artwork"]["tile_caption_instruction"] == (
         "succinct prose containing relative and absolute positions of specific things with "
         "object and character identifying demographics.")
-    assert artwork["global_style_instruction"] == (
+    assert examples["artwork"]["global_style_instruction"] == (
         "succinct flowing prose of only the overall style and artistic medium and physical "
         "medium. No objects or items in the scene.")
-    for preset in presets.values():
-        assert preset["tile_caption_max_tokens"] == 768
-        assert preset["global_style_max_tokens"] == 768
-        assert preset["tile_caption_megapixels"] == captions.VL_INPUT_BUDGET_MEGAPIXELS
-        assert preset["global_style_megapixels"] == captions.VL_INPUT_BUDGET_MEGAPIXELS
+    assert examples["grounded"]["tile_caption_instruction"] == (
+        f"{captions.RICH_GROUPED_INSTRUCTION} Name a thing only if you can identify it. Where "
+        "you cannot, write the part's colour and texture and then the words no identifiable "
+        "object.")
+    assert examples["grounded"]["global_style_instruction"] == ""
+    assert examples["artwork grounded"]["tile_caption_instruction"] == (
+        "succinct prose containing relative and absolute positions of specific things with "
+        "object and character identifying demographics. Name a thing only if you can identify "
+        "it, and otherwise give only its shape, colour and surface. Where nothing in the "
+        "picture can be identified, say so and stop.")
+    assert examples["artwork grounded"]["global_style_instruction"] == (
+        "Name the artistic medium, the physical medium, the brushwork, the palette and the "
+        "lighting of this image, in one succinct sentence. Describe no object, no place, no "
+        "setting and no genre.")
+    for label in ("prompted", "standard", "artwork", "grounded", "artwork grounded"):
+        assert examples[label]["tile_caption_max_tokens"] == 768, label
+        assert examples[label]["global_style_max_tokens"] == 768, label
 
 
-def test_every_preset_adds_one_option_per_caption_surface():
+def test_every_preset_adds_one_option_per_caption_surface(caption_settings):
     # A preset's own two options sit together and in file order, so the selector reads the way
     # the settings file was written. The vision-only surface leads and carries no label,
-    # because it asks the VLM nothing. The FIRST preset's two options carry no label either,
-    # which is what makes them the strings a pre-preset workflow already holds.
+    # because it asks the VLM nothing. The first preset is the default and its two options
+    # carry no label either, so the selector leads with the three bare surfaces.
     assert list(captions.vlm_methods()) == [
         "vision tokens",
         "vision tokens and captions", "captions",
+        "vision tokens and captions (standard)", "captions (standard)",
         "vision tokens and captions (artwork)", "captions (artwork)",
     ]
-    assert captions.default_vlm_method() == captions.VLM_METHOD_VISION_CAPTIONS
+    assert captions.default_vlm_method() == "vision tokens and captions"
 
 
-def test_the_default_preset_answers_to_both_forms_of_its_name():
-    # The selector offers the default preset unlabeled, but a workflow that spells its label
-    # out (what a workflow saved between 1.6.0 and the default preset carries) must reach the
-    # SAME block rather than a "no such preset" error.
+def test_the_default_preset_answers_to_both_forms_of_its_name(caption_settings):
+    # The selector offers the default preset bare, and a workflow saved while every preset
+    # was labeled holds its labeled form. Both must reach the SAME block rather than a "no
+    # such preset" error.
     unlabeled = captions.resolve_method("vision tokens and captions")
-    labeled = captions.resolve_method("vision tokens and captions (standard)")
+    labeled = captions.resolve_method("vision tokens and captions (prompted)")
     assert unlabeled == labeled
-    assert unlabeled.label == "standard"
-    assert labeled.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
+    assert unlabeled.label == "prompted"
+    # A later preset resolves by its label alone, and `standard` still asks the settled wording.
+    standard = captions.resolve_method("vision tokens and captions (standard)")
+    assert standard.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
+
+
+# --- the prompt input -----------------------------------------------------------------
+
+def _prompted_preset(tile='Full prompt: "{PROMPT}". Name it.', style=""):
+    return captions.Preset(
+        surface=captions.VLM_METHOD_CAPTIONS, label="demo",
+        vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
+        tile_instruction=tile, tile_max_tokens=768, style_instruction=style, style_max_tokens=768)
+
+
+def test_with_prompt_fills_both_instructions_and_strips_the_prompt():
+    # A multiline widget hands its text over with a trailing newline, which must not land
+    # inside the instruction's quotes. Every other field rides through untouched.
+    preset = _prompted_preset(style="Style of {PROMPT}, and again {PROMPT}.")
+
+    filled = captions.with_prompt(preset, "  a fox in the centre\n")
+
+    assert filled.tile_instruction == 'Full prompt: "a fox in the centre". Name it.'
+    assert filled.style_instruction == "Style of a fox in the centre, and again a fox in the centre."
+    assert filled == dataclasses.replace(preset, tile_instruction=filled.tile_instruction,
+                                         style_instruction=filled.style_instruction)
+
+
+def test_with_prompt_keeps_braces_in_the_prompt_literal():
+    # A literal replace, never str.format: a prompt can carry its own braces.
+    filled = captions.with_prompt(_prompted_preset(), "a {red} fox")
+
+    assert filled.tile_instruction == 'Full prompt: "a {red} fox". Name it.'
+
+
+def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder(caption_settings):
+    # The `standard` and `artwork` presets and the vision-only surface read no prompt,
+    # so a typed prompt changes nothing there, blank or not.
+    for method in ("captions (standard)", "captions (artwork)", "vision tokens"):
+        preset = captions.resolve_method(method)
+        assert captions.with_prompt(preset, "a fox") == preset, method
+        assert captions.with_prompt(preset, "") == preset, method
+        assert captions.with_prompt(preset, None) == preset, method
+
+
+@pytest.mark.parametrize(("tile", "style", "key"), [
+    ('Full prompt: "{PROMPT}".', "", "tile_caption_instruction"),
+    ("Name it.", "Style of {PROMPT}.", "global_style_instruction"),
+])
+# None is the unconnected socket, "" and whitespace a connected primitive with nothing in it.
+@pytest.mark.parametrize("prompt", [None, "", "   \n"])
+def test_with_prompt_refuses_a_missing_prompt_where_an_instruction_asks_for_one(tile, style, key, prompt):
+    with pytest.raises(RuntimeError, match=rf"preset 'demo' asks for \{{PROMPT\}} in its {key}.*not connected or is empty"):
+        captions.with_prompt(_prompted_preset(tile=tile, style=style), prompt)
+
+
+def test_the_caption_pass_refuses_an_unfilled_placeholder_before_any_generate(comfy_stubs):
+    # A direct caller that skipped with_prompt would otherwise ask every tile a question
+    # holding the literal placeholder.
+    clip = FakeCaptionClip()
+
+    with pytest.raises(RuntimeError, match=r"still carries \{PROMPT\} in its tile_caption_instruction"):
+        captions.generate_caption_set(clip, torch.rand(1, 64, 64, 3), [], _prompted_preset())
+
+    assert clip.generate_calls == []
 
 
 def test_the_method_list_is_built_once_per_session(tmp_path, monkeypatch):
     # The frontend caches a node's definition at startup, so a list that changed between
     # calls would offer values the backend then rejects. A preset added mid-session must
     # therefore NOT appear until a restart, which is what the cache buys — so the file is
-    # rewritten here with no clear and the first answer has to stand. The renamed preset is
-    # the SECOND one, because the first is the unlabeled default and a rename there would not
-    # show in the list at all.
-    two_presets = GOOD_PRESET + GOOD_PRESET.replace("[presets.demo]", "[presets.extra]")
-    unlabeled = ["vision tokens", "vision tokens and captions", "captions"]
+    # rewritten here with no clear and the first answer has to stand.
+    two_presets = GOOD_SETTINGS + PRESET.replace("[presets.demo]", "[presets.extra]")
+    first = ["vision tokens", "vision tokens and captions", "captions"]
     path = write_settings(tmp_path, two_presets, monkeypatch)
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
+        *first, "vision tokens and captions (extra)", "captions (extra)"]
 
     path.write_text(two_presets.replace("[presets.extra]", "[presets.added]"))
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (extra)", "captions (extra)"]
+        *first, "vision tokens and captions (extra)", "captions (extra)"]
 
     captions.vlm_methods.cache_clear()             # a restart, and the new preset appears
     assert list(captions.vlm_methods()) == [
-        *unlabeled, "vision tokens and captions (added)", "captions (added)"]
+        *first, "vision tokens and captions (added)", "captions (added)"]
 
 
 @pytest.mark.parametrize(("vlm_method", "surface", "label"), [
@@ -253,18 +391,19 @@ def test_a_method_splits_into_its_surface_and_its_label(vlm_method, surface, lab
 def test_an_unlabeled_caption_method_takes_the_first_preset(tmp_path, monkeypatch):
     # A workflow saved before the presets existed still runs, on the file's first block —
     # whichever block that is, so a user who reorders their own copy moves the default with it.
-    write_settings(tmp_path, GOOD_PRESET, monkeypatch)
+    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
     legacy = captions.resolve_method("vision tokens and captions")
     assert legacy.label == "demo"
     assert legacy.surface == captions.VLM_METHOD_VISION_CAPTIONS
     assert legacy.tile_instruction == "ask about the tile"
 
 
-def test_each_caption_method_asks_its_own_presets_question():
+def test_each_caption_method_asks_its_own_presets_question(caption_settings):
     # Both caption surfaces ask the SAME tile question of a given preset, as they have since
     # 2026-08-16, and the wording comes from the settings file rather than a code constant.
     # The settled constants stay defined for tests-AB's judged arms, and nothing selects them.
-    presets = captions.load_settings()
+    settings = captions.load_settings()
+    presets = settings.presets
     for label, block in presets.items():
         for surface in captions.CAPTION_SURFACES:
             preset = captions.resolve_method(f"{surface} ({label})")
@@ -272,27 +411,25 @@ def test_each_caption_method_asks_its_own_presets_question():
             assert preset.label == label
             assert preset.tile_instruction == block["tile_caption_instruction"]
             assert preset.tile_max_tokens == block["tile_caption_max_tokens"]
-            assert preset.tile_megapixels == block["tile_caption_megapixels"]
+            # Every option carries the one [vision] table.
+            assert preset.vision == settings.vision
     assert presets["artwork"]["tile_caption_instruction"] != captions.SETTLED_POSITION_INSTRUCTION
 
 
-def _never_read(*_args, **_kwargs):
-    raise AssertionError("the settings file must not be read here")
-
-
-def test_vision_tokens_resolves_without_reading_the_settings_file(monkeypatch):
-    # "vision tokens" never reaches the VLM, so a broken settings file must not fail it.
-    monkeypatch.setattr(captions, "load_settings", _never_read)
-
+def test_vision_tokens_resolves_to_the_vision_table_and_no_preset():
+    # "vision tokens" never reaches the VLM's generator, so it takes no preset at all; it
+    # does take the [vision] table, which sizes every surface's vision rows.
     preset = captions.resolve_method(captions.VLM_METHOD_VISION)
     assert preset.surface == captions.VLM_METHOD_VISION
+    assert preset.label == ""
     assert preset.tile_instruction == ""
     assert preset.style_instruction == ""
+    assert preset.vision == captions.load_settings().vision
 
 
 def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeypatch):
     # "" is the documented off switch, and whitespace must not sneak past it.
-    write_settings(tmp_path, GOOD_PRESET.replace('global_style_instruction = ""',
+    write_settings(tmp_path, GOOD_SETTINGS.replace('global_style_instruction = ""',
                                                  'global_style_instruction = "  "'), monkeypatch)
 
     preset = captions.resolve_method("captions (demo)")
@@ -302,35 +439,233 @@ def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeyp
 
 def test_a_method_naming_an_absent_preset_is_a_named_hard_error(tmp_path, monkeypatch):
     # The selector is built at startup while the wording is read per run, so a preset renamed
-    # mid-session leaves a stale option behind. It must name the preset, not fail obscurely.
-    write_settings(tmp_path, GOOD_PRESET, monkeypatch)
+    # mid-session leaves a stale option behind, and a saved workflow can name a preset that no
+    # longer ships. It must name the option, the file in force and the example file that
+    # carries the presets that no longer ship.
+    path = write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
 
-    with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
+    with pytest.raises(RuntimeError) as error:
         captions.resolve_method("captions (gone)")
+
+    message = str(error.value)
+    assert "vlm_method 'captions (gone)' asks for preset 'gone'" in message
+    assert str(path) in message
+    assert captions.EXAMPLE_SETTINGS_NAME in message
+
+
+# --- the tile_text kinds ---------------------------------------------------------------
+
+TAGS_PRESET = (
+    '[presets.tagged]\n'
+    'tile_text = "tags"\n'
+    'tile_tags_instruction = "list the things"\n'
+    'prompt_tags_instruction = "List the things in: {PROMPT}"\n'
+    'tile_tags_verification_statement = "It shows {TAG}"\n'
+    'tile_tags_verification_threshold = 0.8\n'
+    'prompt_tags_verification_threshold = 0.95\n'
+    'tile_tags_position_threshold = 0.7\n'
+    'global_style_instruction = "the style"\n'
+    'global_style_max_tokens = 512\n')
+TAGS_SETTINGS = VISION + TAGS_PRESET
+
+
+def test_a_tags_preset_loads_and_resolves_to_its_tags_fields(tmp_path, monkeypatch):
+    write_settings(tmp_path, TAGS_SETTINGS + "\n" + PRESET, monkeypatch)
+
+    preset = captions.resolve_method("vision tokens and captions")
+
+    assert preset.label == "tagged"
+    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.tile_tags_instruction == "list the things"
+    assert preset.prompt_tags_instruction == "List the things in: {PROMPT}"
+    assert preset.tile_tags_verification_statement == "It shows {TAG}"
+    assert (preset.tile_tags_verification_threshold, preset.prompt_tags_verification_threshold,
+            preset.tile_tags_position_threshold) == (0.8, 0.95, 0.7)
+    assert preset.style_instruction == "the style"
+    assert preset.style_max_tokens == 512
+    # A tags preset asks no tile question, and its prompt is empty until with_prompt runs.
+    assert (preset.tile_instruction, preset.tile_max_tokens, preset.prompt) == ("", 0, "")
+
+
+def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path, monkeypatch):
+    # A block without tile_text is every settings.user.toml written before the key existed.
+    write_settings(tmp_path, GOOD_SETTINGS, monkeypatch)
+    implicit = captions.resolve_method("captions")
+    write_settings(tmp_path, GOOD_SETTINGS.replace(
+        "[presets.demo]\n", '[presets.demo]\ntile_text = "caption"\n'), monkeypatch)
+    explicit = captions.resolve_method("captions")
+
+    assert implicit == explicit
+    assert implicit.kind == captions.TILE_TEXT_CAPTION
+    assert implicit.tile_instruction == "ask about the tile"
+    assert (implicit.tile_tags_instruction, implicit.prompt_tags_instruction,
+            implicit.tile_tags_verification_statement, implicit.prompt) == ("", "", "", "")
+
+
+@pytest.mark.parametrize(("content", "message"), [
+    (TAGS_SETTINGS.replace('tile_text = "tags"', 'tile_text = "words"'),
+     r"preset 'tagged' in .* sets tile_text to 'words'\. Set it to one of \['caption', 'tags'\]"),
+    (TAGS_SETTINGS.replace('tile_text = "tags"', "tile_text = 1"),
+     "preset 'tagged' key tile_text in .* must be of type str"),
+    (TAGS_SETTINGS.replace('tile_tags_verification_statement = "It shows {TAG}"\n', ''),
+     r"preset 'tagged' in .* is missing \['tile_tags_verification_statement'\]"),
+    # The caption keys are unknown on a tags preset, so a block cannot carry both kinds.
+    (TAGS_SETTINGS + 'tile_caption_instruction = "ask"\n',
+     r"preset 'tagged' in .* carries unknown keys \['tile_caption_instruction'\] for tile_text 'tags'"),
+    (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', "tile_tags_instruction = 3"),
+     "preset 'tagged' key tile_tags_instruction in .* must be of type str"),
+    (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', 'tile_tags_instruction = "  "'),
+     r"preset 'tagged' in .* has an empty tile_tags_instruction"),
+    (TAGS_SETTINGS.replace("global_style_max_tokens = 512", "global_style_max_tokens = 0"),
+     "preset 'tagged' key global_style_max_tokens in .* between 1 and 4096"),
+    (TAGS_SETTINGS.replace("{PROMPT}", "the prompt"),
+     r"preset 'tagged' key prompt_tags_instruction in .* does not hold \{PROMPT\}"),
+    (TAGS_SETTINGS.replace("{TAG}", "a tag"),
+     r"preset 'tagged' key tile_tags_verification_statement in .* does not hold \{TAG\}"),
+    (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7\n", ""),
+     r"preset 'tagged' in .* is missing \['tile_tags_position_threshold'\]"),
+    (TAGS_SETTINGS.replace('prompt_tags_instruction = "List the things in: {PROMPT}"\n', ""),
+     r"preset 'tagged' in .* is missing \['prompt_tags_instruction'\]"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95\n", ""),
+     r"preset 'tagged' in .* is missing \['prompt_tags_verification_threshold'\]"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 1.5"),
+     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 1.5"),
+    (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 0"),
+     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 0"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", 'tile_tags_verification_threshold = "high"'),
+     "preset 'tagged' key tile_tags_verification_threshold in .* must be of type float, got str"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 1.5"),
+     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 1.5"),
+    (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 0.0"),
+     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
+     "got 0.0"),
+    (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7", "tile_tags_position_threshold = -0.1"),
+     "preset 'tagged' key tile_tags_position_threshold in .* is a score and must be between 0 and 1, got -0.1"),
+    # {PROMPT} belongs in prompt_tags_instruction only.
+    (TAGS_SETTINGS.replace('"list the things"', '"list the things in {PROMPT}"'),
+     r"preset 'tagged' key tile_tags_instruction in .* holds \{PROMPT\}, which only "
+     r"prompt_tags_instruction takes"),
+    (TAGS_SETTINGS.replace('"It shows {TAG}"', '"It shows {TAG} from {PROMPT}"'),
+     r"preset 'tagged' key tile_tags_verification_statement in .* holds \{PROMPT\}, which only "
+     r"prompt_tags_instruction takes"),
+    # The tags keys are unknown on a caption preset.
+    (GOOD_SETTINGS + 'tile_tags_verification_statement = "It shows {TAG}"\n',
+     r"preset 'demo' in .* carries unknown keys \['tile_tags_verification_statement'\] for tile_text 'caption'"),
+])
+def test_a_broken_tags_preset_is_a_named_hard_error(tmp_path, content, message):
+    path = tmp_path / "settings.toml"
+    path.write_text(content)
+
+    with pytest.raises(RuntimeError, match=message):
+        captions.load_settings(path)
+
+
+def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_prompt_tags_template():
+    # The prompt tags question is asked only when the prompt is not empty, so it stays a
+    # template here.
+    preset = captions.Preset(
+        surface=captions.VLM_METHOD_CAPTIONS, label="tagged",
+        vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
+        style_instruction="Style of {PROMPT}.", style_max_tokens=768,
+        kind=captions.TILE_TEXT_TAGS, tile_tags_instruction="list",
+        prompt_tags_instruction="List the things in: {PROMPT}", tile_tags_verification_statement="It shows {TAG}")
+
+    filled = captions.with_prompt(preset, "  a fox\n")
+
+    assert filled == dataclasses.replace(preset, prompt="a fox", style_instruction="Style of a fox.")
+    # No placeholder in the style question: None and a blank prompt both store "".
+    plain = dataclasses.replace(preset, style_instruction="the style")
+    for prompt in (None, "", "   \n"):
+        assert captions.with_prompt(plain, prompt) == plain, prompt
+    # The style question follows the caption rule, so it never asks with the literal placeholder.
+    with pytest.raises(RuntimeError, match=r"preset 'tagged' asks for \{PROMPT\} in its global_style_instruction"):
+        captions.with_prompt(preset, "")
+
+
+@pytest.mark.parametrize(("kind", "style", "prompt", "expected"), [
+    (captions.TILE_TEXT_CAPTION, "", "", 0),
+    (captions.TILE_TEXT_CAPTION, "the style", "", 3),
+    # A caption preset reads no stored prompt, so it adds no style row.
+    (captions.TILE_TEXT_CAPTION, "", "a fox", 0),
+    (captions.TILE_TEXT_TAGS, "", "", 0),
+    (captions.TILE_TEXT_TAGS, "the style", "", 3),
+    # The style line is the style caption alone, so a tags preset's prompt adds no style row.
+    (captions.TILE_TEXT_TAGS, "", "a fox", 0),
+    (captions.TILE_TEXT_TAGS, "the style", "a fox", 3),
+])
+def test_the_style_row_count_is_one_rule_for_both_kinds(kind, style, prompt, expected):
+    preset = dataclasses.replace(a_preset(style=style), kind=kind, prompt=prompt)
+
+    assert captions.style_row_count(preset, 3) == expected
+
+
+def test_the_caption_pass_refuses_a_tags_preset_before_any_generate(comfy_stubs):
+    # A tags preset carries an empty tile question and a 0 budget.
+    clip = FakeCaptionClip()
+    preset = dataclasses.replace(a_preset(tile="", tile_tokens=0), kind=captions.TILE_TEXT_TAGS)
+
+    with pytest.raises(RuntimeError, match=r"preset 'test' is the tags kind .* runs through the tags module"):
+        captions.generate_caption_set(clip, torch.rand(1, 64, 64, 3), [], preset)
+
+    assert clip.generate_calls == []
+
+
+def test_preset_labels_lists_every_preset_of_both_kinds_in_file_order(tmp_path, monkeypatch):
+    # The Tile Test: Captions node reads this list and runs a preset of either kind.
+    write_settings(tmp_path, TAGS_SETTINGS + "\n" + PRESET, monkeypatch)
+    captions.preset_labels.cache_clear()
+
+    assert captions.preset_labels() == ("tagged", "demo")
+    # The tags preset still leads the vlm_method selector, as the unlabeled default.
+    assert list(captions.vlm_methods()) == [
+        "vision tokens", "vision tokens and captions", "captions",
+        "vision tokens and captions (demo)", "captions (demo)"]
+
+
+def test_preset_labels_reads_the_shipped_tags_preset():
+    assert captions.preset_labels() == ("tags",)
 
 
 @pytest.mark.parametrize(("content", "message"), [
     (None, "is missing at"),
     ('[presets.demo\n', "is not valid TOML"),
-    ('tile_caption_instruction = "x"\n' + GOOD_PRESET, "unknown top-level keys"),
+    ('tile_caption_instruction = "x"\n' + GOOD_SETTINGS, "unknown top-level keys"),
     ('[other.demo]\nx = 1\n', "unknown top-level keys"),
-    ('# nothing at all\n', "defines no presets"),
-    ('[presets]\n', "defines no presets"),
-    ('[presets."bad (label)"]\n', "not usable"),
-    ('[presets]\ndemo = 1\n', r"must be a \[presets.demo\] table"),
-    (GOOD_PRESET.replace('tile_caption_megapixels = 0.147456\n', ''), "missing \\['tile_caption_megapixels'\\]"),
-    (GOOD_PRESET + 'globl_style_instruction = "typo"\n', "unknown keys \\['globl_style_instruction'\\]"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", 'tile_caption_max_tokens = "768"'), "must be of type int"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = true"), "must be of type int"),
-    (GOOD_PRESET.replace("tile_caption_megapixels = 0.147456", 'tile_caption_megapixels = "big"'), "must be of type float"),
-    (GOOD_PRESET.replace('tile_caption_instruction = "ask about the tile"',
-                         'tile_caption_instruction = "  "'), "need a question"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 0"), "between 1 and 4096"),
-    (GOOD_PRESET.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 9999"), "between 1 and 4096"),
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = 8.0"), "between 0.01 and 2.0"),
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = -1.0"), "between 0.01 and 2.0"),
+    ('# nothing at all\n', r"has no \[vision\] table"),
+    (PRESET, r"has no \[vision\] table"),
+    (VISION, "defines no presets"),
+    (VISION + '[presets]\n', "defines no presets"),
+    (VISION + '[presets."bad (label)"]\n', "not usable"),
+    (VISION + '[presets]\ndemo = 1\n', r"must be a \[presets.demo\] table"),
+    ('vision = 1\n' + PRESET, r"\[vision\] in .* must be a table"),
+    (GOOD_SETTINGS.replace('crop_tokens = 100\n', ''), "missing \\['crop_tokens'\\]"),
+    (GOOD_SETTINGS.replace('crop_tokens = 100\n', 'crop_tokens = 100\ncrop_megapixels = 0.1\n'),
+     "unknown keys \\['crop_megapixels'\\]"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", 'canvas_tokens = "165"'), "must be of type int"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 1.5"), "must be of type int"),
+    (GOOD_SETTINGS.replace("crop_tokens = 100", "crop_tokens = true"), "must be of type int"),
+    (GOOD_SETTINGS.replace("crop_tokens = 100", "crop_tokens = -1"), "between 0 and 1953"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 2000"), "between 0 and 1953"),
+    (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 0").replace("crop_tokens = 100", "crop_tokens = 0"),
+     "both to 0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", 'caption_megapixels = "big"'), "must be of type float"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = 8.0"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = -1.0"), "between 0.01 and 2.0"),
     # Below the floor the budget rounds to no pixels and the resample would build a 0 x 0 image.
-    (GOOD_PRESET.replace("global_style_megapixels = 0.147456", "global_style_megapixels = 1e-9"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = 1e-9"), "between 0.01 and 2.0"),
+    (GOOD_SETTINGS.replace('tile_caption_max_tokens = 768\n', ''), "missing \\['tile_caption_max_tokens'\\]"),
+    (GOOD_SETTINGS + 'globl_style_instruction = "typo"\n', "unknown keys \\['globl_style_instruction'\\]"),
+    # A user's own copy from before the [vision] table names the move, not "unknown key".
+    (GOOD_SETTINGS + 'tile_caption_megapixels = 0.5\n', "no longer reads"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", 'tile_caption_max_tokens = "768"'), "must be of type int"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = true"), "must be of type int"),
+    (GOOD_SETTINGS.replace('tile_caption_instruction = "ask about the tile"',
+                         'tile_caption_instruction = "  "'), "need a question"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 0"), "between 1 and 4096"),
+    (GOOD_SETTINGS.replace("tile_caption_max_tokens = 768", "tile_caption_max_tokens = 9999"), "between 1 and 4096"),
 ])
 def test_a_broken_settings_file_is_a_named_hard_error(tmp_path, content, message):
     # Every defect fails before any clip.generate spends GPU time, naming the file and the
@@ -347,10 +682,10 @@ def test_a_broken_settings_file_is_a_named_hard_error(tmp_path, content, message
 def test_a_toml_int_is_accepted_where_a_float_is_asked_for(tmp_path):
     # 0 is the documented "the crop's own size" value and TOML parses it as an int, so the
     # float keys must take one.
-    path = write_settings(tmp_path, GOOD_PRESET.replace("tile_caption_megapixels = 0.147456",
-                                                        "tile_caption_megapixels = 0"))
+    path = write_settings(tmp_path, GOOD_SETTINGS.replace("caption_megapixels = 0.147456",
+                                                          "caption_megapixels = 0"))
 
-    assert captions.load_settings(path)["demo"]["tile_caption_megapixels"] == 0
+    assert captions.load_settings(path).vision.caption_megapixels == 0
 
 
 def test_a_non_utf8_settings_file_is_a_named_hard_error(tmp_path):
@@ -371,13 +706,61 @@ def test_the_users_own_copy_wins_over_the_shipped_file(tmp_path, monkeypatch):
     assert captions.SETTINGS_NAME == "settings.toml"
     monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml")
     monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
-    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_PRESET)
+    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_SETTINGS)
     assert captions.settings_path().name == captions.SETTINGS_NAME
 
     (tmp_path / captions.USER_SETTINGS_NAME).write_text(
-        GOOD_PRESET.replace("[presets.demo]", "[presets.mine]"))
+        GOOD_SETTINGS.replace("[presets.demo]", "[presets.mine]"))
     assert captions.settings_path().name == captions.USER_SETTINGS_NAME
-    assert list(captions.load_settings()) == ["mine"]
+    assert list(captions.load_settings().presets) == ["mine"]
+
+
+def a_settings_dir(tmp_path, monkeypatch):
+    # The shipped file at a throwaway directory, so a fingerprint test can edit the file in
+    # force without touching the real one.
+    monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
+    (tmp_path / captions.SETTINGS_NAME).write_text(GOOD_SETTINGS)
+
+
+def test_the_settings_fingerprint_is_stable_across_calls(tmp_path, monkeypatch):
+    a_settings_dir(tmp_path, monkeypatch)
+
+    first = captions.settings_fingerprint()
+
+    assert first == captions.settings_fingerprint()
+    assert first.startswith(f"{captions.SETTINGS_NAME}:")
+
+
+def test_the_settings_fingerprint_changes_when_the_file_changes(tmp_path, monkeypatch):
+    # This is the value ComfyUI compares with the previous run's, so an edited preset has to
+    # move it or the node is served from the cache and never runs.
+    a_settings_dir(tmp_path, monkeypatch)
+    before = captions.settings_fingerprint()
+
+    (tmp_path / captions.SETTINGS_NAME).write_text(
+        GOOD_SETTINGS.replace("ask about the tile", "ask something else"))
+
+    assert captions.settings_fingerprint() != before
+
+
+def test_the_settings_fingerprint_changes_when_a_user_copy_appears(tmp_path, monkeypatch):
+    # A user copy carrying the shipped file's exact bytes still takes the run over, which is
+    # why the file name rides beside the digest.
+    a_settings_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(captions, "USER_SETTINGS_NAME", "settings.user.toml")
+    before = captions.settings_fingerprint()
+
+    (tmp_path / captions.USER_SETTINGS_NAME).write_text(GOOD_SETTINGS)
+
+    assert captions.settings_fingerprint() != before
+
+
+def test_a_missing_settings_file_fingerprints_without_raising(tmp_path, monkeypatch):
+    # IS_CHANGED runs while the prompt is queued, so a missing file must not stop the queue.
+    # The run-time read is what raises the message that names the file.
+    monkeypatch.setattr(captions, "SETTINGS_DIR", tmp_path)
+
+    assert captions.settings_fingerprint() == f"missing:{captions.SETTINGS_NAME}"
 
 
 @pytest.mark.parametrize(("megapixels", "size", "expected"), [
@@ -417,6 +800,9 @@ def test_the_settings_file_reaches_the_registry_archive():
 
     assert (captions.SETTINGS_DIR / captions.SETTINGS_NAME).is_file()
     assert captions.SETTINGS_NAME not in excluded
+    # The example file is what the missing-preset error points a user to.
+    assert (captions.SETTINGS_DIR / captions.EXAMPLE_SETTINGS_NAME).is_file()
+    assert captions.EXAMPLE_SETTINGS_NAME not in excluded
 
 
 # --- strip_thinking / clean_caption ---------------------------------------------------
@@ -514,6 +900,19 @@ def test_generate_caption_falls_back_through_sampling_then_a_simpler_question():
     assert clip.tokenize_calls[-1]["thinking"] is False
 
 
+def test_generate_caption_drops_the_decode_graphs_after_every_generate(comfy_stubs, monkeypatch):
+    cleanups = []
+    prefetch = types.ModuleType("comfy.model_prefetch")
+    prefetch.cleanup_prefetch_queues = lambda: cleanups.append(len(clip.generate_calls))
+    monkeypatch.setitem(sys.modules, "comfy.model_prefetch", prefetch)
+    answers = ["", "<think>x</think>a wall of tools"]
+    clip = FakeCaptionClip(answer=lambda image, instruction: answers[len(clip.generate_calls) - 1])
+
+    captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
+
+    assert cleanups == [1, 2]
+
+
 def test_generate_caption_raises_when_every_fallback_is_empty():
     clip = FakeCaptionClip(answer=lambda image, instruction: "")
     with pytest.raises(RuntimeError, match="empty answer after every fallback"):
@@ -545,6 +944,117 @@ def test_generate_caption_rejects_a_clip_without_image_tokens():
 
     with pytest.raises(RuntimeError, match="no image tokens"):
         captions.generate_caption(NoImageTokenClip(), torch.zeros(1, 8, 8, 3), "describe", 256)
+
+
+# --- the caption cache ----------------------------------------------------------------
+
+def test_a_repeated_caption_request_is_served_from_the_cache():
+    # A seed re-roll re-executes the node, and a greedy caption of the same picture, question
+    # and budget cannot differ, so the second pass must not reach the VLM at all.
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.rand(1, 8, 8, 3)
+
+    first = captions.generate_caption(clip, picture, "describe", 256)
+    second = captions.generate_caption(clip, picture.clone(), "describe", 256)
+
+    assert first == second == "a fox, centre"
+    assert len(clip.generate_calls) == 1
+
+
+@pytest.mark.parametrize("changed", ["pixels", "instruction", "max_length", "scope"])
+def test_every_part_of_the_key_misses_when_it_changes(changed):
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3)
+    request = {"vl_input": picture, "instruction": "describe", "max_length": 256,
+               "scope": ("tile", 0, 0, 8, 8, 0, 0)}
+
+    captions.generate_caption(clip, **request)
+    if changed == "pixels":
+        request["vl_input"] = picture.clone()
+        request["vl_input"][0, 0, 0, 0] = 1.0
+    elif changed == "instruction":
+        request["instruction"] = "describe it differently"
+    elif changed == "max_length":
+        request["max_length"] = 512
+    else:
+        request["scope"] = ("tile", 8, 0, 16, 8, 0, 0)
+    captions.generate_caption(clip, **request)
+
+    assert len(clip.generate_calls) == 2
+
+
+def test_a_different_clip_object_never_reads_another_clips_entry():
+    # A second CLIP is a second model, and its answer to the same question is its own.
+    picture = torch.zeros(1, 8, 8, 3)
+    first = FakeCaptionClip(answer=lambda image, instruction: "first model")
+    second = FakeCaptionClip(answer=lambda image, instruction: "second model")
+
+    captions.generate_caption(first, picture, "describe", 256)
+    text = captions.generate_caption(second, picture, "describe", 256)
+
+    assert text == "second model"
+    assert len(second.generate_calls) == 1
+
+
+def test_a_bfloat16_picture_is_cached_rather_than_raising():
+    # resample_for_vl keeps whatever dtype the IMAGE arrived with, and bfloat16 has no numpy
+    # dtype, so the key hashes a float32 view of the picture.
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3, dtype=torch.bfloat16)
+
+    captions.generate_caption(clip, picture, "describe", 256)
+    captions.generate_caption(clip, picture.clone(), "describe", 256)
+
+    assert len(clip.generate_calls) == 1
+
+
+def test_the_oldest_entry_is_evicted_past_the_bound(monkeypatch):
+    # The cache is bounded so a long session cannot grow it without limit.
+    monkeypatch.setattr(captions._CAPTION_CACHE, "entries", 2)
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox, centre")
+    picture = torch.zeros(1, 8, 8, 3)
+
+    for index in range(3):
+        captions.generate_caption(clip, picture, "describe", 256, scope=("tile", index))
+    captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 0))
+    captions.generate_caption(clip, picture, "describe", 256, scope=("tile", 2))
+
+    assert captions._CAPTION_CACHE.entries == 2
+    assert len(clip.generate_calls) == 4          # the third request evicted scope ("tile", 0)
+
+
+def test_two_byte_equal_tiles_in_one_run_are_captioned_separately(comfy_stubs):
+    # comfy_stubs' resample hands every tile the same zero picture, so only the tile's place
+    # in the run keeps the two requests apart.
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(16, 0, 32, 16))]
+    clip = FakeCaptionClip()
+
+    captions.generate_tile_captions(clip, torch.rand(1, 16, 32, 3), tiles, a_preset())
+
+    assert len(clip.generate_calls) == 2
+
+
+def test_a_second_pre_pass_over_the_same_tiles_reaches_no_vlm(comfy_stubs):
+    # The whole point: a re-run captions nothing again, and the progress the UI reads is
+    # still reported for every tile.
+    reported = []
+
+    class Recorder:
+        def caption_done(self, index, count):
+            reported.append((index, count))
+
+    source = torch.rand(1, 16, 32, 3)
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(16, 0, 32, 16))]
+    clip = FakeCaptionClip()
+
+    first = captions.generate_tile_captions(clip, source, tiles, a_preset())
+    asked = len(clip.generate_calls)
+    second = captions.generate_tile_captions(clip, source, tiles, a_preset(),
+                                             progress=Recorder())
+
+    assert second == first
+    assert len(clip.generate_calls) == asked == 2
+    assert reported == [(1, 2), (2, 2)]
 
 
 # --- generate_tile_captions -----------------------------------------------------------
@@ -671,6 +1181,34 @@ def test_a_style_instruction_captions_the_style_source_first_and_prepends_it(com
     assert clip.generate_calls[1]["max_length"] == 256
 
 
+def test_the_caption_set_keeps_the_style_apart_and_the_join_puts_it_on_top(comfy_stubs, monkeypatch):
+    # generate_caption_set is what the Tile Test: Captions node lists from, and the join is the
+    # engine's form, so the two together must equal generate_tile_captions byte for byte.
+    monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
+    tiles = [Tile(Rect(0, 0, 16, 16)), Tile(Rect(0, 0, 16, 16))]
+    clip = FakeCaptionClip(answer=lambda image, instruction:
+                           "oil on canvas" if instruction == "style q" else "a fox")
+
+    style, own = captions.generate_caption_set(clip, torch.rand(1, 16, 16, 3), tiles,
+                                               a_preset(style="style q"))
+
+    assert style == ["oil on canvas"]
+    assert own == [["a fox"], ["a fox"]]
+    assert captions.join_style_captions(style, own) == [["oil on canvas\na fox"]] * 2
+
+
+def test_the_caption_set_without_a_style_has_nothing_to_join(comfy_stubs, monkeypatch):
+    monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
+    clip = FakeCaptionClip(answer=lambda image, instruction: "a fox")
+
+    style, own = captions.generate_caption_set(clip, torch.rand(1, 16, 16, 3),
+                                               [Tile(Rect(0, 0, 16, 16))], a_preset())
+
+    assert style == []
+    assert own == [["a fox"]]
+    assert captions.join_style_captions(style, own) is own
+
+
 def test_the_style_caption_is_cleaned_like_any_other(comfy_stubs, monkeypatch):
     monkeypatch.setattr(captions, "resample_for_vl", lambda pixels, budget=None: pixels)
     clip = FakeCaptionClip(answer=lambda image, instruction:
@@ -707,19 +1245,23 @@ def test_a_style_canvas_with_a_different_batch_is_rejected(comfy_stubs):
                                         style_source=torch.rand(1, 32, 32, 3))
 
 
-def test_each_caption_reads_its_own_megapixel_budget(comfy_stubs, monkeypatch):
-    # The tile question and the style question carry separate input budgets, so a preset can
-    # read a tile finely and the whole image coarsely. 0 is the crop's own size.
+@pytest.mark.parametrize(("caption_mp", "expected"), [
+    (1.0, [1_000_000, 1_000_000]),
+    # 0 is each picture's own size: the style source first, then the tile crop.
+    (0, [20 * 30, 40 * 60]),
+])
+def test_both_captions_read_the_vision_tables_caption_size(comfy_stubs, monkeypatch, caption_mp, expected):
+    # The style question and the tile question read ONE picture size, the [vision] table's.
     budgets = []
     monkeypatch.setattr(captions, "resample_for_vl",
                         lambda pixels, budget=None: budgets.append(budget) or pixels)
 
     captions.generate_tile_captions(FakeCaptionClip(), torch.rand(1, 40, 60, 3),
                                     [Tile(Rect(0, 0, 60, 40))],
-                                    a_preset(style="style q", style_mp=1.0, tile_mp=0),
+                                    a_preset(style="style q", caption_mp=caption_mp),
                                     style_source=torch.rand(1, 20, 30, 3))
 
-    assert budgets == [1_000_000, 40 * 60]
+    assert budgets == expected
 
 
 # --- build_caption_conds --------------------------------------------------------------
@@ -759,18 +1301,18 @@ def _vision_rows(tile, offset_x=0, offset_y=0):
 
 
 def test_slice_caption_conds_cat_each_tiles_vision_rows_and_its_own_caption(stubbed_slices):
-    # The settled surface (2026-08-16): sliced rows of ONE shared pure-vision canvas encode,
-    # then that tile's caption encoded TEXT-ONLY, concatenated on the row axis. The fake's
-    # feature value is the row's position in its own encode, so the two halves are readable
-    # apart: vision rows carry their slice indices, caption rows count 0..n-1.
+    # The settled surface (2026-08-16): the tile's vision rows, then that tile's caption
+    # encoded TEXT-ONLY, concatenated on the row axis. With the crop rows off the vision half
+    # is the tile's slice of ONE canvas encode. The fake's feature value is the row's position
+    # in its own encode, so the two halves are readable apart: vision rows carry their slice
+    # indices, caption rows count 0..n-1.
     clip = FakeCaptionClip()
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"], ["a cart"]])
+    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"], ["a cart"]], a_vision(canvas=1, crop=0))
 
-    # ONE whole-canvas encode for the run (pure vision, no caption in it), then one cheap
-    # text encode per tile — the cost shape the old per-tile canvas encode gave up.
+    # One canvas encode for the run, then one cheap text encode per tile.
     assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a cart"]
     caption_rows = TAIL + 2                                  # tail + the caption's two words
     for cond, tile in zip(conds, tiles, strict=True):
@@ -781,38 +1323,63 @@ def test_slice_caption_conds_cat_each_tiles_vision_rows_and_its_own_caption(stub
         assert tensor[0, len(indices):, 0].tolist() == list(range(caption_rows))
         # Extras are the VISION encode's; the full-canvas attention mask is still dropped.
         assert "attention_mask" not in extras
-        assert extras["pooled_output"].shape == (1, 4)
+        assert extras["pooled_output"] is None
 
 
-def test_slice_caption_conds_share_one_vision_encode_across_every_tile(stubbed_slices, monkeypatch):
-    # The counting check behind the cost claim: the canvas goes through the vision tower ONCE
-    # no matter how many tiles slice it, exactly as on the vision-only surface.
+def test_slice_caption_conds_pay_one_canvas_encode_and_one_crop_encode_per_tile(stubbed_slices, monkeypatch):
+    # The counting check behind the cost claim: this surface runs the same vision encodes the
+    # vision-only surface does, the canvas once and each tile's crop once.
     clip = FakeCaptionClip()
-    tiles = [Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H)),
-             Tile(Rect(0, 0, 96, CANVAS_H)), Tile(Rect(96, 0, CANVAS_W, CANVAS_H))]
+    tiles = layout_tiles(2, 2)
     calls = []
-    real_encode = vl._encode_canvas
-    monkeypatch.setattr(vl, "_encode_canvas", lambda *a, **k: (calls.append(a[1]), real_encode(*a, **k))[1])
+    real_encode = vl._encode_one
+    monkeypatch.setattr(vl, "_encode_one", lambda *a, **k: (calls.append(a[1]), real_encode(*a, **k))[1])
 
     captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3), tiles,
-                                       [["a fox"]] * 4)
+                                       [["a fox"]] * 4, a_vision(canvas=1, crop=1))
 
-    assert len(calls) == 1
-    assert clip.encoded == [vl.VISION_BLOCK, "a fox", "a fox", "a fox", "a fox"]
+    assert len(calls) == 5
+    assert clip.encoded == [vl.VISION_BLOCK] * 5 + ["a fox"] * 4
 
 
-def test_slice_caption_conds_offset_region_tiles_into_the_full_canvas_frame(stubbed_slices):
-    # Mask path: the tiles index the bbox crop while the encode reads the FULL image, so the
-    # rects need the bbox origin added — the same framing as vl.build_global_slices.
+def test_slice_caption_conds_put_each_tiles_crop_rows_before_its_canvas_slice(stubbed_slices):
+    # Both vision sources on: a tile's rows are every cell of its own crop encode (no tail),
+    # then its canvas slice (no tail), then its caption with the one tail. The caption half is
+    # untouched by the vision layout.
     clip = FakeCaptionClip()
+    tiles = strip_tiles(Rect(0, 0, 96, CANVAS_H), Rect(96, 0, CANVAS_W, CANVAS_H))
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
-    shifted = captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, 96, 64))],
-                                                 [["a fox"]], offset_x=96, offset_y=64)
-    direct = captions.build_slice_caption_conds(clip, source, [Tile(Rect(96, 64, CANVAS_W, CANVAS_H))],
-                                                [["a fox"]])
+    conds = captions.build_slice_caption_conds(clip, source, tiles, [["a fox"]] * 2, a_vision(canvas=1, crop=1))
 
-    assert shifted[0][0][0][0, :, 0].tolist() == direct[0][0][0][0, :, 0].tolist()
+    assert clip.encoded == [vl.VISION_BLOCK] * 3 + ["a fox"] * 2
+    caption_rows = TAIL + 2
+    crop_block = list(range(N_ROWS + 2))
+    for cond, tile in zip(conds, tiles, strict=True):
+        indices = crop_block + _vision_rows(tile)
+        tensor, _extras = cond[0]
+        assert tensor.shape == (1, len(indices) + caption_rows, 8)
+        assert tensor[0, :len(indices), 0].tolist() == indices
+        assert tensor[0, len(indices):, 0].tolist() == list(range(caption_rows))
+
+
+def test_slice_caption_conds_cut_a_region_tiles_crop_from_the_full_image_at_the_bbox(stubbed_slices):
+    # Mask path: the tile indexes the bbox crop while the vision encodes read the FULL image
+    # at the bbox origin, so its crop picture is the offset rect of that image and its canvas
+    # rows are sliced in the full image's frame.
+    clip = FakeCaptionClip()
+    source = torch.arange(CANVAS_H * CANVAS_W * 3, dtype=torch.float32).reshape(1, CANVAS_H, CANVAS_W, 3)
+    tile = Tile(Rect(0, 0, 32, 32))
+
+    conds = captions.build_slice_caption_conds(clip, source, [tile], [["a fox"]], a_vision(canvas=1, crop=1),
+                                               offset_x=96, offset_y=48)
+
+    encoded_pixels = [call["image"] for call in clip.tokenize_calls
+                      if call["text"] == vl.VISION_BLOCK]
+    assert [tuple(pixels.shape) for pixels in encoded_pixels] == [(1, CANVAS_H, CANVAS_W, 3), (1, 32, 32, 3)]
+    assert torch.equal(encoded_pixels[1], source[:, 48:80, 96:128, :])
+    indices = list(range(N_ROWS + 2)) + _vision_rows(tile, 96, 48)
+    assert conds[0][0][0][0, :len(indices), 0].tolist() == indices
 
 
 def test_slice_caption_conds_encode_one_picture_at_a_time(stubbed_slices):
@@ -822,13 +1389,13 @@ def test_slice_caption_conds_encode_one_picture_at_a_time(stubbed_slices):
     source = torch.zeros(1, CANVAS_H, CANVAS_W, 3)
 
     conds = captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))],
-                                               [["a fox"]])
+                                               [["a fox"]], a_vision(canvas=1, crop=1))
 
     handed = [call["image"] for call in clip.tokenize_calls if call["image"] is not None]
     assert handed and all(tuple(image.shape) == (1, CANVAS_H, CANVAS_W, 3) for image in handed)
     tensor, extras = conds[0][0]
     assert tensor.shape[0] == 1
-    assert extras["pooled_output"].shape == (1, 4)
+    assert extras["pooled_output"] is None
 
 
 def test_slice_caption_conds_reject_a_caption_count_that_is_not_the_batch(stubbed_slices):
@@ -838,16 +1405,16 @@ def test_slice_caption_conds_reject_a_caption_count_that_is_not_the_batch(stubbe
 
     with pytest.raises(RuntimeError, match="captioned a different number of times"):
         captions.build_slice_caption_conds(clip, source, [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))],
-                                           [["a fox"]])
+                                           [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_vision_encoder_whose_layout_disagrees(stubbed_slices):
-    # The vision half is vl._encode_canvas' own fail-fast, reached unchanged by this surface.
+    # The vision half is vl._encode_one's own fail-fast, reached unchanged by this surface.
     clip = FakeCaptionClip(seq_override=1 + N_ROWS + 1 + TAIL + 99)
 
     with pytest.raises(RuntimeError, match="encoded conditioning has"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_caption_encode_of_the_wrong_length(stubbed_slices):
@@ -858,7 +1425,7 @@ def test_slice_caption_conds_reject_a_caption_encode_of_the_wrong_length(stubbed
 
     with pytest.raises(RuntimeError, match="text-only caption encode has"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_caption_extras_the_vision_encode_lacks(stubbed_slices):
@@ -866,9 +1433,9 @@ def test_slice_caption_conds_reject_caption_extras_the_vision_encode_lacks(stubb
     # carries would vanish without a trace.
     clip = FakeCaptionClip(text_extras={"guidance": torch.ones(1)})
 
-    with pytest.raises(RuntimeError, match="extras the vision encode lacks"):
+    with pytest.raises(RuntimeError, match="caption encode carries conditioning extras"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 def test_slice_caption_conds_reject_a_caption_encode_with_a_real_pooled_output(stubbed_slices):
@@ -876,9 +1443,9 @@ def test_slice_caption_conds_reject_a_caption_encode_with_a_real_pooled_output(s
     # CLIP that returns a real vector is outside what this surface was settled on.
     clip = FakeCaptionClip(text_pooled=torch.zeros(1, 4))
 
-    with pytest.raises(RuntimeError, match="real pooled_output"):
+    with pytest.raises(RuntimeError, match="caption encode has a real pooled_output"):
         captions.build_slice_caption_conds(clip, torch.zeros(1, CANVAS_H, CANVAS_W, 3),
-                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]])
+                                           [Tile(Rect(0, 0, CANVAS_W, CANVAS_H))], [["a fox"]], a_vision())
 
 
 # --- through the pipeline: the three-way branch, through the REAL dispatch -------------
@@ -892,14 +1459,15 @@ PIPE_ROWS = (PIPE_ENC // vl.MERGED_CELL) ** 2
 
 
 @pytest.fixture
-def pipeline_clip(monkeypatch):
-    monkeypatch.setattr(vl, "resample_for_global", lambda source: (source, PIPE_ENC, PIPE_ENC))
+def pipeline_clip(monkeypatch, caption_settings):
+    # On the caption presets, since these tests pin the caption surfaces end to end.
+    monkeypatch.setattr(vl, "resample_picture", lambda source, budget: (source, PIPE_ENC, PIPE_ENC))
     return FakeCaptionClip(n_rows=PIPE_ROWS)
 
 
 @pytest.fixture
 def style_off(monkeypatch):
-    # A preset may turn the whole-image style caption on, and the shipped (artwork) one does.
+    # A preset may turn the whole-image style caption on, and the (artwork) one does.
     # Tests that pin the caption surfaces' own per-tile shape run with it off whichever preset
     # they name, and the style tests below cover it on.
     resolve = captions.resolve_method
@@ -907,11 +1475,20 @@ def style_off(monkeypatch):
                         lambda method: dataclasses.replace(resolve(method), style_instruction=""))
 
 
-def _run(image, guider, clip, vlm_method, mask=None, ctx=0):
+PIPE_PROMPT = "a fox in the centre"
+
+
+def _run(image, guider, clip, vlm_method, mask=None, ctx=0, prompt=PIPE_PROMPT):
+    # What the VL nodes hand the engine: the resolved preset with the prompt written into it
+    # (node.py's own with_prompt call), since the default caption preset asks for {PROMPT}. `prompt`
+    # None leaves the resolve to the engine's dispatch, for the tests that pin its rejections.
+    preset = None
+    if prompt is not None:
+        preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
     return sampling.refine_image(
         image, guider, sync_sampler(), SIGMAS, *_engine(), max_tile_width=56,
         max_tile_height=56, context_anchor=ctx, context_overlap=16, mask=mask, vl_clip=clip,
-        vlm_method=vlm_method,
+        vlm_method=vlm_method, preset=preset,
     )
 
 
@@ -934,32 +1511,41 @@ def test_vision_tokens_is_the_default_and_still_routes_through_build_global_slic
     explicit = _run(image, VLGuider(), pipeline_clip, "vision tokens")
 
     assert torch.equal(default, explicit)
-    assert len(seen) == 2 and all(call == {"offset_x": 0, "offset_y": 0} for call in seen)
+    assert len(seen) == 2
+    assert all(call == {"offset_x": 0, "offset_y": 0, "budget_tiles": None} for call in seen)
     assert pipeline_clip.generate_calls == []
 
 
-def test_vision_tokens_never_reads_the_settings_file(comfy_stubs, pipeline_clip, monkeypatch):
-    # "vision tokens" must stay independent of a file it never reads, through the WHOLE
-    # dispatch: the engine's own resolve and the ledger's preset branch both have to leave it
-    # alone, so a broken settings file fails only the caption surfaces.
-    monkeypatch.setattr(captions, "load_settings", _never_read)
+def test_vision_tokens_reads_the_settings_file_once_and_never_the_vlm(comfy_stubs, pipeline_clip, monkeypatch):
+    # "vision tokens" reads the file ONCE per picture, for its [vision] table, and never
+    # reaches the VLM's generator. A broken file therefore fails this surface too, before
+    # any encode.
+    reads = []
+    real_load = captions.load_settings
+    monkeypatch.setattr(captions, "load_settings", lambda *a, **k: (reads.append(1), real_load(*a, **k))[1])
 
     out = _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision tokens")
 
     assert out.shape == (1, 80, 80, 3)
+    assert len(reads) == 1
     assert pipeline_clip.generate_calls == []
 
 
 @pytest.mark.parametrize("method", ["vision tokens and captions", "captions",
                                     "vision tokens and captions (standard)"])
 def test_each_caption_method_reaches_the_vlm_with_its_presets_wording(comfy_stubs, pipeline_clip, method):
-    # End to end: the selected preset's own wording and budget reach every clip.generate, and
-    # a preset with a style instruction writes ONE whole-image caption before any tile. The
-    # unlabeled options are what a workflow saved before the presets carries.
-    preset = captions.resolve_method(method)
+    # End to end: the selected preset's own wording and budget reach every clip.generate, with
+    # the node's prompt written into the default preset's {PROMPT}, and a preset with a style
+    # instruction writes ONE whole-image caption before any tile. The unlabeled options are
+    # what a workflow saved before the presets carries.
+    preset = captions.with_prompt(captions.resolve_method(method), PIPE_PROMPT)
     image = torch.rand(1, 80, 80, 3)
 
     _run(image, VLGuider(), pipeline_clip, method)
+
+    if preset.label == "prompted":
+        assert PIPE_PROMPT in preset.tile_instruction
+        assert "{PROMPT}" not in preset.tile_instruction
 
     style_on = bool(preset.style_instruction)
     assert len(pipeline_clip.generate_calls) == 4 + (1 if style_on else 0)
@@ -996,22 +1582,24 @@ def test_vision_and_captions_cats_the_shared_slice_and_a_text_only_caption(comfy
 
     _run(image, guider, pipeline_clip, "vision tokens and captions")
 
-    # ONE pure-vision canvas encode for the whole picture, then one text-only caption encode
-    # per tile — no VISION_BLOCK prefix on the caption encode at all.
-    assert pipeline_clip.encoded == [vl.VISION_BLOCK] + ["a plain caption"] * 4
+    # ONE pure-vision canvas encode for the whole picture and one crop encode per tile, then
+    # one text-only caption encode per tile — no VISION_BLOCK prefix on the caption encode.
+    assert pipeline_clip.encoded == [vl.VISION_BLOCK] * 5 + ["a plain caption"] * 4
     caption_rows = TAIL + 3                              # tail + the caption's three words
     from test_tiling import _layout
     layout = _layout(80, 80, 56, 56, overlap=16)
     for tile, seen in zip(layout.tiles, guider.seen_conds, strict=True):
-        indices = vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_ROWS + 2)
+        # The shipped [vision] table: every crop cell (no tail), the canvas slice (no tail),
+        # then the caption with the one tail.
+        indices = list(range(PIPE_ROWS + 2)) + vl.slice_indices(tile.crop_rect, 80, 80, PIPE_ENC, PIPE_ENC, PIPE_ROWS + 2)
         rows = seen["positive"][0]["cross_attn"][0, :, 0].tolist()
         assert rows == indices + list(range(caption_rows))
 
 
 def test_the_shipped_style_caption_rides_on_top_of_every_tile_caption(comfy_stubs, pipeline_clip):
     # What the DiT reads on a preset that asks for a style caption: every tile's caption is
-    # encoded with the one style caption on top, newline-joined. (artwork) is the shipped
-    # preset that turns it on, and the default (standard) leaves it off.
+    # encoded with the one style caption on top, newline-joined. (artwork) is a caption
+    # preset that turns it on, and (standard) leaves it off.
     method = "captions (artwork)"
     style_text = captions.resolve_method(method).style_instruction
     pipeline_clip.answer = lambda img, instruction: (
@@ -1049,14 +1637,27 @@ def test_the_mask_path_captions_the_region_crop_and_encodes_the_full_image(comfy
     y0, y1, x0, x1 = sampling._expand_snap_clamp(sampling._mask_bbox(mask >= 0.5), 8, 80, 80)
     assert (y0, y1, x0, x1) == (8, 72, 8, 72)
     # The text-only caption encode tokenizes with no image at all, so only the calls that were
-    # handed pixels are read here.
+    # handed pixels are read here. VISION_BLOCK alone is the vision encode's own text (the
+    # caption tail probe appends the caption to it).
     with_image = [call for call in pipeline_clip.tokenize_calls if call["image"] is not None]
     caption_inputs = [call["image"] for call in with_image if call["llama_template"] is None]
-    encode_inputs = [call["image"] for call in with_image if call["llama_template"] is not None]
+    encode_inputs = [call["image"] for call in with_image if call["text"] == vl.VISION_BLOCK]
     # comfy_stubs' common_upscale returns the resampled COPY, so only the shape is readable —
     # which is the point: what the VLM reads is never the sampled tile.
     assert caption_inputs and all(tuple(x.shape[1:3]) != (y1 - y0, x1 - x0) for x in caption_inputs)
-    assert encode_inputs and all(torch.equal(x, image) for x in encode_inputs)
+    # The canvas encode reads the FULL image, and every crop encode is the tile's rect cut
+    # from that image at the bbox origin, so the region is read in its place in the whole
+    # picture rather than on its own.
+    sx = grid.solve_axis(x1 - x0, 56, 8, 16, axis="width")
+    sy = grid.solve_axis(y1 - y0, 56, 8, 16, axis="height")
+    tiles = grid.build_layout(x1 - x0, y1 - y0, sx, sy, 8, 16).tiles
+    assert len(tiles) > 1
+    assert torch.equal(encode_inputs[0], image)
+    assert len(encode_inputs) == 1 + len(tiles)
+    for pixels, tile in zip(encode_inputs[1:], tiles, strict=True):
+        crop = tile.crop_rect
+        expected = image[:, max(0, crop.y0 + y0):min(80, crop.y1 + y0), max(0, crop.x0 + x0):min(80, crop.x1 + x0), :]
+        assert torch.equal(pixels, expected)
 
 
 @pytest.mark.parametrize("method", ["captions", "vision tokens and captions"])
@@ -1082,11 +1683,30 @@ def test_a_two_picture_batch_with_different_length_captions_completes(comfy_stub
 
 def test_an_unknown_vlm_method_is_rejected_by_name(comfy_stubs, pipeline_clip):
     with pytest.raises(ValueError, match="names no conditioning surface"):
-        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision")
+        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "vision", prompt=None)
 
 
 def test_a_method_naming_an_absent_preset_is_rejected_through_the_dispatch(comfy_stubs, pipeline_clip):
     # The selector is built at startup and the wording read per run, so a preset deleted
     # mid-session leaves a stale option that must fail by name rather than obscurely.
     with pytest.raises(RuntimeError, match="asks for preset 'gone'"):
-        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions (gone)")
+        _run(torch.rand(1, 80, 80, 3), VLGuider(), pipeline_clip, "captions (gone)", prompt=None)
+
+
+def test_slice_caption_conds_forward_budget_tiles_to_the_vision_rows(stubbed_slices, monkeypatch):
+    # The vision half of this surface is vl.build_vision_rows itself, so a block run's canvas
+    # sample must be sized off the full grid's tiles here exactly as on the vision-only
+    # surface.
+    seen = []
+    real_budget = vl.canvas_budget_pixels
+    monkeypatch.setattr(vl, "canvas_budget_pixels",
+                        lambda tiles, h, w, tokens: (seen.append(tiles),
+                                                     real_budget(tiles, h, w, tokens))[1])
+    full = layout_tiles(3, 1)
+    block = full[:1]
+
+    captions.build_slice_caption_conds(FakeCaptionClip(), torch.zeros(1, CANVAS_H, CANVAS_W, 3),
+                                       block, [["a fox"]], a_vision(canvas=1, crop=0),
+                                       budget_tiles=full)
+
+    assert seen == [full]

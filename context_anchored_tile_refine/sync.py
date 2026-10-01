@@ -33,9 +33,9 @@ counterpart here (stepper.py runs the stock sampler function end to end).
               so neither has anything left to correct.
 
 REGION (mask) PATH: `refine_sync(mask=...)` crops to the mask bbox plus `context_anchor`
-(sampling's own `_mask_bbox` / `_expand_snap_clamp`), runs stages L..D over THAT crop with
-every lane's denoise mask intersected with the region gate, and composites the crop back
-through the shipped 1px anti-aliased edge (`sampling._aa_alpha`) — no feather at the mask
+(`sampling.refine_masked_region`, the raster path's own wrapper), runs stages L..D over THAT
+crop with every lane's denoise mask intersected with the region gate, and composites the crop
+back through the shipped 1px anti-aliased edge — no feather at the mask
 boundary (CLAUDE.md prime directive 3), and every pixel the edge weights at 0 stays
 byte-identical to the input. The conditioning still reads the WHOLE image: the pre-pass gets
 the pre-crop image plus the bbox origin as offsets, so a region tile slices its true place in
@@ -61,19 +61,20 @@ from dataclasses import dataclass
 
 import torch
 
-from . import captions, conds, grid, sampling, vl
+from . import captions, conds, grid, sampling, tags, vl
 from .progress import (
     CANVAS_ENCODE,
     CAPTION_ENCODE,
     CAPTIONS,
     DECODE,
-    K_CAPTION,
     SAMPLING,
     VISION_ENCODE,
     W_DECODE_TILE,
-    W_ENCODE,
     W_ENCODE_CAPTION_TEXT,
     W_ENCODE_TILE,
+    caption_segment,
+    caption_status_word,
+    vision_encode_units,
 )
 
 # What the frozen context_anchor ring around each tile SHOWS the model. "source image": the
@@ -241,37 +242,47 @@ def check_preconditions(model_patcher, sigmas, anchor_source):
             f"or use anchor_source '{ANCHOR_SOURCE_IMAGE}'.")
 
 
-def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, batch_index=0):
-    # ONE canvas-wide draw, sliced per lane: per-lane draws would give every same-shaped tile
-    # identical noise, and slices are spatially anchored so overlapping windows agree. The
-    # dummy mirrors vae.encode's latent layout exactly — a video-family VAE (latent_dim 3,
-    # e.g. Krea 2's Wan VAE) encodes an image batch to a 5-D [B,C,1,h,w] latent — and is drawn
-    # at the FULL batch with row batch_index selected, so a picture inside refine_image's
-    # picture loop keeps the noise it would have drawn in one shared call (prepare_noise draws
-    # a SINGLE randn over the whole latent size). The identical contract as
-    # sampling._refine_tiles:751-762, deliberately: a picture must not change noise because it
-    # was refined by a different engine.
-    latent_time = (1,) if getattr(vae, "latent_dim", 2) == 3 else ()
-    draw_batch = batch_size if batch_size > 1 else batch
-    dummy = torch.zeros((draw_batch, vae.latent_channels, *latent_time, canvas_h // 8, canvas_w // 8), dtype=torch.float32)
-    canvas_noise = noise.generate_noise({"samples": dummy})
-    if batch_size > 1:
-        canvas_noise = canvas_noise[batch_index:batch_index + 1]
-    return canvas_noise
+# The raster path draws through the same function, so a picture keeps its noise across engines.
+build_canvas_noise = sampling.build_canvas_noise
+
+
+def _check_given_captions(tile_captions, preset, n_tiles, rows, progress):
+    # A caption set handed in replaces the VLM pass, so what that pass guaranteed by
+    # construction is checked here instead: the surface that consumes captions, one entry per
+    # tile, and one caption per batch row.
+    if preset.surface == captions.VLM_METHOD_VISION:
+        raise ValueError(
+            "Context-Anchored Tile Refine (sync): the 'vision tokens' surface builds no "
+            "captions at all, so handing it a caption set is a wiring mistake.")
+    if progress is not None:
+        raise ValueError(
+            "Context-Anchored Tile Refine (sync): the progress ledger sizes its caption segment "
+            "from the captions this engine generates, so it cannot be given a caption set as "
+            "well. Pass progress=None on a run whose captions are handed in.")
+    if len(tile_captions) != n_tiles:
+        raise ValueError(
+            f"Context-Anchored Tile Refine (sync): {len(tile_captions)} caption entries were "
+            f"handed in for {n_tiles} tiles.")
+    for index, entry in enumerate(tile_captions):
+        if len(entry) != rows:
+            raise ValueError(
+                f"Context-Anchored Tile Refine (sync): tile {index} was handed {len(entry)} "
+                f"captions for {rows} batch row(s).")
 
 
 def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_index=0,
-                         vl_context=None, progress=None):
+                         vl_context=None, progress=None, budget_tiles=None, tile_captions=None):
     # The VL conditioning pre-pass, run by the ENGINE over the tiles it is about to sample —
     # the same three surfaces the raster branch built. It runs before the first lane so the
     # text encoder is resident exactly once, before the diffusion model loads.
     # `preset` is the run's resolved vlm_method (captions.resolve_method), so the settings
     # file is read ONCE per run by the caller and every count below reads the same block.
-    # Cost differs per surface: "vision tokens" is ONE whole-canvas encode for the run,
-    # "captions" is one clip.generate plus one cheap text encode per tile, and
-    # "vision tokens and captions" is that one shared encode plus both per tile. A preset
-    # carrying a style instruction adds one whole-image clip.generate per row on both caption
-    # surfaces. Only the clip.generate pre-pass scales with tile count.
+    # Cost differs per surface: "vision tokens" is one encode of the entire canvas plus one
+    # small encode per tile (either skipped at 0 tokens in the [vision] table), "captions" is
+    # one clip.generate plus one cheap text encode per tile, and "vision tokens and captions"
+    # is those same vision encodes plus both per tile. A preset carrying a style instruction
+    # adds one whole-image clip.generate per row on both caption surfaces. A tags preset writes
+    # each tile's text through tags.generate_tag_set in place of the captions.
     # captions.generate_tile_captions owns the interrupt check and the ProgressBar that
     # keep it cancellable.
     # vl_context (region path only) is (full_image, offset_x, offset_y): the VISION encode
@@ -280,28 +291,45 @@ def build_tile_positives(vl_clip, source, tiles, preset, batch_size=1, batch_ind
     # describe THIS run's own canvas — the region crop the tiles actually sample — which is
     # why `source` is kept separate from the encode source. The STYLE caption is the one
     # exception and reads encode_source, so a masked refine's style stays global.
+    # `budget_tiles` sizes the canvas vision sample off ANOTHER layout's tiles, and
+    # `tile_captions` is a caption set generated elsewhere; with both None nothing below moves.
     # PROGRESS: this function owns the pre-pass's ledger segments, and their ORDER is the
     # code's own — the captions are written FIRST and the conditioning built after, so the
     # bar never claims an encode that has not started. "vision tokens" opens one segment,
     # the two caption surfaces open two.
     encode_source, offset_x, offset_y = (source, 0, 0) if vl_context is None else vl_context
     n_tiles, rows = len(tiles), int(source.shape[0])
+    if tile_captions is not None:
+        _check_given_captions(tile_captions, preset, n_tiles, rows, progress)
+    vision_units = vision_encode_units(n_tiles, preset.vision)
     if preset.surface == captions.VLM_METHOD_VISION:
         if progress is not None:
-            progress.open(VISION_ENCODE, W_ENCODE)
-        return vl.build_global_slices(vl_clip, encode_source, tiles, offset_x=offset_x, offset_y=offset_y)
-    n_captions = (n_tiles + (1 if preset.style_instruction else 0)) * rows
-    if progress is not None:
-        progress.open(CAPTIONS, n_captions * K_CAPTION, chunks=n_captions)
-    tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, preset,
-                                                    batch_size, batch_index, progress=progress,
-                                                    style_source=encode_source)
-    if preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
-        # ONE whole-canvas vision encode plus one caption TEXT encode per tile — the text
-        # half scales with the grid, so it is budgeted rather than folded into W_ENCODE.
+            progress.open(VISION_ENCODE, vision_units)
+        return vl.build_global_slices(vl_clip, encode_source, tiles, preset.vision,
+                                      offset_x=offset_x, offset_y=offset_y,
+                                      budget_tiles=budget_tiles)
+    if tile_captions is None:
+        caption_units, n_captions = caption_segment(preset, n_tiles, rows)
         if progress is not None:
-            progress.open(VISION_ENCODE, W_ENCODE + n_tiles * W_ENCODE_CAPTION_TEXT)
-        return captions.build_slice_caption_conds(vl_clip, encode_source, tiles, tile_captions, offset_x=offset_x, offset_y=offset_y)
+            progress.open(CAPTIONS, caption_units, chunks=n_captions,
+                          status_word=caption_status_word(preset))
+        if preset.kind == captions.TILE_TEXT_TAGS:
+            style_texts, tag_texts = tags.generate_tag_set(vl_clip, source, tiles, preset,
+                                                           batch_size, batch_index, progress=progress,
+                                                           style_source=encode_source)
+            tile_captions = captions.join_style_captions(style_texts, tag_texts)
+        else:
+            tile_captions = captions.generate_tile_captions(vl_clip, source, tiles, preset,
+                                                            batch_size, batch_index, progress=progress,
+                                                            style_source=encode_source)
+    if preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
+        # The vision encodes plus one caption TEXT encode per tile — the text half scales
+        # with the grid, so it is budgeted rather than folded into the vision units.
+        if progress is not None:
+            progress.open(VISION_ENCODE, vision_units + n_tiles * W_ENCODE_CAPTION_TEXT)
+        return captions.build_slice_caption_conds(vl_clip, encode_source, tiles, tile_captions, preset.vision,
+                                                  offset_x=offset_x, offset_y=offset_y,
+                                                  budget_tiles=budget_tiles)
     if progress is not None:
         # Captions ONLY: no canvas encode at all, but still one text-encoder pass per tile.
         progress.open(CAPTION_ENCODE, n_tiles * W_ENCODE_CAPTION_TEXT)
@@ -313,6 +341,8 @@ def build_lane_guiders(guider, tile_positives):
     # conds, loaded_models) and tears it down in outer_sample's finally, so N in-flight
     # sample() calls on ONE guider clobber each other. A shallow copy shares the model patcher
     # (deliberately — one model, one GPU stream) and gets its OWN original_conds map.
+    # It also needs its own model_options, because core's outer_sample stores the per-run
+    # multi-GPU thread pool there and interleaved lanes would overwrite each other's pool.
     #
     # strip_control is load-bearing, not tidiness: each tile's positive is a fresh vision
     # slice that carries no control chain, so a control left on the caller's NEGATIVE would
@@ -337,6 +367,8 @@ def build_lane_guiders(guider, tile_positives):
                 "Context-Anchored Tile Refine (sync): copying this guider did not carry a dict "
                 "'original_conds', so its lanes cannot be given their own tile conditioning. "
                 "The sync engine needs a CFGGuider-compatible guider.")
+        if isinstance(getattr(guider, "model_options", None), dict):
+            lane_guider.model_options = dict(guider.model_options)
         swapped_conds = dict(stripped_conds)
         swapped_conds["positive"] = positive
         lane_guider.original_conds = swapped_conds
@@ -344,10 +376,37 @@ def build_lane_guiders(guider, tile_positives):
     return lane_guiders
 
 
+def _override_layout(layout, canvas_w, canvas_h, context_anchor, context_overlap):
+    # A caller-solved layout, checked against the two things this run cannot re-derive from it.
+    # A SubLayout also names the FULL grid's tiles, which is what sizes the canvas vision
+    # sample so a block run's tiles get the rows they would have had in one whole-canvas run.
+    budget_tiles = None
+    if isinstance(layout, grid.SubLayout):
+        budget_tiles = layout.parent_tiles
+        layout = layout.layout
+    if not isinstance(layout, grid.Layout):
+        raise TypeError(
+            "Context-Anchored Tile Refine (sync): the layout override must be a grid.Layout or a "
+            f"grid.SubLayout, got {type(layout).__name__}.")
+    if (layout.w, layout.h) != (canvas_w, canvas_h):
+        raise ValueError(
+            f"Context-Anchored Tile Refine (sync): the layout override is {layout.w}x{layout.h} "
+            f"and this run's padded canvas is {canvas_w}x{canvas_h}. Every tile rect indexes "
+            "that canvas.")
+    if (layout.ctx, layout.overlap) != (context_anchor, context_overlap):
+        raise ValueError(
+            "Context-Anchored Tile Refine (sync): the layout override was solved at "
+            f"context_anchor {layout.ctx} and context_overlap {layout.overlap}, and this run asks "
+            f"for context_anchor {context_anchor} and context_overlap {context_overlap}. The "
+            "region crop and every lane's ring gate are cut at the run's own widths.")
+    return layout, budget_tiles
+
+
 def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_height,
                  context_anchor, context_overlap, vl_clip, vlm_method=captions.VLM_METHOD_VISION,
                  anchor_source=ANCHOR_SOURCE_IMAGE, batch_size=1, batch_index=0,
-                 region_pixel=None, vl_context=None, progress=None, sampler=None):
+                 region_pixel=None, vl_context=None, progress=None, sampler=None,
+                 preset=None, tile_captions=None, layout=None):
     # Everything a run needs, in one place, before any sampling: ONE picture in
     # ([1,H,W,C] — the caller owns the batch loop), one grid solve, one conditioning
     # pre-pass, one C_0, one noise draw, N lanes out.
@@ -371,33 +430,47 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
             "positive is its tile's slice of the VL encode, so it needs the VL CLIP.")
     # ONE settings read for the whole picture, before any GPU time: the ledger's caption
     # count and the pre-pass's own must come from the same block, and a file edited mid-run
-    # would otherwise give the two different answers.
-    preset = captions.resolve_method(vlm_method)
+    # would otherwise give the two different answers. A caller that read the file itself hands
+    # the block over instead, and it must still answer the vlm_method the ledger is sized from.
+    if preset is None:
+        preset = captions.resolve_method(vlm_method)
+    elif not isinstance(preset, captions.Preset):
+        raise TypeError(
+            "Context-Anchored Tile Refine (sync): the preset override must be a captions.Preset, "
+            f"got {type(preset).__name__}.")
+    elif preset.surface != captions.method_surface(vlm_method):
+        raise ValueError(
+            "Context-Anchored Tile Refine (sync): the preset override builds the "
+            f"{preset.surface!r} surface and vlm_method {vlm_method!r} names "
+            f"{captions.method_surface(vlm_method)!r}. The progress ledger is sized from the "
+            "vlm_method and the pre-pass branches on the preset, so the two must agree.")
     check_preconditions(guider.model_patcher, sigmas, anchor_source)
+    # The direct caller's guard, since the VL nodes run it themselves. Handed-in captions
+    # (the Tile Test: Render node) never tag, so a missing library cannot stop that run.
+    if preset.kind == captions.TILE_TEXT_TAGS and tile_captions is None:
+        tags.check_tags_ready(vl_clip)
 
     pixels = image[..., :3]
     padded, (height, width) = sampling.pad_image_to_multiple(pixels)
     batch, canvas_h, canvas_w = int(padded.shape[0]), int(padded.shape[1]), int(padded.shape[2])
 
-    # ---- process. Region gate at LATENT resolution, the raster path's rule verbatim
-    # (sampling._refine_tiles): pad the pixel mask onto the /8 canvas with constant 0 (the
-    # padded strip is always cropped away), then cover-downsample by 8 with max_pool2d — NOT
-    # avg+threshold — so every pixel with region == 1 lands in a DIFFUSED latent cell; else a
-    # subject-edge pixel would be frozen yet composited back. Over-cover is harmless: the
-    # extra diffused cells fall outside the mask and the anti-aliased composite discards them.
-    # No pixel-resolution copy is kept, unlike the raster path: this engine has no DC match to
-    # gate, because both sides of every band decode ONE latent.
+    # ---- process. The pixel-resolution gate is dropped, unlike the raster path: this engine
+    # has no DC match to gate, because both sides of every band decode ONE latent.
     region_latent = None
     if region_pixel is not None:
-        region_padded = torch.nn.functional.pad(region_pixel, (0, canvas_w - width, 0, canvas_h - height))
-        region_latent = (torch.nn.functional.max_pool2d(region_padded[:, None].float(), 8) > 0).float()[:, 0]
+        _region_padded, region_latent = sampling.region_gates(region_pixel, canvas_h, canvas_w)
 
     # The grid is solved ONCE and layout.tiles is what BOTH the conditioning pre-pass and the
     # lanes below read, so a tile's positive can never be sliced for a different rect than the
-    # one it samples.
-    sx = grid.solve_axis(canvas_w, max_tile_width, context_anchor, context_overlap, axis="width")
-    sy = grid.solve_axis(canvas_h, max_tile_height, context_anchor, context_overlap, axis="height")
-    layout = grid.build_layout(canvas_w, canvas_h, sx, sy, context_anchor, context_overlap)
+    # one it samples. A caller running one block of a larger grid hands its own layout over,
+    # which is that same one solve seen from one caller further up.
+    budget_tiles = None
+    if layout is None:
+        layout = grid.solve_layout(canvas_w, canvas_h, max_tile_width, max_tile_height,
+                                   context_anchor, context_overlap)
+    else:
+        layout, budget_tiles = _override_layout(layout, canvas_w, canvas_h, context_anchor,
+                                                context_overlap)
     tiles = layout.tiles
 
     # This picture's whole plan block at TRUE sizes, before any pre-pass work fills: the
@@ -407,14 +480,15 @@ def _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_hei
     # visibly dropping), the value itself monotone the whole time.
     if progress is not None and sampler is not None:
         total_evals, _hook_step_at = stepper.plan_evals(sampler, sigmas)
-        # The style caption count mirrors build_tile_positives' own arithmetic, off the ONE
-        # preset resolved above, so the segment the ledger sizes is the segment the pre-pass
-        # then opens.
-        style_rows = batch if preset.style_instruction else 0
-        progress.preset_picture(vlm_method, len(tiles), batch, total_evals, style_rows=style_rows)
+        # The caption segment and the vision units both mirror build_tile_positives' own
+        # arithmetic, off the ONE preset resolved above and the SAME tiles, so every segment
+        # the ledger sizes is the segment the pre-pass then opens.
+        progress.preset_picture(preset, len(tiles), batch, total_evals,
+                                vision_units=vision_encode_units(len(tiles), preset.vision))
 
     tile_positives = build_tile_positives(vl_clip, padded, tiles, preset, batch_size, batch_index,
-                                          vl_context=vl_context, progress=progress)
+                                          vl_context=vl_context, progress=progress,
+                                          budget_tiles=budget_tiles, tile_captions=tile_captions)
     if len(tile_positives) != len(tiles):
         raise RuntimeError(
             f"the VL pre-pass built {len(tile_positives)} positives for {len(tiles)} tiles. The "
@@ -699,12 +773,7 @@ def decode_composite(vae, model, canvas, padded, layout, progress=None):
         # lanes' `x` lives there), and process_latent_out is the exact inverse comfy applies
         # to every sampler result on the way out (samplers.py:1238).
         raw_window = model.process_latent_out(canvas[..., rect.y0:rect.y1, rect.x0:rect.x1])
-        decoded = vae.decode(raw_window)
-        if decoded.ndim == 5:
-            # A video-family VAE decodes the 5-D latent to [B,T,H,W,C]; fold T into the batch
-            # exactly as core's VAEDecode node does. T is 1 by construction (the run's
-            # noise/latent shape check pins one latent row per image), so this is a view.
-            decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
+        decoded = sampling.fold_decoded_frames(vae.decode(raw_window))
         # .to(): under --gpu-only the decode lands on the GPU intermediate device while the
         # canvas stays on the input device; a no-op when they already match.
         decoded = decoded.to(result.device)
@@ -721,7 +790,8 @@ def decode_composite(vae, model, canvas, padded, layout, progress=None):
 def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
                    context_anchor, context_overlap, vl_clip, vlm_method=captions.VLM_METHOD_VISION,
                    anchor_source=ANCHOR_SOURCE_IMAGE, batch_size=1, batch_index=0,
-                   region_pixel=None, vl_context=None, progress=None):
+                   region_pixel=None, vl_context=None, progress=None,
+                   preset=None, tile_captions=None, layout=None, noise_fields=None):
     # The run loop over ONE canvas — the whole picture on the no-mask path, the bbox crop on
     # the region path (region_pixel/vl_context set). Every tile samples its own full-length
     # schedule on its own thread, held at each sigma step by stepper.py's barrier; between
@@ -729,11 +799,17 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
     from . import stepper
 
     # ---- inputs
+    if noise_fields is not None and not callable(noise_fields):
+        # run_lanes calls it once per lane, so a non-callable would fail deep inside the
+        # stepper's lane build instead of here.
+        raise TypeError(
+            "Context-Anchored Tile Refine (sync): the noise_fields override must be callable, "
+            f"got {type(noise_fields).__name__}.")
     run = _prepare_run(image, guider, sigmas, vae, noise, max_tile_width, max_tile_height,
                        context_anchor, context_overlap, vl_clip, vlm_method=vlm_method,
                        anchor_source=anchor_source, batch_size=batch_size, batch_index=batch_index,
                        region_pixel=region_pixel, vl_context=vl_context, progress=progress,
-                       sampler=sampler)
+                       sampler=sampler, preset=preset, tile_captions=tile_captions, layout=layout)
     model = guider.model_patcher.model
     steps = int(sigmas.shape[-1]) - 1
     # The sampling budget is EXACT and known here: the stepper's own eval plan, which
@@ -775,8 +851,11 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
                               ring_gates=ring_gates)
     # The shared canvas-wide SDE field, or None for a deterministic sampler — both are
     # rejected the other way round by the stepper, and a per-lane field would put two
-    # different noises in every overlap band.
-    noise_fields = stepper.build_noise_fields(sampler, canvas.shape, noise.seed, sigmas)
+    # different noises in every overlap band. A caller running one block of a larger canvas
+    # hands over the FULL canvas's field: a field drawn at this canvas's own shape and origin
+    # gives every lane injections the whole-canvas run would never have made.
+    if noise_fields is None:
+        noise_fields = stepper.build_noise_fields(sampler, canvas.shape, noise.seed, sigmas)
     # ONE instance patch for the WHOLE run, never one per lane: the lanes share the model, and
     # anchor_ring_schedule normalizes against sigmas[0] — which is the run's first sigma here
     # exactly because the schedule handed over is the full one.
@@ -798,7 +877,8 @@ def _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width, m
 def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
                 context_anchor, context_overlap, vl_clip, mask=None,
                 vlm_method=captions.VLM_METHOD_VISION, anchor_source=ANCHOR_SOURCE_IMAGE,
-                batch_size=1, batch_index=0, progress=None):
+                batch_size=1, batch_index=0, progress=None,
+                preset=None, tile_captions=None, layout=None, noise_fields=None):
     """The sync engine: ONE picture in, that picture refined tile-synchronously out.
 
     Without a mask the whole picture is tiled. With one, only the masked region is refined:
@@ -816,43 +896,34 @@ def refine_sync(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_
     `progress` is the VL run's ledger (progress.py), created by the node and only ever
     RECEIVED here — with None (direct callers, the tests-AB harnesses) every bar and every
     value below is exactly what it was before the ledger existed.
+    `preset`, `tile_captions`, `layout` and `noise_fields` are the caller's overrides for the
+    four things this engine otherwise works out for itself: the resolved settings block, the
+    per-tile captions, the grid solve and the stochastic sampler's shared field. They are what
+    lets a caller run one block of a larger grid as the larger grid would have run it. With
+    every one left None the engine is what it was before they existed.
     """
     # ---- inputs
     if mask is None:
         return _refine_canvas(image, guider, sampler, sigmas, vae, noise, max_tile_width,
                               max_tile_height, context_anchor, context_overlap, vl_clip,
                               vlm_method=vlm_method, anchor_source=anchor_source,
-                              batch_size=batch_size, batch_index=batch_index, progress=progress)
-
-    # Region path. Harden a soft input at 0.5 — a fractional denoise mask would leave the
-    # under-refined halo we reject for turbo (finding-dd-fade-artifacts-turbo).
-    mask_bin = mask >= 0.5
-    bbox = sampling._mask_bbox(mask_bin)
-    if bbox is None:
-        # Empty mask: nothing to refine, and (unlike the input) a clone is a safe no-op. RGB-
-        # narrowed like every sampled path, so the output channel count never depends on the
-        # mask's content.
-        return image[..., :3].clone()
-    height, width = int(image.shape[1]), int(image.shape[2])
-    y0, y1, x0, x1 = sampling._expand_snap_clamp(bbox, context_anchor, height, width)
+                              batch_size=batch_size, batch_index=batch_index, progress=progress,
+                              preset=preset, tile_captions=tile_captions, layout=layout,
+                              noise_fields=noise_fields)
 
     # ---- process
-    sub_image = image[:, y0:y1, x0:x1, :]
-    sub_mask = mask_bin[:, y0:y1, x0:x1].to(image.dtype)
-    # The conditioning still reads the WHOLE image: the pre-pass encodes `image` and offsets
-    # every region tile's rect by the bbox origin, so a masked refine stays globally informed
-    # instead of only seeing its own crop.
-    refined_sub = _refine_canvas(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width,
-                                 max_tile_height, context_anchor, context_overlap, vl_clip,
-                                 vlm_method=vlm_method, anchor_source=anchor_source,
-                                 batch_size=batch_size, batch_index=batch_index,
-                                 region_pixel=sub_mask, vl_context=(image, x0, y0),
-                                 progress=progress)
+    def refine_crop(sub_image, sub_mask, crop_box):
+        # The conditioning still reads the WHOLE image: the pre-pass encodes `image` and offsets
+        # every region tile's rect by the bbox origin, so a masked refine stays globally
+        # informed instead of only seeing its own crop.
+        y0, _y1, x0, _x1 = crop_box
+        return _refine_canvas(sub_image, guider, sampler, sigmas, vae, noise, max_tile_width,
+                              max_tile_height, context_anchor, context_overlap, vl_clip,
+                              vlm_method=vlm_method, anchor_source=anchor_source,
+                              batch_size=batch_size, batch_index=batch_index,
+                              region_pixel=sub_mask, vl_context=(image, x0, y0),
+                              progress=progress, preset=preset, tile_captions=tile_captions,
+                              layout=layout, noise_fields=noise_fields)
 
-    # ---- output. Narrow to RGB: the crop comes back 3-channel (a 4-channel input's alpha is
-    # dropped exactly as on the no-mask path), so the composite and the output stay 3-channel.
-    rgb = image[..., :3]
-    out = rgb.clone()
-    aa = sampling._aa_alpha(sub_mask)[..., None]
-    out[:, y0:y1, x0:x1, :] = aa * refined_sub + (1.0 - aa) * rgb[:, y0:y1, x0:x1, :]
-    return out
+    # ---- output
+    return sampling.refine_masked_region(image, mask, context_anchor, refine_crop)

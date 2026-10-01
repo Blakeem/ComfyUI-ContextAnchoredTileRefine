@@ -3,8 +3,12 @@ custom-sampling inputs from widgets and hand them, plus the UPSCALED image, to t
 existing entry point. So every builder and sampling.refine_image itself is replaced by a
 recorder: what is pinned here is which value reaches which parameter, not any pixel math
 (that is covered by test_upscale / test_tiling / test_vl against the real functions)."""
+import sys
+
 import pytest
 import torch
+from logit_classifier import UnsupportedModelError
+from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
 from context_anchored_tile_refine import sampling, upscale
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
@@ -23,7 +27,15 @@ WIDGETS = {
     "context_overlap": 32,
     "anchor_source": "source image",
     "vlm_method": "vision tokens and captions",
+    "prompt": "a fox in the centre",
 }
+
+
+@pytest.fixture(autouse=True)
+def caption_presets(caption_settings):
+    # WIDGETS drive the bare default, which is the tags preset in the shipped file. The wiring
+    # is pinned on a caption preset, and the tags tests at the end write their own file.
+    return caption_settings
 
 
 class FakeGuider:
@@ -34,9 +46,13 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, **overrides):
-    """Run refine() with every collaborator faked; return (recorded, result)."""
-    recorded = {
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, clip=None, **overrides):
+    """Run refine() with every collaborator faked; return (recorded, result).
+
+    `recorded` may be passed in, so a test that expects a raise can still read how far the node
+    got before it."""
+    recorded = {} if recorded is None else recorded
+    recorded.update({
         "prepare_upscaled": None,
         "encode_empty": None,
         "build_guider": None,
@@ -44,9 +60,9 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         "refine_image": None,
         "upscaled": torch.rand(1, 64, 64, 3) if upscaled is None else upscaled,
         "empty_cond": [("empty", {})],
-        "sigmas": torch.linspace(1.0, 0.0, 5),
+        "sigmas": torch.linspace(1.0, 0.0, 5) if sigmas is None else sigmas,
         "refined": torch.rand(1, 64, 64, 3),
-    }
+    })
 
     def fake_prepare_upscaled(image, upscale_model, upscale_by, progress=None):
         recorded["prepare_upscaled"] = (image, upscale_model, upscale_by)
@@ -65,7 +81,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
         recorded["build_sigmas"] = (model, scheduler, steps, denoise)
         return recorded["sigmas"]
 
-    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None):
+    def fake_refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=None, anchor_source=None, sampler_name=None, progress=None, preset=None):
         recorded["refine_image"] = {
             "image": image,
             "guider": guider,
@@ -83,6 +99,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
             "vlm_method": vlm_method,
             "sampler_name": sampler_name,
             "progress": progress,
+            "preset": preset,
         }
         return recorded["refined"]
 
@@ -94,7 +111,7 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
 
     recorded["image"] = torch.rand(1, 32, 32, 3) if image is None else image
     recorded["model"] = object()
-    recorded["clip"] = object()
+    recorded["clip"] = object() if clip is None else clip
     recorded["vae"] = object()
 
     widgets = dict(WIDGETS)
@@ -177,6 +194,30 @@ def test_vlm_method_widget_reaches_refine_image(comfy_stubs, monkeypatch, choice
     assert recorded["refine_image"]["vlm_method"] == choice
 
 
+def test_the_prompt_is_written_into_the_preset_handed_to_refine_image(comfy_stubs, monkeypatch):
+    # The node resolves the preset itself and fills {PROMPT} from its own widget, so the
+    # engine's pre-pass asks the filled question and never resolves the file again.
+    from context_anchored_tile_refine import captions
+
+    recorded, _ = _drive(monkeypatch)
+
+    expected = captions.with_prompt(captions.resolve_method(WIDGETS["vlm_method"]), WIDGETS["prompt"])
+    assert recorded["refine_image"]["preset"] == expected
+    assert WIDGETS["prompt"] in expected.tile_instruction
+
+
+def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
+    # The default preset asks for {PROMPT}. The rejection lands before prepare_upscaled, since
+    # the upscale-model pass and the text-encoder load each cost minutes to reach.
+    recorded = {}
+
+    with pytest.raises(RuntimeError, match=r"preset 'prompted' asks for \{PROMPT\}.*not connected or is empty"):
+        _drive(monkeypatch, recorded=recorded, prompt=None)
+
+    assert recorded["prepare_upscaled"] is None
+    assert recorded["encode_empty"] is None
+
+
 def test_builders_receive_the_model_and_their_widgets(comfy_stubs, monkeypatch):
     recorded, _ = _drive(monkeypatch)
 
@@ -254,6 +295,27 @@ def test_the_first_clip_call_gets_its_own_segment_and_the_shim_is_restored(comfy
     assert comfy.utils.ProgressBar is real
 
 
+def test_denoise_zero_returns_the_upscale_before_the_first_clip_call(comfy_stubs, monkeypatch):
+    # denoise 0 is "upscale only": build_sigmas hands back an empty schedule and the node
+    # returns the upscaled picture itself. encode_empty is the run's first CLIP call and pays
+    # the text-encoder load (minutes on a cold cache), so it must never be reached, and
+    # neither may the guider build or the engine. The picture is refine_image's own
+    # zero-step result: RGB-narrowed, a copy, never the caller's tensor.
+    import comfy.utils
+
+    real = comfy.utils.ProgressBar
+    upscaled = torch.rand(1, 64, 64, 4)
+    recorded, result = _drive(monkeypatch, upscaled=upscaled, sigmas=torch.FloatTensor([]), denoise=0.0)
+
+    assert recorded["build_sigmas"] == (recorded["model"], "sgm_uniform", 20, 0.0)
+    assert recorded["encode_empty"] is None
+    assert recorded["build_guider"] is None
+    assert recorded["refine_image"] is None
+    assert torch.equal(result[0], upscaled[..., :3])
+    assert result[0].data_ptr() != upscaled.data_ptr()
+    assert comfy.utils.ProgressBar is real
+
+
 def test_rejects_a_non_4d_image(comfy_stubs, monkeypatch):
     with pytest.raises(ValueError, match="B,H,W,C"):
         _drive(monkeypatch, image=torch.rand(96, 104, 3))
@@ -262,3 +324,41 @@ def test_rejects_a_non_4d_image(comfy_stubs, monkeypatch):
 def test_rejects_a_sub_8_image(comfy_stubs, monkeypatch):
     with pytest.raises(ValueError, match="at least 8x8"):
         _drive(monkeypatch, image=torch.rand(1, 4, 104, 3))
+
+
+def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, monkeypatch, tmp_path):
+    from test_captions import TAGS_SETTINGS, write_settings
+
+    from context_anchored_tile_refine import captions
+
+    write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
+    open_toolkit(monkeypatch, FakeClassifier())
+
+    recorded, _ = _drive(monkeypatch, clip=FakeTagClip())
+
+    preset = recorded["refine_image"]["preset"]
+    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.prompt == WIDGETS["prompt"]
+
+
+@pytest.mark.parametrize(("clip", "missing", "error", "message"), [
+    (None, False, UnsupportedModelError,
+     r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+])
+def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
+                                                                         clip, missing, error, message):
+    # This node runs the upscale-model pass and the text-encoder load before the engine's tags
+    # pass, so a CLIP that is not a Qwen3-VL text encoder or a missing library is named first.
+    from test_captions import TAGS_SETTINGS, write_settings
+
+    write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
+    if missing:
+        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    recorded = {}
+
+    with pytest.raises(error, match=message):
+        _drive(monkeypatch, recorded=recorded, clip=clip)
+
+    assert recorded["prepare_upscaled"] is None
+    assert recorded["encode_empty"] is None

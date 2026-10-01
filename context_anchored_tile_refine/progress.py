@@ -30,22 +30,25 @@ and the bar can never disagree and no engine file has to carry a second notion o
 happening now". It is emitted only when it CHANGES, which is what keeps a per-tile advance
 inside one segment from restating the same words.
 
-THE SHIM. `with ledger:` swaps `comfy.utils.ProgressBar` for a router, so any bar
+THE SHIM. `with ledger:` enters logit_classifier's `routed_progress_bars`, so any bar
 constructed by core INSIDE the run maps its updates into the ledger's current segment
 instead of resetting the display. That is a comfy MODULE-global patch, normally against
-this package's rules — it is accepted here because those bars are constructed inside core
+this package's rules. It is accepted here because those bars are constructed inside core
 functions with no instance to patch and no pbar parameter to pass (llama.py's token bar
-takes none). The window is the run only and the real class is restored in `finally`; the
-ledger's OWN bar is built from the class captured before the patch, so it is genuine.
+takes none). The window is the run only, and the toolkit restores the real class on exit.
+The ledger's OWN bar is built in `__init__`, before the patch, so it is genuine.
 SCOPE: the shim captures bars constructed through the `comfy.utils.ProgressBar` ATTRIBUTE
 (llama.py's token bar, sd.py's VAE tiled fallbacks, upscale.py's tiled_scale bar). The
 KNOWN ESCAPE is sd.py:360, whose `ProgressBar` comes from a module-level `from comfy.utils
 import ProgressBar` binding — reachable from every CLIP encode this package makes when CLIP
 hook scheduling is active. Nothing here claims totality.
 
-Module scope is STDLIB ONLY — no torch, no comfy; comfy is imported lazily inside the
-methods that need it (a subprocess test pins all three).
+Module scope is STDLIB ONLY: no torch, no comfy and no logit_classifier. Each is imported
+lazily inside the methods that need it, and a subprocess test pins them.
 """
+
+import time
+from contextlib import ExitStack
 
 # --- the budget, in DiT-eval units (see the module docstring for what the unit is) -------
 #
@@ -61,7 +64,10 @@ W_CLIP_LOAD = 4.0             # the upscale node's FIRST CLIP call: CLIP.load_mo
                               # text encoder's move onto the GPU, which no other bar covers
 K_CAPTION = 12.0              # one VLM caption: an autoregressive decode of up to the
                               # preset's max_tokens, the run's slowest per-tile step
-W_ENCODE = 4.0                # the ONE whole-canvas vision encode, shared by every tile
+K_TAG_TILE = 4.0              # one tile's tag pass (propose, verify, locate): about 8 s per
+                              # tile at 8K (tests-AB/ab_tile_tags.py) against 19-39 s per caption
+W_ENCODE = 4.0                # ONE vision encode of the entire canvas (up to the 2 MP cap)
+W_ENCODE_CROP = 0.5           # one tile's own crop encode (crop_tokens x 1024 px, ~0.1 MP)
 W_ENCODE_CAPTION_TEXT = 0.5   # one per-tile caption TEXT encode (scales with tile count:
                               # captions.py encodes each tile's caption separately)
 W_ENCODE_TILE = 0.5           # one tile's VAE window encode
@@ -75,6 +81,38 @@ CAPTION_FILL_RATIO = 0.65
 # comfy's ProgressBar carries integers, while the budget above is fractional; the emitted
 # value is the unit count scaled by this. Purely a resolution choice.
 EMIT_SCALE = 100
+
+
+def vision_encode_units(n_tiles, vision):
+    # One picture's VISION_ENCODE units, the mirror of vl.build_vision_rows' own tower passes:
+    # one canvas encode when the canvas rows are on, one crop encode per tile when the crop
+    # rows are on (`vision` is the settings file's [vision] table). Shared by preset_picture
+    # and the engine's open() so the two can never disagree.
+    units = W_ENCODE if vision.canvas_tokens > 0 else 0.0
+    if vision.crop_tokens > 0:
+        units += W_ENCODE_CROP * max(int(n_tiles), 1)
+    return units
+
+
+def caption_segment(preset, n_tiles, rows):
+    # One picture's CAPTIONS segment as (units, chunks): one chunk per tile row plus one per
+    # style row. Shared by preset_picture and the engine's open(), so the ledger total and the
+    # caption_done calls the text pass makes can never disagree. Lazy import: this module's
+    # scope stays stdlib only.
+    from . import captions
+
+    tile_chunks = int(n_tiles) * int(rows)
+    style_chunks = captions.style_row_count(preset, int(rows))
+    tile_units = K_TAG_TILE if preset.kind == captions.TILE_TEXT_TAGS else K_CAPTION
+    return tile_chunks * tile_units + style_chunks * K_CAPTION, tile_chunks + style_chunks
+
+
+def caption_status_word(preset):
+    # The CAPTIONS segment's status word. Both kinds share the segment, so the line names the
+    # pass the preset runs.
+    from . import captions
+
+    return "tagging" if preset.kind == captions.TILE_TEXT_TAGS else "captioning"
 
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text
@@ -103,34 +141,6 @@ STATUS_TEXT = {
 }
 
 
-def send_status(unique_id, text):
-    """Push one line of text under the node's progress bar, or do nothing at all.
-
-    `server` is the ComfyUI web server, so all three ways this can be a no-op are NORMAL
-    rather than errors: no server module at all (the test suite, any subprocess import), no
-    PromptServer instance (headless engine use — core sets `instance` inside __init__, so
-    the attribute does not exist until a server is constructed), and no node id (a direct
-    caller, or the base node, which owns no ledger). Function-scope import: this module's
-    scope is stdlib only.
-    """
-    if unique_id is None:
-        return
-    try:
-        from server import PromptServer
-    except ImportError:
-        return
-    instance = getattr(PromptServer, "instance", None)
-    if instance is None:
-        return
-    try:
-        instance.send_progress_text(text, unique_id)
-    except Exception:
-        # The status line is decoration. This now runs on a lane thread once per completed
-        # eval, so a display failure must degrade to silence — never take down a
-        # multi-minute GPU run through the stepper's abort path.
-        return
-
-
 def linear_fill(value, total):
     # A routed bar's own progress as a fraction of its own total — the default mapping.
     if total <= 0:
@@ -143,9 +153,9 @@ def caption_fill(index, max_length):
     # mapping would leave every caption's chunk visibly short. Token `index` fills the chunk
     # at CAPTION_FILL_RATIO of max_length and the chunk HOLDS there; the exact boundary is
     # reached by the completion snap (`caption_done`), never by a token.
-    if max_length <= 0:
-        return 1.0
-    return min(1.0, max(0.0, index / (CAPTION_FILL_RATIO * max_length)))
+    from . import captions
+
+    return captions.comfy_toolkit().token_fill(index, max_length, CAPTION_FILL_RATIO)
 
 
 # Which mapping a routed bar gets, by the name of the segment it lands in. Absent = linear.
@@ -200,9 +210,12 @@ class Ledger:
     def __init__(self, plan, unique_id=None):
         import comfy.utils
 
-        # Captured BEFORE __enter__ installs the shim, so the ledger's own bar is the real
-        # class and can never route into the ledger itself.
-        self._bar_class = comfy.utils.ProgressBar
+        from . import captions
+
+        # The nodes build the ledger before any GPU work, so a missing library is named here.
+        self._toolkit = captions.comfy_toolkit()
+        self._routing = ExitStack()
+        self._started = 0.0
         self._plan = [[str(name), float(units)] for name, units in plan]
         self._cursor = 0          # index of the first plan entry not yet CLOSED
         self._is_open = False     # is self._plan[self._cursor] currently open?
@@ -211,7 +224,8 @@ class Ledger:
         self._chunks = 1          # sub-divisions of the open entry (one per caption)
         self._chunk_index = 0     # which sub-division is in progress
         self._chunk_base = None   # this segment's offset into a run-wide caption counter
-        self._value = 0           # last EMITTED value, in scaled integer units
+        self._status_word = "captioning"  # the CAPTIONS line's verb, set at every open
+        self._value = 0          # last EMITTED value, in scaled integer units
         self._total = 0
         self.unique_id = unique_id
         self.segments = []        # the plan entries opened, in order (name, units)
@@ -222,7 +236,9 @@ class Ledger:
         # batch is stated and the prefix cannot contradict the segments it labels.
         self._pictures = sum(1 for name, _units in self._plan if name == SAMPLING) or 1
         self._picture = 1
-        self._pbar = self._bar_class(self._scaled(self._plan_units()))
+        # Built before __enter__ routes comfy.utils.ProgressBar, so the ledger's own bar is
+        # core's class and can never route into the ledger itself.
+        self._pbar = comfy.utils.ProgressBar(self._scaled(self._plan_units()))
         self._emit()
 
     # ---- reading -------------------------------------------------------------------------
@@ -237,7 +253,7 @@ class Ledger:
 
     # ---- segments ------------------------------------------------------------------------
 
-    def open(self, name, units=None, chunks=1):
+    def open(self, name, units=None, chunks=1, status_word="captioning"):
         """Close whatever is open and open the plan's next `name` entry at `units`.
 
         The cursor WALKS to that entry, dropping any planned entry the run skipped (an
@@ -258,6 +274,7 @@ class Ledger:
         self._chunks = max(int(chunks), 1)
         self._chunk_index = 0
         self._chunk_base = None
+        self._status_word = status_word
         self.segments.append(self._plan[self._cursor])
         self._emit()
 
@@ -287,24 +304,26 @@ class Ledger:
                 entry[1] = float(units)
         self._emit()
 
-    def preset_picture(self, vlm_method, n_tiles, rows, eval_total, style_rows=0):
+    def preset_picture(self, preset, n_tiles, rows, eval_total, vision_units):
         # One picture's whole block at true sizes, called at that picture's grid solve —
         # the mirror of build_plan's per-picture entries with the real multipliers, and
         # the same arithmetic the engine's open() calls carry (they re-set the identical
-        # numbers, so open never moves the total again). `style_rows` counts the
-        # whole-image style captions (one per row when the run's preset asks for one).
+        # numbers, so open never moves the total again). `preset` is the run's resolved
+        # block, since its kind and its style rows size the caption segment
+        # (caption_segment), and `vision_units` is the pre-pass's vision encode cost
+        # (vision_encode_units), required because a forgotten one would silently size the
+        # segment without the crop encodes.
         from . import captions
 
-        surface = captions.method_surface(vlm_method)
         count = max(int(n_tiles), 1)
-        caption_count = count * max(int(rows), 1) + max(int(style_rows), 0)
-        if surface == captions.VLM_METHOD_VISION:
-            self.preset(VISION_ENCODE, W_ENCODE)
-        elif surface == captions.VLM_METHOD_VISION_CAPTIONS:
-            self.preset(CAPTIONS, caption_count * K_CAPTION)
-            self.preset(VISION_ENCODE, W_ENCODE + count * W_ENCODE_CAPTION_TEXT)
+        caption_units, _chunks = caption_segment(preset, count, max(int(rows), 1))
+        if preset.surface == captions.VLM_METHOD_VISION:
+            self.preset(VISION_ENCODE, float(vision_units))
+        elif preset.surface == captions.VLM_METHOD_VISION_CAPTIONS:
+            self.preset(CAPTIONS, caption_units)
+            self.preset(VISION_ENCODE, float(vision_units) + count * W_ENCODE_CAPTION_TEXT)
         else:
-            self.preset(CAPTIONS, caption_count * K_CAPTION)
+            self.preset(CAPTIONS, caption_units)
             self.preset(CAPTION_ENCODE, count * W_ENCODE_CAPTION_TEXT)
         self.preset(CANVAS_ENCODE, count * W_ENCODE_TILE)
         self.preset(SAMPLING, float(eval_total) * count)
@@ -324,7 +343,6 @@ class Ledger:
         self._done += sum(entry[1] for entry in self._plan[self._cursor:])
         self._cursor = len(self._plan)
         self._emit()
-        self._clear_status()
 
     # ---- filling -------------------------------------------------------------------------
 
@@ -367,19 +385,19 @@ class Ledger:
     # ---- the scoped comfy.utils.ProgressBar patch -----------------------------------------
 
     def __enter__(self):
-        import comfy.utils
-
-        comfy.utils.ProgressBar = _routed_bar_class(self)
+        self._started = time.perf_counter()
+        self._routing.enter_context(self._toolkit.routed_progress_bars(self.route))
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        import comfy.utils
+        seconds = time.perf_counter() - self._started
+        text = ""
 
-        comfy.utils.ProgressBar = self._bar_class
-        # The run is over either way, so the line goes with it: on the normal exit finish()
-        # already cleared it and this is a no-op, while on a raise (an OOM mid-sampling is
-        # the reachable one) it is what stops "sampling 40%" standing under the node forever.
-        self._clear_status()
+        self._routing.close()
+        # The frontend ignores an empty line, so the run's last line must say how it ended
+        # or a phase line such as "sampling 40%" stays under the node.
+        text = self._toolkit.run_outcome(exc_type, f"done in {seconds:.1f} s")
+        self._send_status(text)
         return False
 
     # ---- internals ------------------------------------------------------------------------
@@ -433,9 +451,10 @@ class Ledger:
                     # A previous picture already reported run-wide counters: anticipate the
                     # next index, so the count never appears to restart at a picture
                     # boundary ("captioning 3/6", not "captioning 1/3").
-                    return f"captioning {min(self.chunks[0] + 1, self.chunks[1])}/{self.chunks[1]}"
-                return f"captioning 1/{self._chunks}"
-            return f"captioning {self.chunks[0]}/{self.chunks[1]}"
+                    return (f"{self._status_word} "
+                            f"{min(self.chunks[0] + 1, self.chunks[1])}/{self.chunks[1]}")
+                return f"{self._status_word} 1/{self._chunks}"
+            return f"{self._status_word} {self.chunks[0]}/{self.chunks[1]}"
         if name == SAMPLING:
             # Percent of THIS segment, moved once per completed model eval (the stepper's
             # on_eval tick — n_tiles ticks per sigma step, so the percent walks in ~1%
@@ -456,15 +475,11 @@ class Ledger:
             text = f"image {self._picture}/{self._pictures}: {text}"
         self._send_status(text)
 
-    def _clear_status(self):
-        # The end of the run: an empty line is what REMOVES the row under the bar.
-        self._send_status("")
-
     def _send_status(self, text):
         if text == self._status_text:
             return
         self._status_text = text
-        send_status(self.unique_id, text)
+        self._toolkit.send_status(self.unique_id, text)
 
     def _emit(self, preview=None):
         total = max(self._scaled(self._plan_units()), self._value)
@@ -475,29 +490,18 @@ class Ledger:
         self._emit_status()
 
 
-def _routed_bar_class(ledger):
-    # comfy.utils.ProgressBar's construction surface, routed into `ledger`. A CLASS per
-    # ledger rather than one module-level class with a global, so nothing survives the
-    # patch window. node_id is accepted and ignored: core passes it positionally in a few
-    # places and the ledger owns the run's node id itself.
-    class RoutedProgressBar:
-        def __init__(self, total, node_id=None):
-            self.total = total
-            self.current = 0
-            self.node_id = node_id
-
-        def update_absolute(self, value, total=None, preview=None):
-            if total is not None:
-                self.total = total
-            self.current = value
-            ledger.route(value, self.total, preview)
-
-        def update(self, value):
-            self.update_absolute(self.current + value)
-
-    return RoutedProgressBar
-
-
 def build_ledger(vlm_method, steps, batch=1, upscale_model=False, clip_load=False, unique_id=None):
     # The one constructor node.py calls: the plan, then the ledger over it.
     return Ledger(build_plan(vlm_method, steps, batch, upscale_model, clip_load), unique_id=unique_id)
+
+
+def build_caption_ledger(preset, n_tiles, unique_id=None):
+    """The ledger for a run that writes tile texts and nothing else (the Captions test node):
+    one CAPTIONS segment sized by `caption_segment` for one picture of `n_tiles` tiles,
+    already open, for either preset kind. Without it that node emits from two bars per
+    caption, core's per-token bar and the text pass's own, and the display resets at every
+    caption."""
+    units, chunks = caption_segment(preset, n_tiles, 1)
+    ledger = Ledger(((CAPTIONS, units),), unique_id=unique_id)
+    ledger.open(CAPTIONS, units, chunks=chunks, status_word=caption_status_word(preset))
+    return ledger
