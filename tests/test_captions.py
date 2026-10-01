@@ -182,10 +182,11 @@ def test_settings_toml_ships_the_owner_tested_wording():
     # wording changes lose consistency, so an accidental edit fails here. A deliberate
     # prompt change updates this pin alongside the settings files.
     settings = captions.load_settings()
-    # The [vision] table: the block A/B's settled point (TESTS.md test 10), and the caption
-    # picture at the vision encode's old size, the three-scene A/B's winner.
+    # The [vision] table: equal canvas and crop rows, which kept the canvas slice's phantom
+    # cars off a flat roof on three seeds, and the caption picture at the vision encode's old
+    # size, the three-scene A/B's winner.
     assert settings.vision == captions.VisionSettings(
-        canvas_tokens=165, crop_tokens=110, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
+        canvas_tokens=165, crop_tokens=165, caption_megapixels=captions.SHIPPED_CAPTION_MEGAPIXELS)
     assert captions.SHIPPED_CAPTION_MEGAPIXELS == 768 * 1024 / 1_000_000
 
     # The example file: the tags preset first, then every caption preset, copied from the
