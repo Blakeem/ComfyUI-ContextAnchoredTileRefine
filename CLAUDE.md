@@ -132,6 +132,26 @@ without that doc's temporal design.
   encode/sample/decode from a live canvas, directional-feather composite, crop back). With a mask
   it crops to the mask bbox plus `context_anchor`, gates every tile's denoise mask to the region,
   and composites back through a 1px anti-aliased edge, leaving everything outside byte-identical.
+  **THE SHARED STEP NOISE (2026-10-03)**: a stochastic sampler's PER-STEP draws on the raster path
+  come from ONE canvas-wide field, as its start noise already did. `_refine_tiles` calls
+  `build_step_noise` once (the swap point a harness patches), and for a sampler named in
+  `SHARED_NOISE_SAMPLERS` it hands each tile a KSAMPLER copy whose `noise_sampler` reads the
+  `StepNoiseField` at the tile's `crop // 8` window, so overlapping tiles hold torch.equal noise on
+  every shared cell. A name qualifies when its `noise_sampler` call count depends only on the sigmas
+  and options and every call is an independent normal (`default_noise_sampler`, or a Brownian tree
+  over disjoint intervals). `dpmpp_sde` / `dpmpp_sde_gpu` stay OUT, because their two draws per step
+  span nested intervals from one sigma and must correlate. Every other sampler, a non-KSAMPLER
+  object, a KSAMPLER subclass (whose own `sample()` the per-tile copy would drop), a sampler carrying
+  its own `noise_sampler` and a seed outside the unsigned 64-bit block key get the caller's object
+  unchanged, so their output is byte-identical. A 1x1 grid under a table sampler is no longer the whole-image refine bit
+  for bit. Draw k is built from 64-cell blocks on the canvas grid, each from a CPU generator seeded
+  by blake2b over (seed, batch_index, k, block row, block column), so a tile draws only the blocks
+  under its crop: about 9 MB and 1.4 s per 8K run at 9 steps, against 293 MB to 978 MB for caching
+  every step's canvas field and 11 s to 39 s for redrawing it per tile
+  (`tests-AB/probe_canvas_noise_memory.py`). Measured at 4096x2304 on Krea 2 with euler_ancestral
+  (`tests-AB/probe_raster_noise_band.py`), the two tiles' band textures correlate 0.83 against 0.27
+  per tile and the band difference falls from 4.7 to 2.1 per 255. The owner judged it better in a
+  visual A/B. `stepper.sampler_function_name` is the sampler name resolution both engines share.
   **torch-only at module scope**; `comfy` / `latent_preview` are imported lazily inside functions
   (a subprocess test pins this). `make_tile_progress` guards a nested x0 before previewing
   (core hands nested-latent callbacks a NestedTensor; the guard previews stream 0, a no-op

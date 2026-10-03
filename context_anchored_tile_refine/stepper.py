@@ -206,12 +206,21 @@ class _Aborted(Exception):
     `run_lanes` re-raises the first real exception instead."""
 
 
-def _resolve_sampler_name(sampler):
-    # Sampler intake. The layer needs the k-diffusion function's identity to time the
-    # barrier, and only a stock KSAMPLER exposes it in a form the table can key on.
+def sampler_function_name(sampler):
+    # The name both engines key their sampler tables on. Only a stock KSAMPLER exposes its
+    # k-diffusion function, so any other object has no name and gets None.
     import comfy.samplers
 
     if not isinstance(sampler, comfy.samplers.KSAMPLER):
+        return None
+    return getattr(sampler.sampler_function, "__name__", "").removeprefix("sample_")
+
+
+def _resolve_sampler_name(sampler):
+    # Sampler intake. The layer needs the k-diffusion function's identity to time the
+    # barrier, and only a stock KSAMPLER exposes it in a form the table can key on.
+    name = sampler_function_name(sampler)
+    if name is None:
         raise ValueError(
             "Context-Anchored Tile Refine (sync): the synchronized stepper only supports standard "
             f"KSAMPLER samplers, got {type(sampler).__name__}. Custom sampler objects expose "
@@ -227,10 +236,8 @@ def _resolve_sampler_name(sampler):
             "shared noise field every lane samples against."
         )
 
-    raw_name = getattr(sampler.sampler_function, "__name__", "")
-    name = raw_name[len("sample_"):] if raw_name.startswith("sample_") else raw_name
     if name not in EVALS_PER_STEP:
-        raise ValueError(unsupported_sampler_message(name or raw_name))
+        raise ValueError(unsupported_sampler_message(name))
     return name
 
 

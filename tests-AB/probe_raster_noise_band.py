@@ -120,7 +120,7 @@ def main():
 
     from context_anchored_tile_refine import sampling, upscale
 
-    arm_scope = ab.canvas_noise_arm(args.seed) if args.arm == "canvas" else contextlib.nullcontext()
+    arm_scope = ab.arm_scope(args.arm, args.seed)
     records = []
     canvas = ab.upscaled_input(args.scene)
     empty = ab.empty_conditioning()

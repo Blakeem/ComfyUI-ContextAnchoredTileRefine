@@ -1,5 +1,8 @@
+import hashlib
+import itertools
 import logging
 import math
+import struct
 
 import torch
 
@@ -669,6 +672,85 @@ def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, ba
     return canvas_noise
 
 
+# A sampler qualifies when its noise_sampler call count depends only on the sigmas and options and every call is an
+# independent normal. dpmpp_sde is out: its two draws per step span nested intervals from one sigma, so they must correlate.
+SHARED_NOISE_SAMPLERS = frozenset({
+    "euler_ancestral", "euler_ancestral_cfg_pp", "dpm_2_ancestral", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
+    "lcm", "ddpm", "er_sde", "seeds_2", "seeds_3", "exp_heun_2_x0_sde", "sa_solver", "sa_solver_pece",
+    "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
+    "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
+})
+
+
+class StepNoiseField:
+    """One canvas-wide per-step noise field for the raster path's stochastic samplers.
+
+    `shape` is the tile canvas's latent shape, 4-D or 5-D. `for_window` hands one tile a
+    `noise_sampler` whose call k returns draw k over that tile's latent window. Every tile runs
+    the same sampler over the same sigmas, so call k lines up across tiles and overlapping tiles
+    hold torch.equal noise on every shared cell.
+    """
+
+    # A tile draws only the blocks under its crop, about 9 MB and 1.4 s per 8K run at 9 steps. Caching each step's
+    # canvas field costs 293 to 978 MB, and redrawing it per tile 11 to 39 s (tests-AB/probe_canvas_noise_memory.py).
+    BLOCK_CELLS = 64
+
+    def __init__(self, shape, seed, batch_index=0):
+        self.shape = tuple(shape)
+        self.seed = int(seed)
+        self.batch_index = int(batch_index)
+
+    def _block(self, ordinal, by, bx):
+        # blake2b, never hash(): Python does not promise hash() values across versions.
+        key = hashlib.blake2b(struct.pack("<5Q", self.seed, self.batch_index, ordinal, by, bx), digest_size=8).digest()
+        generator = torch.Generator().manual_seed(int.from_bytes(key, "little") >> 1)
+        return torch.randn((*self.shape[:-2], self.BLOCK_CELLS, self.BLOCK_CELLS), generator=generator)
+
+    def _draw(self, ordinal, y0, y1, x0, x1):
+        size = self.BLOCK_CELLS
+        window = torch.empty((*self.shape[:-2], y1 - y0, x1 - x0))
+        for by in range(y0 // size, (y1 - 1) // size + 1):
+            for bx in range(x0 // size, (x1 - 1) // size + 1):
+                top, left = by * size, bx * size
+                cy0, cy1 = max(y0, top), min(y1, top + size)
+                cx0, cx1 = max(x0, left), min(x1, left + size)
+                block = self._block(ordinal, by, bx)
+                window[..., cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = block[..., cy0 - top:cy1 - top, cx0 - left:cx1 - left]
+        return window
+
+    def for_window(self, y0, y1, x0, x1):
+        if not (0 <= y0 < y1 <= self.shape[-2] and 0 <= x0 < x1 <= self.shape[-1]):
+            raise ValueError(
+                f"Context-Anchored Tile Refine: noise window rows {y0}:{y1}, columns {x0}:{x1} does not lie "
+                f"inside the {self.shape[-2]}x{self.shape[-1]} latent canvas.")
+        ordinals = itertools.count()
+
+        def noise_sampler(sigma, sigma_next):
+            return self._draw(next(ordinals), y0, y1, x0, x1).to(device=sigma.device)
+
+        return noise_sampler
+
+
+def build_step_noise(sampler, canvas_shape, seed, batch_index=0):
+    # The raster path's one swap point for the shared field, which tests-AB patches by name.
+    # None keeps the caller's sampler and its per-tile draw, and a caller's own noise_sampler wins.
+    import comfy.samplers
+
+    from . import stepper
+
+    # A subclass may override sample(), which the plain KSAMPLER copy made per tile would drop.
+    if type(sampler) is not comfy.samplers.KSAMPLER:
+        return None
+    if stepper.sampler_function_name(sampler) not in SHARED_NOISE_SAMPLERS:
+        return None
+    if sampler.extra_options.get("noise_sampler") is not None:
+        return None
+    # A NOISE object from another pack may carry a seed the unsigned 64-bit block key cannot hold.
+    if not isinstance(seed, int) or not 0 <= seed <= 0xFFFFFFFFFFFFFFFF:
+        return None
+    return StepNoiseField(canvas_shape, seed, batch_index)
+
+
 def region_gates(region_pixel, canvas_h, canvas_w):
     # The region gate at pixel and at latent resolution, as (region_padded, region_latent).
     # The pixel mask is padded onto the /8 canvas with constant 0 (the padded strip is always
@@ -698,7 +780,8 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # The BASE node's path only: since 1.6.0 the VL nodes tile through the sync engine
     # (sync.py), so nothing VL — no CLIP, no per-tile positive, no conditioning-surface
     # select — reaches this function at all.
-    # A 1x1 grid (or overlap=ctx=0) is the whole-image refine bit for bit.
+    # A 1x1 grid (or overlap=ctx=0) is the whole-image refine bit for bit, except under a
+    # SHARED_NOISE_SAMPLERS sampler, whose per-step draws come from the canvas-wide field.
     # region_pixel (optional [B,H,W] binary float at input pixel size) gates each tile's
     # denoise_mask to the masked region so only it diffuses; the background stays frozen,
     # and it gates the DC measurement to the same region (see seam_dc_offset).
@@ -708,6 +791,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # (batch == 1 there). They reach the noise draw and the progress bar only; 1/0 — a
     # direct call, or a single-picture IMAGE — changes nothing.
     import comfy.model_management
+    import comfy.samplers
 
     pixels = image[..., :3]
     padded, (height, width) = pad_image_to_multiple(pixels)
@@ -728,6 +812,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
 
     layout = grid.solve_layout(canvas_w, canvas_h, max_tile_width, max_tile_height, context_anchor, context_overlap)
     canvas_noise = build_canvas_noise(vae, noise, canvas_h, canvas_w, batch, batch_size, batch_index)
+    # Per-tile per-step draws refine every overlap band with two unrelated textures, which the
+    # feather then smudges together (tests-AB/probe_raster_noise_band.py).
+    step_noise = build_step_noise(sampler, canvas_noise.shape, noise.seed, batch_index)
 
     steps = sigmas.shape[-1] - 1
     for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles), batch_size, batch_index)
@@ -777,7 +864,14 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
         # .contiguous() because downstream sampler code may .view() the slice; a 1x1
         # grid slices the full tensor, so it returns self unchanged. The ellipsis
         # slices the trailing spatial dims of both the 4-D and the 5-D noise layout.
-        tile_noise = canvas_noise[..., crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8].contiguous()
+        ly0, ly1, lx0, lx1 = crop.y0 // 8, crop.y1 // 8, crop.x0 // 8, crop.x1 // 8
+        tile_noise = canvas_noise[..., ly0:ly1, lx0:lx1].contiguous()
+        tile_sampler = sampler
+        if step_noise is not None:
+            tile_sampler = comfy.samplers.KSAMPLER(
+                sampler.sampler_function,
+                extra_options={**sampler.extra_options, "noise_sampler": step_noise.for_window(ly0, ly1, lx0, lx1)},
+                inpaint_options=dict(sampler.inpaint_options))
         # Fail fast on any encode/noise layout divergence encode_pixels does not already
         # resolve — a VAE folding an image batch outside the video family it handles, or a
         # spatial compression the /8 grid math does not model. A mismatch here would
@@ -819,7 +913,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             # No lead ring schedule on this path. On plain conditioning it was consistently worse
             # in the owner's visual A/B (tests-AB/run_ab_matrix.py, scene `portrait`), because
             # only a VL positive tells a tile what the ring it follows contains.
-            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
+            samples = sample_latent(guider, tile_sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds

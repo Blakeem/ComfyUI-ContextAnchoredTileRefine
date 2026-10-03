@@ -1,12 +1,13 @@
 """A/B of the base node's per-step sampler noise on the raster path.
 
-Arm `per-tile` is the shipped behavior. Every tile hands the sampler the same seed, so an
-ancestral sampler draws the same per-step noise stream for every tile of the same crop
-shape (core default_noise_sampler seeds one generator per call). Arm `canvas` draws each
-noise step once at canvas size and gives every tile its crop's slice, the way the sync
-engine shares its field, so tiles never repeat a pattern. The canvas arm also gives two
-overlapping tiles the same noise on their shared band, where the per-tile arm gives them
-different crop-local draws, so a seam can differ between the arms for that reason too.
+Arm `per-tile` turns the package's shared step noise off (per_tile_arm). Every tile hands
+the sampler the same seed, so an ancestral sampler draws the same per-step noise stream for
+every tile of the same crop shape (core default_noise_sampler seeds one generator per
+call). Arm `canvas` draws each noise step once at canvas size and gives every tile its
+crop's slice, the way the sync engine shares its field, so tiles never repeat a pattern.
+The canvas arm also gives two overlapping tiles the same noise on their shared band, where
+the per-tile arm gives them different crop-local draws, so a seam can differ between the
+arms for that reason too.
 
 Both arms share the upscaled input, the canvas start noise, the model and every setting,
 and they differ only in the noise_sampler the tile's sampler receives. The settings follow
@@ -20,8 +21,9 @@ puts two same-shaped tiles side by side in each row. One render per process (CLA
     python tests-AB/run_ab_raster_noise.py --arm canvas --seed 42
     python tests-AB/run_ab_raster_noise.py --arm shipped --scene market --seed 42 --tag before
 
-Arm `shipped` runs the package as it stands with no harness hook, and `--tag` names the
-render, so one command renders a scene before and after a production change.
+Arm `shipped` runs the package as it stands with no harness hook, which shares one field
+built from 64-cell blocks (sampling.StepNoiseField), and `--tag` names the render, so one
+command renders a scene before and after a production change.
 
 Each run also reports the repeat metric, the correlation of the high-passed refine
 residual between tiles of the same crop shape at the same crop-local cells, minus the same
@@ -202,6 +204,29 @@ def canvas_noise_arm(seed):
         raise RuntimeError(f"The run sampled {state['next']} tiles, but the harness grid has {len(state['tiles'])}.")
 
 
+@contextlib.contextmanager
+def per_tile_arm():
+    """Turn the shipped shared step noise off, so every tile's sampler draws its own per-step
+    stream from the tile seed over its own crop."""
+    from context_anchored_tile_refine import sampling
+
+    original = sampling.build_step_noise
+    sampling.build_step_noise = lambda *args, **kwargs: None
+    try:
+        yield
+    finally:
+        sampling.build_step_noise = original
+
+
+def arm_scope(arm, seed):
+    # One arm-to-hook map for this harness and probe_raster_noise_band.py.
+    if arm == "per-tile":
+        return per_tile_arm()
+    if arm == "canvas":
+        return canvas_noise_arm(seed)
+    return contextlib.nullcontext()
+
+
 def solo_cells(tile, layout, inset):
     """The core rect only this tile writes, inset by `inset`, as crop-local (y0, y1, x0, x1).
 
@@ -282,7 +307,7 @@ def main():
         "cfg": CFG, "seed": args.seed, "max_tile_width": MAX_TILE_WIDTH, "max_tile_height": MAX_TILE_HEIGHT,
         "context_anchor": CONTEXT_ANCHOR, "context_overlap": CONTEXT_OVERLAP,
     }
-    arm_scope = canvas_noise_arm(args.seed) if args.arm == "canvas" else contextlib.nullcontext()
+    scope = arm_scope(args.arm, args.seed)
     canvas = None
     empty = None
     result = None
@@ -297,7 +322,7 @@ def main():
         sigmas = upscale.build_sigmas(model, SCHEDULER, STEPS, DENOISE)
         sampler = comfy.samplers.sampler_object(SAMPLER)
         started = time.perf_counter()
-        with arm_scope:
+        with scope:
             result = sampling.refine_image(canvas, guider, sampler, sigmas, vae, upscale.Noise_RandomNoise(args.seed),
                                            MAX_TILE_WIDTH, MAX_TILE_HEIGHT, CONTEXT_ANCHOR, CONTEXT_OVERLAP)
         elapsed = time.perf_counter() - started
