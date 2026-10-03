@@ -18,6 +18,10 @@ puts two same-shaped tiles side by side in each row. One render per process (CLA
 
     python tests-AB/run_ab_raster_noise.py --arm per-tile --seed 42
     python tests-AB/run_ab_raster_noise.py --arm canvas --seed 42
+    python tests-AB/run_ab_raster_noise.py --arm shipped --scene market --seed 42 --tag before
+
+Arm `shipped` runs the package as it stands with no harness hook, and `--tag` names the
+render, so one command renders a scene before and after a production change.
 
 Each run also reports the repeat metric, the correlation of the high-passed refine
 residual between tiles of the same crop shape at the same crop-local cells, minus the same
@@ -34,8 +38,8 @@ from pathlib import Path
 import ab_env
 import ab_models
 
-ARMS = ("per-tile", "canvas")
-SCENE = "dark-city"
+ARMS = ("per-tile", "canvas", "shipped")
+SCENES = {"dark-city": "dark-city.webp", "city": "cyberpunk-city.webp", "market": "renaissance-market-original.png"}
 UPSCALE_MODEL = "4x-UltraSharp.pth"
 UPSCALE_BY = 4.0
 UNET = "krea2RawBaseInt8Row_v10.safetensors"
@@ -60,11 +64,12 @@ SHIFT_CONTROL = 16
 OUTPUT_DIR = Path(r"C:\Users\Blake\Documents\ComfyUI\output\AB-Raster-Noise")
 
 
-def output_path(arm, seed):
-    return OUTPUT_DIR / f"AB_raster-noise__{SCENE}__{arm}__s{seed}.png"
+def output_path(scene, arm, seed, tag=""):
+    suffix = f"__{tag}" if tag else ""
+    return OUTPUT_DIR / f"AB_raster-noise__{scene}__{arm}__s{seed}{suffix}.png"
 
 
-def upscaled_input():
+def upscaled_input(scene="dark-city"):
     # Computed once and reused, so every arm and seed refines the identical pixels.
     import numpy as np
     import torch
@@ -73,8 +78,8 @@ def upscaled_input():
 
     from context_anchored_tile_refine import upscale
 
-    cache = OUTPUT_DIR / f"upscaled__{SCENE}__{UPSCALE_MODEL}.pt"
-    source = ab_env.REPO_ROOT / "samples" / f"{SCENE}.webp"
+    cache = OUTPUT_DIR / f"upscaled__{scene}__{UPSCALE_MODEL}.pt"
+    source = ab_env.REPO_ROOT / "samples" / SCENES[scene]
     picture = None
     image = None
     upscale_model = None
@@ -260,6 +265,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--arm", choices=ARMS, required=True)
     parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--scene", choices=sorted(SCENES), default="dark-city")
+    parser.add_argument("--tag", default="")
     args = parser.parse_args()
     ab_env.bootstrap()
 
@@ -268,8 +275,9 @@ def main():
 
     from context_anchored_tile_refine import sampling, upscale
 
+    path = output_path(args.scene, args.arm, args.seed, args.tag)
     settings = {
-        "image_label": SCENE, "run_label": args.arm, "upscale_model": UPSCALE_MODEL, "upscale_by": UPSCALE_BY,
+        "image_label": args.scene, "run_label": args.arm, "upscale_model": UPSCALE_MODEL, "upscale_by": UPSCALE_BY,
         "unet": UNET, "vae": VAE, "sampler": SAMPLER, "scheduler": SCHEDULER, "steps": STEPS, "denoise": DENOISE,
         "cfg": CFG, "seed": args.seed, "max_tile_width": MAX_TILE_WIDTH, "max_tile_height": MAX_TILE_HEIGHT,
         "context_anchor": CONTEXT_ANCHOR, "context_overlap": CONTEXT_OVERLAP,
@@ -280,7 +288,7 @@ def main():
     result = None
     elapsed = 0.0
 
-    canvas = upscaled_input()
+    canvas = upscaled_input(args.scene)
     empty = empty_conditioning()
     model = ab_models.load_unet(UNET)
     vae = ab_models.load_vae(VAE)
@@ -296,11 +304,11 @@ def main():
     result = result.float().cpu()
 
     report = {"settings": settings, "refine_seconds": round(elapsed, 1), "repeat": repeat_metric(result, canvas)}
-    ab_models.save_png(output_path(args.arm, args.seed), result, settings)
-    output_path(args.arm, args.seed).with_suffix(".json").write_text(json.dumps(report, indent=1))
+    ab_models.save_png(path, result, settings)
+    path.with_suffix(".json").write_text(json.dumps(report, indent=1))
     print(json.dumps({"refine_seconds": report["refine_seconds"],
                       **{kernel: values["mean_repeat"] for kernel, values in report["repeat"].items()}}))
-    print("wrote", output_path(args.arm, args.seed))
+    print("wrote", path)
 
 
 if __name__ == "__main__":

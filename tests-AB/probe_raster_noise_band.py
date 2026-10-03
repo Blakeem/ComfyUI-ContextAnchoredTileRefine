@@ -111,6 +111,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--arm", choices=ab.ARMS, required=True)
     parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--scene", choices=sorted(ab.SCENES), default="dark-city")
     args = parser.parse_args()
     ab_env.bootstrap()
 
@@ -121,7 +122,7 @@ def main():
 
     arm_scope = ab.canvas_noise_arm(args.seed) if args.arm == "canvas" else contextlib.nullcontext()
     records = []
-    canvas = ab.upscaled_input()
+    canvas = ab.upscaled_input(args.scene)
     empty = ab.empty_conditioning()
     model = ab_models.load_unet(ab.UNET)
     vae = ab_models.load_vae(ab.VAE)
@@ -144,7 +145,7 @@ def main():
         "dc_offset_255": round(statistics.mean(r["dc_offset_255"] or 0.0 for r in records), 3),
         "band_detail": round(statistics.mean(r["band_detail"] for r in detail), 4),
     }
-    out = ab.OUTPUT_DIR / f"band__{ab.SCENE}__{args.arm}__s{args.seed}.json"
+    out = ab.OUTPUT_DIR / f"band__{args.scene}__{args.arm}__s{args.seed}.json"
     out.write_text(json.dumps({"summary": summary, "disagreement": records, "band_detail": detail}, indent=1))
     print(json.dumps(summary))
 
