@@ -33,10 +33,10 @@ def patched(pairs):
 
 
 def head_noun_subsets():
-    import logit_classifier.tags as compat
+    import logit_classifier.toolkit.tags as toolkit_tags
     from logit_classifier.toolkit.tags import drop_subsets
 
-    return [(compat, "drop_subsets", functools.partial(drop_subsets, rule="head-noun"))]
+    return [(toolkit_tags, "drop_subsets", functools.partial(drop_subsets, rule="head-noun"))]
 
 
 def caps_40_80():
