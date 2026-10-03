@@ -161,8 +161,8 @@ def caption_preset(instruction, max_tokens, surface=None):
         surface=captions.VLM_METHOD_VISION_CAPTIONS if surface is None else surface,
         label="pinned",
         vision=dataclasses.replace(vision, caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
-        tile_instruction=instruction, tile_max_tokens=max_tokens,
-        style_instruction="", style_max_tokens=max_tokens)
+        tile_caption_instruction=instruction, tile_caption_max_tokens=max_tokens,
+        global_style_instruction="", global_style_max_tokens=max_tokens)
 
 
 def version(root):

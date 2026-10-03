@@ -161,7 +161,7 @@ def _arm_instruction(method):
     if method == captions.VLM_METHOD_VISION_CAPTIONS:
         return captions.SETTLED_POSITION_INSTRUCTION, captions.SETTLED_POSITION_MAX_TOKENS
     preset = captions.resolve_method(f"{method} (standard)")
-    return preset.tile_instruction, preset.tile_max_tokens
+    return preset.tile_caption_instruction, preset.tile_caption_max_tokens
 
 
 def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):

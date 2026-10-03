@@ -302,7 +302,7 @@ def _tag_cache_key(image, preset, scope):
     # serves text written under the old one. An image of None keys a text-only request.
     digest = () if image is None else captions.picture_digest(image)
     return (digest, tag_settings(preset), VL_MAX_PIXELS, STRIP_MEGAPIXELS, ROW_WORDS, COLUMN_WORDS,
-            preset.tile_tags_position_threshold, preset.style_instruction, preset.prompt, scope)
+            preset.tile_tags_position_threshold, preset.global_style_instruction, preset.prompt, scope)
 
 
 def _cached(key, clip, compute):
@@ -333,9 +333,9 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
     import comfy.model_management
     import comfy.utils
 
-    if preset.kind != captions.TILE_TEXT_TAGS:
+    if preset.tile_text != captions.TILE_TEXT_TAGS:
         raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): preset {preset.label!r} is the {preset.kind!r} "
+            f"Context-Anchored Tile Refine (VL): preset {preset.label!r} is the {preset.tile_text!r} "
             "kind and the tags pass runs only a preset with tile_text = "
             f"{captions.TILE_TEXT_TAGS!r}. Hand a caption preset to captions.generate_caption_set.")
     captions._check_prompt_filled(preset)

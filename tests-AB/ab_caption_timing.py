@@ -183,7 +183,7 @@ def run_condition(clip, canvas, tiles, prompt_key, with_style):
     preset = captions.with_prompt(captions.resolve_method(captions.default_vlm_method()),
                                   PROMPTS[prompt_key])
     if not with_style:
-        preset = replace(preset, style_instruction="")
+        preset = replace(preset, global_style_instruction="")
     clock = Clock(torch)
     undo = instrument(clock, clip, tags, captions, lc_tags, ComfyClipBackend)
     try:

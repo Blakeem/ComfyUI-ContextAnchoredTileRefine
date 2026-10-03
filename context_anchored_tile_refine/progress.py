@@ -104,7 +104,7 @@ def caption_segment(preset, n_tiles, rows):
 
     tile_chunks = int(n_tiles) * int(rows)
     style_chunks = captions.style_row_count(preset, int(rows))
-    tile_units = K_TAG_TILE if preset.kind == captions.TILE_TEXT_TAGS else K_CAPTION
+    tile_units = K_TAG_TILE if preset.tile_text == captions.TILE_TEXT_TAGS else K_CAPTION
     return tile_chunks * tile_units + style_chunks * K_CAPTION, tile_chunks + style_chunks
 
 
@@ -113,7 +113,7 @@ def caption_status_word(preset):
     # pass the preset runs.
     from . import captions
 
-    return "tagging" if preset.kind == captions.TILE_TEXT_TAGS else "captioning"
+    return "tagging" if preset.tile_text == captions.TILE_TEXT_TAGS else "captioning"
 
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text

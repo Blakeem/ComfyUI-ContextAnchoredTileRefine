@@ -51,6 +51,7 @@ exists to remove.
 torch + stdlib at module scope; `comfy` is imported lazily inside functions (a subprocess
 test pins it).
 """
+import concurrent.futures
 import functools
 import threading
 
@@ -229,12 +230,7 @@ def _resolve_sampler_name(sampler):
     raw_name = getattr(sampler.sampler_function, "__name__", "")
     name = raw_name[len("sample_"):] if raw_name.startswith("sample_") else raw_name
     if name not in EVALS_PER_STEP:
-        raise ValueError(
-            f"Context-Anchored Tile Refine (sync): sampler '{name or raw_name}' is not supported by the "
-            f"synchronized stepper. Supported: {', '.join(EVALS_PER_STEP)}. "
-            f"{', '.join(UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN. They own their own "
-            "schedule or internal history, so no evals-per-step entry can time them."
-        )
+        raise ValueError(unsupported_sampler_message(name or raw_name))
     return name
 
 
@@ -254,13 +250,81 @@ class _NoiseFields:
     def for_window(self, window):
         raise NotImplementedError
 
+    def close(self):
+        # Only a provider that owns a worker thread has anything to stop.
+        return None
+
+
+def _noisy_step_pairs(sigmas):
+    # The (t0, t1) pair core's BatchedBrownianTree.__call__ hands each torchsde tree, per step
+    # that draws noise: sorted, then a CPU float32 copy. A step whose next sigma is 0 draws none.
+    pairs = []
+    for step in range(int(sigmas.shape[-1]) - 1):
+        sigma, sigma_next = sigmas[step], sigmas[step + 1]
+        if float(sigma_next) == 0.0:
+            continue
+        low, high = (sigma, sigma_next) if sigma < sigma_next else (sigma_next, sigma)
+        pairs.append((low.detach().cpu().float(), high.detach().cpu().float()))
+    return pairs
+
+
+class _PrefetchedTree:
+    """One torchsde tree whose next noisy step's query runs ahead on the provider's worker.
+
+    Core queries the tree only after a lane's model eval, and the lanes are serial, so a
+    synchronous query (2 to 4 s at an 8K canvas) leaves the GPU idle for its whole length.
+    Only the raw query moves off the lane: core's sort, stack, cast and scale stay where they
+    were, so a served result is the bits the lane would have computed.
+    """
+
+    def __init__(self, tree, executor, pairs):
+        self._tree = tree
+        self._executor = executor
+        self._pairs = pairs
+        self._next = 0
+        self._key = None
+        self._future = None
+        self._submit_next()
+
+    def _query(self, t0, t1):
+        # Inference mode is thread-local, the lanes run inside it, and torchsde caches the
+        # tensors it returns, so the worker must build them under the same mode.
+        with torch.inference_mode():
+            return self._tree(t0, t1)
+
+    def _submit_next(self):
+        if self._executor is None or self._next >= len(self._pairs):
+            return
+        t0, t1 = self._pairs[self._next]
+        self._next += 1
+        self._key = (float(t0), float(t1))
+        self._future = self._executor.submit(self._query, t0, t1)
+
+    def __call__(self, t0, t1):
+        future, key = self._future, self._key
+        self._future, self._key = None, None
+        if future is not None:
+            # Also the guard against two queries on one tree at once: a mismatched query
+            # waits for the in-flight one before touching the tree itself.
+            concurrent.futures.wait([future])
+        if future is not None and not future.cancelled() and key == (float(t0), float(t1)):
+            result = future.result()
+        else:
+            result = self._tree(t0, t1)
+        self._submit_next()
+        return result
+
+    def close(self):
+        self._executor = None
+
 
 class _BrownianNoiseFields(_NoiseFields):
     """The dpmpp_2m_sde family's field: ONE canvas-shaped BrownianTreeNoiseSampler over the
     run's whole sigma range, sliced per lane window.
 
     `cpu=True` is sample_dpmpp_2m_sde's own default (:901). The `_gpu` wrappers differ only
-    in the device they would build a default sampler on, which never happens here.
+    in the device they would build a default sampler on, which never happens here. Each step's
+    torchsde query is prefetched behind the lane evals (`_PrefetchedTree`) until `close()`.
     """
 
     def __init__(self, shape, seed, sigmas):
@@ -277,6 +341,27 @@ class _BrownianNoiseFields(_NoiseFields):
         )
         self._key = None
         self._canvas_field = None
+        self._executor = None
+        self._prefetched = ()
+        # A core that renamed this attribute path keeps the synchronous query, without error.
+        batched = getattr(self._tree, "tree", None)
+        trees = getattr(batched, "trees", None)
+        if isinstance(trees, tuple) and trees:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="catr-sde-prefetch")
+            pairs = _noisy_step_pairs(sigmas)
+            self._prefetched = tuple(_PrefetchedTree(tree, self._executor, pairs) for tree in trees)
+            batched.trees = self._prefetched
+
+    def close(self):
+        # wait=False so a cancelled run is not held behind a running query. Each tree still
+        # waits for that query before its next one.
+        if self._executor is None:
+            return
+        for tree in self._prefetched:
+            tree.close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor = None
 
     def _canvas(self, sigma, sigma_next):
         # A one-entry cache, and an OPTIMIZATION only: the tree is deterministic in
@@ -385,14 +470,18 @@ class _OffsetNoiseFields(_NoiseFields):
         return self._fields.for_window(
             (y0 + self._dy, y1 + self._dy, x0 + self._dx, x1 + self._dx))
 
+    def close(self):
+        self._fields.close()
+
 
 def build_noise_fields(sampler, shape, seed, sigmas):
     """The shared canvas-wide SDE noise for `sampler`, or None when it is deterministic.
 
     `shape` is the CANVAS latent shape; every lane draws that ONE field sliced to its own
     window, so overlapping lanes hold torch.equal noise on every shared cell. Hand the
-    result straight to `run_lanes(..., noise_fields=)`. None is a real answer, not a
-    failure: a deterministic sampler accepts no `noise_sampler` argument at all.
+    result straight to `run_lanes(..., noise_fields=)`, and `close()` it when sampling ends to
+    stop its prefetch worker. None is a real answer, not a failure: a deterministic sampler
+    accepts no `noise_sampler` argument at all.
     """
     kind = SDE_NOISE_KIND.get(_resolve_sampler_name(sampler))
     if kind is None:

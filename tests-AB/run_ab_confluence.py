@@ -689,7 +689,7 @@ class LatentCapture:
         records = self.records
 
         def wrapper(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                    denoise_mask=None, callback=None, anchor_ring=True):
+                    denoise_mask=None, callback=None):
             steps = int(sigmas.shape[-1]) - 1
             record = {
                 "x_cut": None,
@@ -705,7 +705,7 @@ class LatentCapture:
                     callback(step, x0, x, total_steps)
 
             out = original(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                           denoise_mask=denoise_mask, callback=capture, anchor_ring=anchor_ring)
+                           denoise_mask=denoise_mask, callback=capture)
             if record["x_cut"] is None:
                 raise RuntimeError("latent capture: the final sampler step never fired its callback")
             records.append(record)
@@ -856,7 +856,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
     state = {"calls": 0}
 
     def wrapper(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                denoise_mask=None, callback=None, anchor_ring=True):
+                denoise_mask=None, callback=None):
         index = state["calls"]
         state["calls"] += 1
         if index >= len(expected):
@@ -894,7 +894,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
         # test). Outside the gate the arm-13 canvas-noise slice is kept bit-for-bit.
         new_noise = torch.where(gate, torch.zeros_like(noise_tensor), noise_tensor)
         return original(guider, sampler, sigmas, new_noise, seed, new_latent,
-                        denoise_mask=denoise_mask, callback=callback, anchor_ring=anchor_ring)
+                        denoise_mask=denoise_mask, callback=callback)
 
     sampling.sample_latent = wrapper
     try:
@@ -1125,7 +1125,7 @@ def build_settings(arm, tile_captions, mid, head, tail, stage="final"):
     # surface would resolve to the settings file's first preset, re-captioning this
     # campaign under a different question while the stamps still named the old one.
     preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
-    instruction, max_length = preset.tile_instruction, preset.tile_max_tokens
+    instruction, max_length = preset.tile_caption_instruction, preset.tile_caption_max_tokens
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm if stage == "final" else f"{arm}-{stage}",

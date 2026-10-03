@@ -345,7 +345,7 @@ def shipped_preset(prompt):
     from context_anchored_tile_refine import captions
 
     preset = captions.with_prompt(captions.resolve_method(captions.default_vlm_method()), prompt)
-    return replace(preset, style_instruction="")
+    return replace(preset, global_style_instruction="")
 
 
 def time_tiles(ctx, run_fn):

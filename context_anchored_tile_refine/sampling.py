@@ -110,8 +110,8 @@ def anchor_ring_schedule(guider, sigmas, enabled=True):
     # Applies anchor_ring_factor for the duration of ONE sampler run. Patches the model
     # INSTANCE, never the class: core caches model objects for the whole session, so a class
     # patch would follow the model into every other node in the graph. Restored in `finally`.
-    # `enabled` is the per-path gate: False from the raster path (_refine_tiles, the base
-    # node), and on the sync path whatever anchor_source resolves to (sync._refine_canvas).
+    # `enabled` is whatever anchor_source resolves to (sync._refine_canvas). The raster path
+    # never enters this schedule.
     import contextlib
 
     @contextlib.contextmanager
@@ -365,7 +365,7 @@ def _normalize_denoise_mask(denoise_mask, latent_samples, load_device):
     return denoise_mask.reshape(mask_shape).to(device=load_device, dtype=torch.float32)
 
 
-def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None, anchor_ring=True):
+def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None):
     # The per-tile reuse seam. Mirrors SamplerCustomAdvanced.sample with three deliberate
     # deviations: no fix_empty_latent_channels (the latent always comes from a real
     # vae.encode), no x0_output dict (the denoised output is unused; previews work
@@ -379,10 +379,7 @@ def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, d
     if denoise_mask is not None:
         denoise_mask = _normalize_denoise_mask(denoise_mask, latent_samples, guider.model_patcher.load_device)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    # anchor_ring is False from _refine_tiles (the base node's raster path); the VL path's
-    # lead schedule is entered by the sync engine itself, once around the whole run.
-    with anchor_ring_schedule(guider, sigmas, enabled=anchor_ring):
-        samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())
 
 
@@ -876,15 +873,10 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             pristine_conds = guider.original_conds
             guider.original_conds = conds.crop_tile_conds(pristine_conds, hint_canvas, crop)
         try:
-            # anchor_ring=False, always: the lead schedule is the VL path's, and the VL path
-            # IS the sync engine since 1.6.0 (it enters anchor_ring_schedule itself, once for
-            # the whole run). On this node's plain conditioning the schedule was consistently
-            # worse in the owner's visual A/B (tests-AB/run_ab_matrix.py, scene
-            # `portrait`): a distorted ear, duller colour and texture at the seam. The
-            # mechanism fits — the ring resolves ahead of the core so the core follows it, and
-            # only a VL positive tells a tile what its neighbourhood contains, so without one
-            # the tile is pulled toward a ring it cannot interpret.
-            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx), anchor_ring=False)
+            # No lead ring schedule on this path. On plain conditioning it was consistently worse
+            # in the owner's visual A/B (tests-AB/run_ab_matrix.py, scene `portrait`), because
+            # only a VL positive tells a tile what the ring it follows contains.
+            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds
@@ -969,31 +961,6 @@ def _mask_row(mask, batch_index):
     return mask[row:row + 1]
 
 
-def _check_sync_intake(sampler, sigmas, sampler_name=None):
-    # The VL dispatch's fail-fast, run BEFORE any VAE encode or VL encode — both of which
-    # cost minutes and GPU memory the user would spend only to hit the same rejection deep
-    # inside the engine. Two things the sync engine cannot work around:
-    #   * the sampler must be one the stepper can time (its EVALS_PER_STEP table). When the
-    #     caller knows the NAME (the all-in-one node's widget), it is checked first: core's
-    #     sampler_object wraps several names in a private function (dpm_fast ->
-    #     dpm_fast_function), so the object alone would name something no widget offers.
-    #   * every lane steps ONE shared schedule, so the schedule must be strictly decreasing
-    #     and end at 0 — true of simple/normal/beta/sgm_uniform, so this needs no
-    #     per-scheduler knowledge. The engine's own preconditions re-check it.
-    from . import stepper
-
-    sampler_message = None if sampler_name is None else stepper.unsupported_sampler_message(sampler_name)
-    if sampler_message is not None:
-        raise ValueError(sampler_message)
-    stepper._resolve_sampler_name(sampler)
-    if not bool(torch.all(sigmas[1:] < sigmas[:-1])) or float(sigmas[-1]) != 0.0:
-        raise ValueError(
-            "Context-Anchored Tile Refine (VL): every tile of a synchronized run steps ONE "
-            "shared schedule, so sigmas must be strictly decreasing and end at 0.0. Got a "
-            f"schedule of {int(sigmas.numel())} sigmas from {float(sigmas.reshape(-1)[0])} to "
-            f"{float(sigmas.reshape(-1)[-1])}.")
-
-
 def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None, preset=None, tile_captions=None, layout=None, noise_fields=None):
     # Entry point, and the ONE place all three nodes meet. With a vl_clip the whole refine is
     # handed to the sync engine (sync.py) — mask or no mask — and everything below it is the
@@ -1067,12 +1034,6 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     original_conds = getattr(guider, "original_conds", None)
     control_active = conds.has_spatial_conds(original_conds)
     if vl_clip is not None:
-        # The per-tile positive swap needs the CFGGuider conds convention; anything else
-        # would silently sample with the swap never taking effect.
-        if not isinstance(original_conds, dict) or "positive" not in original_conds:
-            raise ValueError(
-                "VL refine needs a guider that keeps 'positive' in original_conds "
-                f"(the CFGGuider convention). Got {sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__}")
         # ControlNet is a BASE-node feature only. Each tile's positive is replaced outright
         # by its own tile conditioning, which carries no control chain, so a cropped hint would
         # reach the negative branch alone — asymmetric CFG, with the hint steering only the
@@ -1095,13 +1056,13 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         # own module scope, so the pair is acyclic only while this stays inside the function.
         from . import sync
 
-        _check_sync_intake(sampler, sigmas, sampler_name)
         return sync.refine_sync(
             image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
             context_anchor, context_overlap, vl_clip, mask=mask, vlm_method=vlm_method,
             anchor_source=sync.ANCHOR_SOURCE_IMAGE if anchor_source is None else anchor_source,
             batch_size=batch_size, batch_index=batch_index, progress=progress,
-            preset=preset, tile_captions=tile_captions, layout=layout, noise_fields=noise_fields)
+            sampler_name=sampler_name, preset=preset, tile_captions=tile_captions, layout=layout,
+            noise_fields=noise_fields)
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped

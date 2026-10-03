@@ -258,7 +258,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # the preset's {PROMPT} before the engine's pre-pass, and an unconnected prompt against
         # a preset that asks for one fails before any VAE or VL encode.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
-        if preset.kind == captions.TILE_TEXT_TAGS:
+        if preset.tile_text == captions.TILE_TEXT_TAGS:
             tags.check_tags_ready(clip)
 
         # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
@@ -355,7 +355,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # in the file, or an unconnected prompt against a preset that asks for one, would
         # otherwise cost minutes of GPU time to reach.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
-        if preset.kind == captions.TILE_TEXT_TAGS:
+        if preset.tile_text == captions.TILE_TEXT_TAGS:
             tags.check_tags_ready(clip)
 
         # These rejections need no GPU, and the upscale pass and the CLIP load below cost
@@ -363,8 +363,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         sampler = comfy.samplers.sampler_object(sampler_name)
         sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
         if sigmas.numel() >= 2:
-            sampling._check_sync_intake(sampler, sigmas, sampler_name)
-            sync.check_preconditions(model, sigmas, anchor_source)
+            sync.check_preconditions(model, sigmas, anchor_source, sampler=sampler, sampler_name=sampler_name)
             target_width, target_height = upscale.scale_target(int(image.shape[2]), int(image.shape[1]), upscale_by)
             grid.solve_layout(grid.round8_up(target_width), grid.round8_up(target_height),
                               max_tile_width, max_tile_height, context_anchor, context_overlap)

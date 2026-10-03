@@ -45,8 +45,8 @@ def a_preset(tile="describe", tile_tokens=256, style="", style_tokens=128,
         surface=captions.VLM_METHOD_CAPTIONS if surface is None else surface,
         label="test",
         vision=a_vision(caption_mp=caption_mp),
-        tile_instruction=tile, tile_max_tokens=tile_tokens,
-        style_instruction=style, style_max_tokens=style_tokens)
+        tile_caption_instruction=tile, tile_caption_max_tokens=tile_tokens,
+        global_style_instruction=style, global_style_max_tokens=style_tokens)
 
 
 class FakeCaptionClip:
@@ -291,7 +291,7 @@ def test_the_default_preset_answers_to_both_forms_of_its_name(caption_settings):
     assert unlabeled.label == "prompted"
     # A later preset resolves by its label alone, and `standard` still asks the settled wording.
     standard = captions.resolve_method("vision tokens and captions (standard)")
-    assert standard.tile_instruction == captions.RICH_GROUPED_INSTRUCTION
+    assert standard.tile_caption_instruction == captions.RICH_GROUPED_INSTRUCTION
 
 
 # --- the prompt input -----------------------------------------------------------------
@@ -300,7 +300,8 @@ def _prompted_preset(tile='Full prompt: "{PROMPT}". Name it.', style=""):
     return captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS, label="demo",
         vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
-        tile_instruction=tile, tile_max_tokens=768, style_instruction=style, style_max_tokens=768)
+        tile_caption_instruction=tile, tile_caption_max_tokens=768,
+        global_style_instruction=style, global_style_max_tokens=768)
 
 
 def test_with_prompt_fills_both_instructions_and_strips_the_prompt():
@@ -310,17 +311,17 @@ def test_with_prompt_fills_both_instructions_and_strips_the_prompt():
 
     filled = captions.with_prompt(preset, "  a fox in the centre\n")
 
-    assert filled.tile_instruction == 'Full prompt: "a fox in the centre". Name it.'
-    assert filled.style_instruction == "Style of a fox in the centre, and again a fox in the centre."
-    assert filled == dataclasses.replace(preset, tile_instruction=filled.tile_instruction,
-                                         style_instruction=filled.style_instruction)
+    assert filled.tile_caption_instruction == 'Full prompt: "a fox in the centre". Name it.'
+    assert filled.global_style_instruction == "Style of a fox in the centre, and again a fox in the centre."
+    assert filled == dataclasses.replace(preset, tile_caption_instruction=filled.tile_caption_instruction,
+                                         global_style_instruction=filled.global_style_instruction)
 
 
 def test_with_prompt_keeps_braces_in_the_prompt_literal():
     # A literal replace, never str.format: a prompt can carry its own braces.
     filled = captions.with_prompt(_prompted_preset(), "a {red} fox")
 
-    assert filled.tile_instruction == 'Full prompt: "a {red} fox". Name it.'
+    assert filled.tile_caption_instruction == 'Full prompt: "a {red} fox". Name it.'
 
 
 def test_with_prompt_is_a_no_op_on_a_preset_without_the_placeholder(caption_settings):
@@ -395,7 +396,7 @@ def test_an_unlabeled_caption_method_takes_the_first_preset(tmp_path, monkeypatc
     legacy = captions.resolve_method("vision tokens and captions")
     assert legacy.label == "demo"
     assert legacy.surface == captions.VLM_METHOD_VISION_CAPTIONS
-    assert legacy.tile_instruction == "ask about the tile"
+    assert legacy.tile_caption_instruction == "ask about the tile"
 
 
 def test_each_caption_method_asks_its_own_presets_question(caption_settings):
@@ -409,8 +410,8 @@ def test_each_caption_method_asks_its_own_presets_question(caption_settings):
             preset = captions.resolve_method(f"{surface} ({label})")
             assert preset.surface == surface
             assert preset.label == label
-            assert preset.tile_instruction == block["tile_caption_instruction"]
-            assert preset.tile_max_tokens == block["tile_caption_max_tokens"]
+            assert preset.tile_caption_instruction == block["tile_caption_instruction"]
+            assert preset.tile_caption_max_tokens == block["tile_caption_max_tokens"]
             # Every option carries the one [vision] table.
             assert preset.vision == settings.vision
     assert presets["artwork"]["tile_caption_instruction"] != captions.SETTLED_POSITION_INSTRUCTION
@@ -422,8 +423,8 @@ def test_vision_tokens_resolves_to_the_vision_table_and_no_preset():
     preset = captions.resolve_method(captions.VLM_METHOD_VISION)
     assert preset.surface == captions.VLM_METHOD_VISION
     assert preset.label == ""
-    assert preset.tile_instruction == ""
-    assert preset.style_instruction == ""
+    assert preset.tile_caption_instruction == ""
+    assert preset.global_style_instruction == ""
     assert preset.vision == captions.load_settings().vision
 
 
@@ -433,8 +434,8 @@ def test_a_blank_style_instruction_turns_the_style_caption_off(tmp_path, monkeyp
                                                  'global_style_instruction = "  "'), monkeypatch)
 
     preset = captions.resolve_method("captions (demo)")
-    assert preset.style_instruction == ""
-    assert preset.style_max_tokens == 512
+    assert preset.global_style_instruction == ""
+    assert preset.global_style_max_tokens == 512
 
 
 def test_a_method_naming_an_absent_preset_is_a_named_hard_error(tmp_path, monkeypatch):
@@ -475,16 +476,16 @@ def test_a_tags_preset_loads_and_resolves_to_its_tags_fields(tmp_path, monkeypat
     preset = captions.resolve_method("vision tokens and captions")
 
     assert preset.label == "tagged"
-    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.tile_text == captions.TILE_TEXT_TAGS
     assert preset.tile_tags_instruction == "list the things"
     assert preset.prompt_tags_instruction == "List the things in: {PROMPT}"
     assert preset.tile_tags_verification_statement == "It shows {TAG}"
     assert (preset.tile_tags_verification_threshold, preset.prompt_tags_verification_threshold,
             preset.tile_tags_position_threshold) == (0.8, 0.95, 0.7)
-    assert preset.style_instruction == "the style"
-    assert preset.style_max_tokens == 512
+    assert preset.global_style_instruction == "the style"
+    assert preset.global_style_max_tokens == 512
     # A tags preset asks no tile question, and its prompt is empty until with_prompt runs.
-    assert (preset.tile_instruction, preset.tile_max_tokens, preset.prompt) == ("", 0, "")
+    assert (preset.tile_caption_instruction, preset.tile_caption_max_tokens, preset.prompt) == ("", 0, "")
 
 
 def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path, monkeypatch):
@@ -496,28 +497,66 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
     explicit = captions.resolve_method("captions")
 
     assert implicit == explicit
-    assert implicit.kind == captions.TILE_TEXT_CAPTION
-    assert implicit.tile_instruction == "ask about the tile"
+    assert implicit.tile_text == captions.TILE_TEXT_CAPTION
+    assert implicit.tile_caption_instruction == "ask about the tile"
     assert (implicit.tile_tags_instruction, implicit.prompt_tags_instruction,
             implicit.tile_tags_verification_statement, implicit.prompt) == ("", "", "", "")
+
+
+def test_every_settings_key_names_a_preset_field():
+    # resolve_method, with_prompt and the prompt check read a field by its settings key.
+    fields = {field.name for field in dataclasses.fields(captions.Preset)}
+    for keys in captions._PRESET_KEYS.values():
+        assert set(keys) <= fields
+    assert {"tile_text", *captions._PROMPT_FILLED_KEYS, *captions._TAGS_PROMPT_FREE_KEYS} <= fields
+
+
+def test_each_value_rule_accepts_its_range_and_names_the_key_the_value_and_the_range():
+    # The settings file and the Tile Test nodes run these same rules, each prefixing where the
+    # value came from, so the edges below hold for a file value and a linked socket alike.
+    cap = vl.MAX_VISION_TOKENS
+    assert captions.vision_error(0, cap, 0) is None
+    assert captions.vision_error(cap, 0, captions.VL_INPUT_MIN_MEGAPIXELS) is None
+    assert captions.vision_error(1, 1, vl.PICTURE_CAP_MEGAPIXELS) is None
+    assert captions.vision_error(-1, 100, 0) == (
+        f"canvas_tokens must be between 0 and {cap}, and 0 turns that source off. Got -1.")
+    assert captions.vision_error(165, cap + 1, 0) == (
+        f"crop_tokens must be between 0 and {cap}, and 0 turns that source off. Got {cap + 1}.")
+    assert captions.vision_error(0, 0, 0) == (
+        "canvas_tokens and crop_tokens are both 0. A tile needs vision rows from at least one of the two.")
+    assert captions.vision_error(165, 100, 1e-9) == captions.caption_megapixels_error(1e-9) == (
+        "caption_megapixels must be 0, which reads the picture's own size, or between "
+        f"{captions.VL_INPUT_MIN_MEGAPIXELS} and {vl.PICTURE_CAP_MEGAPIXELS}. Got 1e-09.")
+    assert captions.score_error("t", 1, above_zero=True) is None
+    assert captions.score_error("t", 0, above_zero=False) is None
+    assert captions.score_error("t", 0, above_zero=True) == "t is a score and must be above 0 and at most 1. Got 0."
+    assert captions.score_error("t", 1.5, above_zero=False) == "t is a score and must be between 0 and 1. Got 1.5."
+    assert captions.budget_error("b", 1) is None
+    assert captions.budget_error("b", captions.MAX_CAPTION_TOKENS) is None
+    assert captions.budget_error("b", 0) == (
+        f"b is a caption budget and must be between 1 and {captions.MAX_CAPTION_TOKENS} tokens. Got 0.")
+    assert captions.prompt_free_error("k", "It shows {TAG}") is None
+    assert captions.prompt_free_error("k", "{TAG} from {PROMPT}") == (
+        "k holds {PROMPT}, which only prompt_tags_instruction takes. Move {PROMPT} to prompt_tags_instruction.")
 
 
 @pytest.mark.parametrize(("content", "message"), [
     (TAGS_SETTINGS.replace('tile_text = "tags"', 'tile_text = "words"'),
      r"preset 'tagged' in .* sets tile_text to 'words'\. Set it to one of \['caption', 'tags'\]"),
     (TAGS_SETTINGS.replace('tile_text = "tags"', "tile_text = 1"),
-     "preset 'tagged' key tile_text in .* must be of type str"),
+     "preset 'tagged' in .*: tile_text must be of type str"),
     (TAGS_SETTINGS.replace('tile_tags_verification_statement = "It shows {TAG}"\n', ''),
      r"preset 'tagged' in .* is missing \['tile_tags_verification_statement'\]"),
     # The caption keys are unknown on a tags preset, so a block cannot carry both kinds.
     (TAGS_SETTINGS + 'tile_caption_instruction = "ask"\n',
      r"preset 'tagged' in .* carries unknown keys \['tile_caption_instruction'\] for tile_text 'tags'"),
     (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', "tile_tags_instruction = 3"),
-     "preset 'tagged' key tile_tags_instruction in .* must be of type str"),
+     "preset 'tagged' in .*: tile_tags_instruction must be of type str"),
     (TAGS_SETTINGS.replace('tile_tags_instruction = "list the things"', 'tile_tags_instruction = "  "'),
      r"preset 'tagged' in .* has an empty tile_tags_instruction"),
     (TAGS_SETTINGS.replace("global_style_max_tokens = 512", "global_style_max_tokens = 0"),
-     "preset 'tagged' key global_style_max_tokens in .* between 1 and 4096"),
+     r"preset 'tagged' in .*: global_style_max_tokens is a caption budget and must be between 1 and 4096 tokens\. "
+     r"Got 0\."),
     (TAGS_SETTINGS.replace("{PROMPT}", "the prompt"),
      r"preset 'tagged' key prompt_tags_instruction in .* does not hold \{PROMPT\}"),
     (TAGS_SETTINGS.replace("{TAG}", "a tag"),
@@ -529,27 +568,27 @@ def test_a_caption_preset_is_the_caption_kind_with_or_without_tile_text(tmp_path
     (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95\n", ""),
      r"preset 'tagged' in .* is missing \['prompt_tags_verification_threshold'\]"),
     (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 1.5"),
-     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
-     "got 1.5"),
+     r"preset 'tagged' in .*: prompt_tags_verification_threshold is a score and must be above 0 and at most 1\. "
+     r"Got 1\.5\."),
     (TAGS_SETTINGS.replace("prompt_tags_verification_threshold = 0.95", "prompt_tags_verification_threshold = 0"),
-     "preset 'tagged' key prompt_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
-     "got 0"),
+     r"preset 'tagged' in .*: prompt_tags_verification_threshold is a score and must be above 0 and at most 1\. "
+     r"Got 0\."),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", 'tile_tags_verification_threshold = "high"'),
-     "preset 'tagged' key tile_tags_verification_threshold in .* must be of type float, got str"),
+     "preset 'tagged' in .*: tile_tags_verification_threshold must be of type float, got str"),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 1.5"),
-     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
-     "got 1.5"),
+     r"preset 'tagged' in .*: tile_tags_verification_threshold is a score and must be above 0 and at most 1\. "
+     r"Got 1\.5\."),
     (TAGS_SETTINGS.replace("tile_tags_verification_threshold = 0.8", "tile_tags_verification_threshold = 0.0"),
-     "preset 'tagged' key tile_tags_verification_threshold in .* is a score and must be above 0 and at most 1, "
-     "got 0.0"),
+     r"preset 'tagged' in .*: tile_tags_verification_threshold is a score and must be above 0 and at most 1\. "
+     r"Got 0\.0\."),
     (TAGS_SETTINGS.replace("tile_tags_position_threshold = 0.7", "tile_tags_position_threshold = -0.1"),
-     "preset 'tagged' key tile_tags_position_threshold in .* is a score and must be between 0 and 1, got -0.1"),
+     r"preset 'tagged' in .*: tile_tags_position_threshold is a score and must be between 0 and 1\. Got -0\.1\."),
     # {PROMPT} belongs in prompt_tags_instruction only.
     (TAGS_SETTINGS.replace('"list the things"', '"list the things in {PROMPT}"'),
-     r"preset 'tagged' key tile_tags_instruction in .* holds \{PROMPT\}, which only "
+     r"preset 'tagged' in .*: tile_tags_instruction holds \{PROMPT\}, which only "
      r"prompt_tags_instruction takes"),
     (TAGS_SETTINGS.replace('"It shows {TAG}"', '"It shows {TAG} from {PROMPT}"'),
-     r"preset 'tagged' key tile_tags_verification_statement in .* holds \{PROMPT\}, which only "
+     r"preset 'tagged' in .*: tile_tags_verification_statement holds \{PROMPT\}, which only "
      r"prompt_tags_instruction takes"),
     # The tags keys are unknown on a caption preset.
     (GOOD_SETTINGS + 'tile_tags_verification_statement = "It shows {TAG}"\n',
@@ -569,15 +608,15 @@ def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_prompt_tag
     preset = captions.Preset(
         surface=captions.VLM_METHOD_CAPTIONS, label="tagged",
         vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=110, caption_megapixels=0.15),
-        style_instruction="Style of {PROMPT}.", style_max_tokens=768,
-        kind=captions.TILE_TEXT_TAGS, tile_tags_instruction="list",
+        global_style_instruction="Style of {PROMPT}.", global_style_max_tokens=768,
+        tile_text=captions.TILE_TEXT_TAGS, tile_tags_instruction="list",
         prompt_tags_instruction="List the things in: {PROMPT}", tile_tags_verification_statement="It shows {TAG}")
 
     filled = captions.with_prompt(preset, "  a fox\n")
 
-    assert filled == dataclasses.replace(preset, prompt="a fox", style_instruction="Style of a fox.")
+    assert filled == dataclasses.replace(preset, prompt="a fox", global_style_instruction="Style of a fox.")
     # No placeholder in the style question: None and a blank prompt both store "".
-    plain = dataclasses.replace(preset, style_instruction="the style")
+    plain = dataclasses.replace(preset, global_style_instruction="the style")
     for prompt in (None, "", "   \n"):
         assert captions.with_prompt(plain, prompt) == plain, prompt
     # The style question follows the caption rule, so it never asks with the literal placeholder.
@@ -597,7 +636,7 @@ def test_with_prompt_stores_the_prompt_on_a_tags_preset_and_keeps_the_prompt_tag
     (captions.TILE_TEXT_TAGS, "the style", "a fox", 3),
 ])
 def test_the_style_row_count_is_one_rule_for_both_kinds(kind, style, prompt, expected):
-    preset = dataclasses.replace(a_preset(style=style), kind=kind, prompt=prompt)
+    preset = dataclasses.replace(a_preset(style=style), tile_text=kind, prompt=prompt)
 
     assert captions.style_row_count(preset, 3) == expected
 
@@ -605,7 +644,7 @@ def test_the_style_row_count_is_one_rule_for_both_kinds(kind, style, prompt, exp
 def test_the_caption_pass_refuses_a_tags_preset_before_any_generate(comfy_stubs):
     # A tags preset carries an empty tile question and a 0 budget.
     clip = FakeCaptionClip()
-    preset = dataclasses.replace(a_preset(tile="", tile_tokens=0), kind=captions.TILE_TEXT_TAGS)
+    preset = dataclasses.replace(a_preset(tile="", tile_tokens=0), tile_text=captions.TILE_TEXT_TAGS)
 
     with pytest.raises(RuntimeError, match=r"preset 'test' is the tags kind .* runs through the tags module"):
         captions.generate_caption_set(clip, torch.rand(1, 64, 64, 3), [], preset)
@@ -650,7 +689,7 @@ def test_preset_labels_reads_the_shipped_tags_preset():
     (GOOD_SETTINGS.replace("crop_tokens = 100", "crop_tokens = -1"), "between 0 and 1953"),
     (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 2000"), "between 0 and 1953"),
     (GOOD_SETTINGS.replace("canvas_tokens = 165", "canvas_tokens = 0").replace("crop_tokens = 100", "crop_tokens = 0"),
-     "both to 0"),
+     "are both 0"),
     (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", 'caption_megapixels = "big"'), "must be of type float"),
     (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = 8.0"), "between 0.01 and 2.0"),
     (GOOD_SETTINGS.replace("caption_megapixels = 0.147456", "caption_megapixels = -1.0"), "between 0.01 and 2.0"),
@@ -1491,7 +1530,7 @@ def style_off(monkeypatch):
     # they name, and the style tests below cover it on.
     resolve = captions.resolve_method
     monkeypatch.setattr(captions, "resolve_method",
-                        lambda method: dataclasses.replace(resolve(method), style_instruction=""))
+                        lambda method: dataclasses.replace(resolve(method), global_style_instruction=""))
 
 
 PIPE_PROMPT = "a fox in the centre"
@@ -1563,18 +1602,18 @@ def test_each_caption_method_reaches_the_vlm_with_its_presets_wording(comfy_stub
     _run(image, VLGuider(), pipeline_clip, method)
 
     if preset.label == "prompted":
-        assert PIPE_PROMPT in preset.tile_instruction
-        assert "{PROMPT}" not in preset.tile_instruction
+        assert PIPE_PROMPT in preset.tile_caption_instruction
+        assert "{PROMPT}" not in preset.tile_caption_instruction
 
-    style_on = bool(preset.style_instruction)
+    style_on = bool(preset.global_style_instruction)
     assert len(pipeline_clip.generate_calls) == 4 + (1 if style_on else 0)
     tile_calls = pipeline_clip.generate_calls
     if style_on:
         style_call, *tile_calls = pipeline_clip.generate_calls
-        assert style_call["text"] == preset.style_instruction
-        assert style_call["max_length"] == preset.style_max_tokens
-    assert {call["text"] for call in tile_calls} == {preset.tile_instruction}
-    assert {call["max_length"] for call in tile_calls} == {preset.tile_max_tokens}
+        assert style_call["text"] == preset.global_style_instruction
+        assert style_call["max_length"] == preset.global_style_max_tokens
+    assert {call["text"] for call in tile_calls} == {preset.tile_caption_instruction}
+    assert {call["max_length"] for call in tile_calls} == {preset.tile_caption_max_tokens}
     # Every caption is generated with the reasoning turn on, which strip_thinking then cuts.
     asked = len(pipeline_clip.generate_calls)
     assert all(call["thinking"] is True for call in pipeline_clip.tokenize_calls[:asked])
@@ -1620,7 +1659,7 @@ def test_the_shipped_style_caption_rides_on_top_of_every_tile_caption(comfy_stub
     # encoded with the one style caption on top, newline-joined. (artwork) is a caption
     # preset that turns it on, and (standard) leaves it off.
     method = "captions (artwork)"
-    style_text = captions.resolve_method(method).style_instruction
+    style_text = captions.resolve_method(method).global_style_instruction
     pipeline_clip.answer = lambda img, instruction: (
         "oil on canvas" if instruction == style_text else "a plain caption")
 

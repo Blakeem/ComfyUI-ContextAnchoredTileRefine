@@ -111,9 +111,9 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
     monkeypatch.setattr(upscale, "build_guider", fake_build_guider)
     monkeypatch.setattr(upscale, "build_sigmas", fake_build_sigmas)
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
-    monkeypatch.setattr(sampling, "_check_sync_intake", lambda sampler, sigmas, sampler_name=None: None)
     if not real_preconditions:
-        monkeypatch.setattr(sync, "check_preconditions", lambda model_patcher, sigmas, anchor_source: None)
+        monkeypatch.setattr(sync, "check_preconditions",
+                            lambda model_patcher, sigmas, anchor_source, sampler, sampler_name=None: None)
 
     recorded["image"] = torch.rand(1, 32, 32, 3) if image is None else image
     recorded["model"] = object() if model is None else model
@@ -209,7 +209,7 @@ def test_the_prompt_is_written_into_the_preset_handed_to_refine_image(comfy_stub
 
     expected = captions.with_prompt(captions.resolve_method(WIDGETS["vlm_method"]), WIDGETS["prompt"])
     assert recorded["refine_image"]["preset"] == expected
-    assert WIDGETS["prompt"] in expected.tile_instruction
+    assert WIDGETS["prompt"] in expected.tile_caption_instruction
 
 
 def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
@@ -239,7 +239,7 @@ def test_engine_preconditions_are_refused_before_the_upscale_pass(comfy_stubs, m
     recorded = {}
     model = ModelPatcher(BaseModel(model_sampling=model_sampling))
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(ValueError, match=message):
         _drive(monkeypatch, recorded=recorded, model=model, real_preconditions=True, anchor_source=anchor_source)
 
     assert recorded["prepare_upscaled"] is None
@@ -387,7 +387,7 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
     recorded, _ = _drive(monkeypatch, clip=FakeTagClip())
 
     preset = recorded["refine_image"]["preset"]
-    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.tile_text == captions.TILE_TEXT_TAGS
     assert preset.prompt == WIDGETS["prompt"]
 
 

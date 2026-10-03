@@ -10,13 +10,14 @@ Captions node captions the padded canvas from the text sockets connected to it, 
 Render node reaches sampling.refine_image with the layout's own rects, captions and noise
 slice. The Render node's collaborators are all replaced by recorders, so what is pinned there
 is which value reaches which parameter and not any pixel math."""
+import dataclasses
 import sys
 import tomllib
 from types import SimpleNamespace
 
 import pytest
 import torch
-from test_captions import FakeCaptionClip
+from test_captions import GOOD_SETTINGS, TAGS_SETTINGS, FakeCaptionClip, write_settings
 from test_sync import ModelPatcher
 from test_tags import (
     PROMPT_ONLY_THRESHOLD,
@@ -443,7 +444,8 @@ def test_a_linked_budget_below_one_is_refused_naming_it(comfy_stubs, name):
     # caption budget.
     clip = _asking_clip()
 
-    with pytest.raises(ValueError, match=rf"was given {name} 0.*between 1 and {captions.MAX_CAPTION_TOKENS} tokens"):
+    with pytest.raises(ValueError, match=rf"Tile Test: Captions: {name} is a caption budget and must be between 1 "
+                                         rf"and {captions.MAX_CAPTION_TOKENS} tokens\. Got 0\..*whose preset carries it"):
         _caption(clip, global_style_instruction="name the medium", **{name: 0})
     assert clip.generate_calls == []
 
@@ -453,7 +455,8 @@ def test_a_linked_budget_above_the_cap_is_refused_naming_it(comfy_stubs, name):
     # A linked value bypasses the widget's max, which is the settings file's typo guard.
     clip = _asking_clip()
     over = captions.MAX_CAPTION_TOKENS + 1
-    message = rf"was given {name} {over}.*between 1 and {captions.MAX_CAPTION_TOKENS} tokens"
+    message = (rf"Tile Test: Captions: {name} is a caption budget and must be between 1 and "
+               rf"{captions.MAX_CAPTION_TOKENS} tokens\. Got {over}\.")
 
     with pytest.raises(ValueError, match=message):
         _caption(clip, global_style_instruction="name the medium", **{name: over})
@@ -468,6 +471,25 @@ def test_a_linked_caption_size_outside_the_range_is_refused_before_any_request(c
     with pytest.raises(ValueError, match=rf"Tile Test: Captions: caption_megapixels must be 0.*Got {value}\."):
         _caption(clip, caption_megapixels=value)
     assert clip.generate_calls == []
+
+
+@pytest.mark.parametrize("body", [GOOD_SETTINGS, TAGS_SETTINGS], ids=["caption", "tags"])
+def test_the_sockets_wired_from_the_settings_node_build_the_files_own_preset(tmp_path, monkeypatch, body):
+    # The file and the sockets build through one constructor, so a settings key cannot reach
+    # one of them and miss the other.
+    write_settings(tmp_path, body, monkeypatch)
+    label = next(iter(captions.load_settings().presets))
+    outputs = dict(zip(ContextAnchoredTileTestSettings.RETURN_NAMES,
+                       ContextAnchoredTileTestSettings().read_settings(label), strict=True))
+    texts = {name: outputs[name] for name, _ in testing.INSTRUCTION_SOCKETS}
+
+    built = testing._socket_preset(
+        texts, "a fox", outputs["tile_caption_max_tokens"], outputs["global_style_max_tokens"],
+        outputs["caption_megapixels"], outputs["tile_tags_verification_threshold"],
+        outputs["tile_tags_position_threshold"], outputs["prompt_tags_verification_threshold"])
+
+    resolved = captions.resolve_method(captions.VLM_METHOD_CAPTIONS)
+    assert built == captions.with_prompt(dataclasses.replace(resolved, label=testing.CAPTIONS_NODE), "a fox")
 
 
 def test_a_budget_the_run_does_not_use_is_not_checked(comfy_stubs):
@@ -987,7 +1009,7 @@ def test_a_strip_score_shows_the_digits_a_linked_position_threshold_needs():
     ("prompt_tags_verification_threshold", 1.5, "above 0 and at most 1"),
     ("prompt_tags_verification_threshold", 0, "above 0 and at most 1")])
 def test_a_linked_threshold_outside_its_range_is_refused_before_any_request(tag_classifier, name, value, span):
-    with pytest.raises(ValueError, match=f"was given {name} {value}, and it is a score {span}"):
+    with pytest.raises(ValueError, match=rf"Tile Test: Captions: {name} is a score and must be {span}\. Got {value}\."):
         _tag_run(**{name: value})
 
     assert tag_classifier.requests == []
@@ -1075,12 +1097,13 @@ def test_the_debug_sections_follow_the_listing_order(tag_classifier):
     ({"tile_tags_verification_statement": "It shows a tag"},
      r"tile_tags_verification_statement without \{TAG\}"),
     ({"tile_tags_instruction": "Tag {PROMPT}."},
-     r"tile_tags_instruction holding \{PROMPT\}\. Only prompt_tags_instruction carries the prompt"),
+     r"Tile Test: Captions: tile_tags_instruction holds \{PROMPT\}, which only prompt_tags_instruction takes"),
     ({"tile_tags_verification_statement": "{TAG} fits {PROMPT}"},
-     r"tile_tags_verification_statement holding \{PROMPT\}\. Only prompt_tags_instruction carries the prompt"),
+     r"Tile Test: Captions: tile_tags_verification_statement holds \{PROMPT\}, which only "
+     r"prompt_tags_instruction takes"),
     ({"global_style_instruction": "Style of {PROMPT}.", "prompt": None},
      r"asks for \{PROMPT\} in its global_style_instruction"),
-    ({"global_style_max_tokens": 0}, "was given global_style_max_tokens 0"),
+    ({"global_style_max_tokens": 0}, r"Tile Test: Captions: global_style_max_tokens is a caption budget.*Got 0\."),
 ])
 def test_the_tags_kind_refuses_a_socket_it_cannot_run_before_any_request(tag_classifier, inputs, message):
     clip = FakeTagClip()
@@ -1250,9 +1273,9 @@ def _render(monkeypatch, layout=None, image=None, given_captions=None, negative=
     monkeypatch.setattr(upscale, "build_guider", fake_build_guider)
     monkeypatch.setattr(upscale, "build_sigmas", fake_build_sigmas)
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
-    monkeypatch.setattr(sampling, "_check_sync_intake", lambda sampler, sigmas, sampler_name=None: None)
     if not real_preconditions:
-        monkeypatch.setattr(sync, "check_preconditions", lambda model_patcher, sigmas, anchor_source: None)
+        monkeypatch.setattr(sync, "check_preconditions",
+                            lambda model_patcher, sigmas, anchor_source, sampler, sampler_name=None: None)
     # The noise object stays REAL, since its rect is what the block run is pinned on. Only the
     # field provider is a sentinel, so the value refine_image receives is traceable to it.
     monkeypatch.setattr(upscale.SlicedCanvasNoise, "noise_fields",
@@ -1342,7 +1365,7 @@ def test_given_captions_run_on_the_shipped_tags_preset_without_the_tags_library(
     recorded, result = _render(monkeypatch, layout=layout, surface=captions.VLM_METHOD_CAPTIONS,
                                given_captions=given)
 
-    assert recorded["calls"][0]["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["calls"][0]["preset"].tile_text == captions.TILE_TEXT_TAGS
     assert recorded["calls"][0]["tile_captions"] == given.captions
     assert len(result[0]) == 1
 
@@ -1611,15 +1634,15 @@ def test_the_render_node_rejects_a_tile_number_outside_the_grid(comfy_stubs, mon
 
 def test_the_render_node_rejects_both_token_counts_at_zero(comfy_stubs, monkeypatch):
     # The settings file rejects the same pair at load: a tile needs rows from one of the two.
-    with pytest.raises(ValueError, match="canvas_tokens 0 and crop_tokens 0"):
+    with pytest.raises(ValueError, match="Tile Test: Render: canvas_tokens and crop_tokens are both 0"):
         _render(monkeypatch, canvas_tokens=0, crop_tokens=0)
 
 
 @pytest.mark.parametrize(("name", "value"), [("crop_tokens", -1), ("canvas_tokens", vl.MAX_VISION_TOKENS + 1)])
 def test_the_render_node_rejects_a_linked_token_count_outside_its_range(comfy_stubs, monkeypatch, name, value):
     # A linked value bypasses the widget's min and max.
-    with pytest.raises(ValueError, match=rf"was given {name} {value}, and it must be between 0 and "
-                                         rf"{vl.MAX_VISION_TOKENS}"):
+    with pytest.raises(ValueError, match=rf"Tile Test: Render: {name} must be between 0 and "
+                                         rf"{vl.MAX_VISION_TOKENS}.*Got {value}\."):
         _render(monkeypatch, **{name: value})
 
 
@@ -1679,7 +1702,7 @@ def test_engine_preconditions_are_refused_before_the_clip_call(comfy_stubs, monk
     recorded = {}
     model = ModelPatcher(BaseModel(model_sampling=model_sampling))
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(ValueError, match=message):
         _render(monkeypatch, recorded=recorded, model=model, real_preconditions=True,
                 anchor_source=anchor_source)
 

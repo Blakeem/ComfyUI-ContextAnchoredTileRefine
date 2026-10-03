@@ -78,8 +78,9 @@ without that doc's temporal design.
   ONE place, called by the base node's `VALIDATE_INPUTS` and the Layout test node's, and by all
   three nodes' `refine` and the Layout test node's `solve_layout` through `_require_geometry`,
   since a linked value skips VALIDATE_INPUTS and core's range check. The Upscale (VL) node also
-  runs `_check_sync_intake`, `sync.check_preconditions` and the grid solve on the padded target
-  before its upscale-model pass and CLIP load, and the Render test node runs the first two before
+  runs `sync.check_preconditions` (with the sampler and its widget name, and no guider, since
+  the guider is built after the CLIP load) and the grid solve on the padded target before its
+  upscale-model pass and CLIP load, and the Render test node runs the same intake call before
   its CLIP load, since each needs only the widgets, the MODEL and the image size. Both VL
   nodes carry `IS_CHANGED(s, **kwargs)` returning `captions.settings_fingerprint()` (see the
   captions.py bullet).
@@ -122,11 +123,9 @@ without that doc's temporal design.
   **THE DISPATCH: a `vl_clip` hands the WHOLE refine to the sync engine** (`sync.refine_sync`,
   lazily imported — sync.py imports this module at ITS module scope, so the pair is acyclic only
   while that stays inside the function), mask or no mask: refine_sync owns the bbox crop, the
-  region gate and the anti-aliased composite itself. `_check_sync_intake` is the fail-fast that
-  runs FIRST, before any VAE or VL encode (both cost minutes of GPU time to reach the same
-  rejection deep inside the engine): the sampler must be in `stepper.EVALS_PER_STEP` (checked by
-  the caller's `sampler_name` first, so the message names the widget's string) and the schedule
-  must be strictly decreasing and end at 0. Everything below the dispatch is the BASE node's
+  region gate and the anti-aliased composite itself. The dispatch runs no intake of its own: it
+  threads `sampler_name` down to `sync._prepare_run`, whose `check_preconditions` is the ONE VL
+  intake and runs before any VAE or VL encode. Everything below the dispatch is the BASE node's
   raster path; since 1.6.0 the raster path has NO VL branches at all — they were deleted, not
   flagged off (the fallback for non-VL models is the base node itself).
   Without a mask the raster path delegates to `_refine_tiles` (pad to /8, solve the grid, per-tile
@@ -137,7 +136,7 @@ without that doc's temporal design.
   (a subprocess test pins this). `make_tile_progress` guards a nested x0 before previewing
   (core hands nested-latent callbacks a NestedTensor; the guard previews stream 0, a no-op
   for image latents). `anchor_ring_schedule` is the ring's context manager, entered by the SYNC
-  engine and disabled on the raster path — see the ANCHOR RING invariant below.
+  engine and never entered on the raster path. See the ANCHOR RING invariant below.
   `preset` / `tile_captions` / `layout` / `noise_fields` (2026-09-03) are the sync engine's
   OVERRIDES, forwarded to `refine_sync`: a caller running one block of a larger grid hands the
   block the settings block, the captions, the tile rects and the SDE field that grid's own run
@@ -153,8 +152,9 @@ without that doc's temporal design.
   noisy core, and in live-canvas mode nothing frozen-refined is left to lead. Exactly one of the
   two is ever active. `sync._refine_canvas` enters the context manager ONCE around the whole lane
   set (one instance patch on the shared model; the manager is NOT re-entrant, and per-call
-  normalization equals run normalization because the sigmas handed over ARE the full run), and
-  the raster path passes `anchor_ring=False` ALWAYS — the base node never schedules its ring.
+  normalization equals run normalization because the sigmas handed over ARE the full run). The
+  raster path never enters it: `sample_latent` has no ring wrapper, so the base node never
+  schedules its ring.
   The widget is APPENDED after `context_overlap`, never
   inserted mid-list: the ComfyUI frontend restores `widgets_values` positionally and
   `migrateWidgetsValues` no-ops when the length changes, so a mid-list insert silently shifts
@@ -208,7 +208,11 @@ without that doc's temporal design.
   BaseException because comfy's `InterruptProcessingException` is one. **torch + stdlib at module
   scope**, comfy lazy (a subprocess test pins it). `offset_noise_fields(fields, dy, dx)`
   (2026-09-03) wraps a provider so a window given in BLOCK cells reads the FULL canvas field at
-  the window plus the block's origin, and None passes through.
+  the window plus the block's origin, and None passes through. The Brownian provider runs each
+  noisy step's raw torchsde query one step ahead on its own single-worker thread (2 to 4 s per
+  query at 8K, hidden behind the lane evals, with core's arithmetic left on the lane so every
+  field stays bit-identical), and `sync._refine_canvas` closes it in a `finally` and drops it
+  before the decode.
 - `context_anchored_tile_refine/sync.py`: the VL path's engine — the run's components, the run
   loop (`_refine_canvas`) and the region path (`refine_sync`, which owns the bbox crop and the
   1px anti-aliased composite back). Stages: solve the grid ONCE and run the VL conditioning
@@ -253,10 +257,16 @@ without that doc's temporal design.
   `intermediate_dtype()` (fp16 under `--fp16-intermediates`) while every lane's `x` is float32,
   so an fp16 canvas would round the consolidated trajectory once per step and scatter the
   rounded values back into every lane. The two spaces are never mixed — a window headed for
-  `vae.decode` is converted back with `process_latent_out`. `check_preconditions` runs before any GPU time
-  (strictly decreasing sigmas ending at 0, a CONST flow model, core's default
-  `scale_latent_inpaint`, and — live-canvas only — `sigmas[0] < 1`, where that mode's `x / (1 -
-  sigma)` algebra is defined). The lead ring is entered ONCE around the whole lane set (see the
+  `vae.decode` is converted back with `process_latent_out`. `check_preconditions` is the VL
+  path's ONE intake and runs before any GPU time, raising ValueError for each rule in this order:
+  the widget's `sampler_name` when given (checked first, because core's `sampler_object` wraps
+  several names in a private function, so the message names the widget's string), the sampler
+  object in `stepper.EVALS_PER_STEP` (`stepper._resolve_sampler_name`, whose rejection is the same
+  `unsupported_sampler_message`), strictly decreasing sigmas ending at 0, a CONST flow model,
+  core's default `scale_latent_inpaint`, live-canvas only `sigmas[0] < 1` (where that mode's
+  `x / (1 - sigma)` algebra is defined), and, when a guider is given, `original_conds` a dict
+  holding `positive` (the CFGGuider convention the per-lane swap keys on). `_prepare_run` passes
+  all of them, and the nodes pass no guider. The lead ring is entered ONCE around the whole lane set (see the
   ANCHOR RING invariant). **torch + stdlib at module scope**; comfy is lazy and so is stepper.py
   (a subprocess test pins the comfy half).
   OVERRIDES (2026-09-03, the Render test node's and the harness's route into the engine):
@@ -340,7 +350,11 @@ without that doc's temporal design.
   PRESETS since 2026-08-22, beside a `[vision]` table since 2026-09-02** (`load_settings`
   returns `Settings(vision, presets)`, `resolve_method` / `vlm_methods`), deployed with the
   node. The `[vision]` table (`canvas_tokens`, `crop_tokens`, `caption_megapixels`) is
-  validated like a preset, rides on every `Preset`, and is what vl.py samples by. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,
+  validated like a preset, rides on every `Preset`, and is what vl.py samples by. Each value
+  rule is written ONCE as a pure function returning a message or None (`vision_error`,
+  `caption_megapixels_error`, `score_error`, `budget_error`, `prompt_free_error`), and
+  `build_preset` is the one `Preset` constructor. The file checks and the Tile Test nodes'
+  socket checks both call them, each prefixing where the value came from. `settings.user.toml` beside it is the USER'S own copy and wins whenever it exists,
   which is what makes an edit survive a node update (`.gitignore`d, never written by the
   package). TWO READ CADENCES, deliberately: the PRESET LIST is read once per session by
   `vlm_methods` (an `lru_cache`) because it becomes a combo the frontend caches at startup, so
@@ -462,6 +476,10 @@ without that doc's temporal design.
   `build_guider` == core CFGGuider — required, its `original_conds` convention is what the VL
   positive swap keys on — and `encode_empty` for the placeholder positive / default
   negative). **torch-only at module scope**, comfy lazy (subprocess test pins it).
+  HOST RAM at the 16K intermediate: the model output is clamped in place, and the lanczos is
+  `_lanczos`, core's `comfy.utils.lanczos` with its uint8 conversion run in row slices
+  (`LANCZOS_CHUNK_ROWS`), because core's holds three full-size float copies at once. A
+  `comfy` test pins `_lanczos` equal to core's, so a core change fails the gate.
   `SlicedCanvasNoise(vae, seed, canvas_h, canvas_w, rect)` (2026-09-03) is the NOISE a block
   run needs: the full canvas draw from `sync.build_canvas_noise` sliced to `rect` (a clone per
   call, since the live-canvas ring zeroes the handed noise in place), plus `noise_fields(sampler,
@@ -526,8 +544,8 @@ without that doc's temporal design.
   (`captions.generate_caption_set`) and `tile_tags_instruction` the tags kind
   (`tags.generate_tag_trace`), exactly one on, both over the PADDED canvas, and `prompt` fills
   `{PROMPT}` through `captions.with_prompt`. The budget, `caption_megapixels` and threshold
-  widgets are linkable, so the node re-checks each range itself (a linked value skips core's
-  min and max). `position_terms` off skips the strip locate. Four more outputs,
+  widgets are linkable, so the node re-runs captions.py's value rules on each (a linked value
+  skips core's min and max). `position_terms` off skips the strip locate. Four more outputs,
   `prompt_tags`, `tags_listed`, `tags_verified` and `tags_final`, print every tags stage per
   tile. `tiles` (csv, same parser as the Render node's,
   `_parse_tile_numbers(text, count, node_name)`) captions the named tiles, plus their

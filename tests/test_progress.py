@@ -694,7 +694,7 @@ def a_preset(surface, kind=captions.TILE_TEXT_CAPTION, style="", prompt=""):
     return captions.Preset(
         surface=surface, label="unit test",
         vision=captions.VisionSettings(canvas_tokens=165, crop_tokens=100, caption_megapixels=0.5),
-        style_instruction=style, kind=kind, prompt=prompt)
+        global_style_instruction=style, tile_text=kind, prompt=prompt)
 
 
 def test_preset_picture_settles_the_total_before_any_fill(comfy_stubs):

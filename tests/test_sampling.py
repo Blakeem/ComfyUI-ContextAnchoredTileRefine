@@ -236,7 +236,7 @@ def _record_sync(monkeypatch):
 
 
 def _vl_guider():
-    # The VL preamble refuses anything that does not keep 'positive' in original_conds.
+    # The CFGGuider convention the sync engine's intake holds every VL guider to.
     guider = FakeGuider()
     guider.original_conds = {"positive": [], "negative": []}
     return guider

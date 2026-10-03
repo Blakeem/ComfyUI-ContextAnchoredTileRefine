@@ -37,7 +37,7 @@ def a_tags_preset(prompt="", style="", style_tokens=128, **thresholds):
         surface=captions.VLM_METHOD_CAPTIONS, label="tags",
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0,
                                        caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
-        style_instruction=style, style_max_tokens=style_tokens, kind=captions.TILE_TEXT_TAGS,
+        global_style_instruction=style, global_style_max_tokens=style_tokens, tile_text=captions.TILE_TEXT_TAGS,
         tile_tags_instruction=PROPOSE, prompt_tags_instruction=PROMPT_TAGS,
         tile_tags_verification_statement=VERIFY, prompt=prompt, **thresholds)
 
@@ -1016,8 +1016,8 @@ def test_a_ledger_replaces_the_bar_and_counts_run_wide_across_the_picture_loop(c
 
 def test_a_caption_preset_is_refused(classifier):
     preset = captions.Preset(surface=captions.VLM_METHOD_CAPTIONS, label="standard",
-                             vision=a_tags_preset().vision, tile_instruction="describe",
-                             tile_max_tokens=256)
+                             vision=a_tags_preset().vision, tile_caption_instruction="describe",
+                             tile_caption_max_tokens=256)
 
     with pytest.raises(RuntimeError, match=r"'standard'.*tile_text = 'tags'"):
         run(FakeTagClip(), preset)
@@ -1036,7 +1036,7 @@ def test_a_prompt_placeholder_outside_the_prompt_tags_instruction_is_refused_bef
     clip = FakeTagClip()
     preset = dataclasses.replace(a_tags_preset(prompt="a cat"), **{key: "{TAG} from {PROMPT}"})
 
-    with pytest.raises(RuntimeError, match=rf"'tags' carries \{{PROMPT\}} in its {key}, which only "
+    with pytest.raises(RuntimeError, match=rf"preset 'tags': {key} holds \{{PROMPT\}}, which only "
                                            r"prompt_tags_instruction takes"):
         run(clip, preset)
     assert clip.generate_calls == []

@@ -85,7 +85,7 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method, 
     assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
                         "vlm_method": method, "progress": "Ledger", "preset": expected_preset}
     if method != "vision tokens":
-        assert "a fox in the centre" in expected_preset.tile_instruction
+        assert "a fox in the centre" in expected_preset.tile_caption_instruction
     # ... and it is the run's ONE bar: nothing else in this call constructs another.
     assert len(comfy_stubs["progress_bars"]) == 1
 
@@ -130,7 +130,7 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
 
     _refine_vl(FakeTagClip(), prompt=prompt)
 
-    assert recorded["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["preset"].tile_text == captions.TILE_TEXT_TAGS
     assert recorded["preset"].prompt == ("" if prompt is None else prompt)
 
 

@@ -589,8 +589,9 @@ def test_controlnet_is_ignored_on_the_vl_path(comfy_stubs, pipeline_clip, caplog
 
 
 def test_the_vl_dispatch_rejects_a_sampler_the_engine_cannot_time(comfy_stubs, pipeline_clip):
-    # Fail fast AT the dispatch, before any VAE or VL encode: the stepper's own rejection
-    # would otherwise arrive one whole-canvas encode and one canvas of tile encodes later.
+    # Fail fast at the engine's intake, before any VAE or VL encode: the stepper's own
+    # rejection would otherwise arrive one whole-canvas encode and one canvas of tile encodes
+    # later.
     vae, noise = GridVAE(), GridNoise()
 
     with pytest.raises(ValueError, match="only supports standard"):
@@ -619,7 +620,7 @@ def test_the_vl_dispatch_rejects_a_schedule_the_lanes_cannot_share(comfy_stubs, 
     # sigma 0) is named here rather than mistiming the barrier later.
     vae, noise = GridVAE(), GridNoise()
 
-    with pytest.raises(ValueError, match="strictly decreasing and end at 0"):
+    with pytest.raises(ValueError, match="not strictly decreasing"):
         sampling.refine_image(
             torch.rand(1, 80, 80, 3), VLGuider(), sync_sampler(),
             torch.tensor([1.0, 0.5, 0.7, 0.0]), vae, noise, max_tile_width=56,

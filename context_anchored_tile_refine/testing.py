@@ -484,12 +484,8 @@ def _text_kind(texts):
 def _check_tags_texts(texts):
     # The settings file's placeholder rules for a tags block, applied to the sockets, since a
     # socket can carry any text node's wording.
-    for name in ("tile_tags_instruction", "tile_tags_verification_statement"):
-        if captions.PROMPT_PLACEHOLDER in texts[name]:
-            raise ValueError(
-                f"{CAPTIONS_NODE} was given {name} holding {captions.PROMPT_PLACEHOLDER}. Only "
-                "prompt_tags_instruction carries the prompt, so move "
-                f"{captions.PROMPT_PLACEHOLDER} there.")
+    for name in captions._TAGS_PROMPT_FREE_KEYS:
+        _refuse(CAPTIONS_NODE, captions.prompt_free_error(name, texts[name]))
     question = texts["prompt_tags_instruction"]
     if question and captions.PROMPT_PLACEHOLDER not in question:
         raise ValueError(
@@ -504,43 +500,17 @@ def _check_tags_texts(texts):
             "tag goes, or disconnect it to keep every candidate unchecked.")
 
 
-def _check_budget(name, value):
-    # A linked value bypasses the widget's min and max, and a tags Tile Test: Settings node
-    # outputs 0 for the caption budget it does not carry.
-    if not 1 <= value <= captions.MAX_CAPTION_TOKENS:
-        raise ValueError(
-            f"{CAPTIONS_NODE} was given {name} {value}, and a caption budget is between 1 and "
-            f"{captions.MAX_CAPTION_TOKENS} tokens. Set {name} in that range, or link it from a "
-            "Tile Test: Settings node whose preset carries it.")
+# A linked value bypasses a widget's min and max, so these nodes re-run the settings file's value
+# rules. A tags Tile Test: Settings node outputs 0 for a caption budget it does not carry.
+PRESET_VALUE_REMEDY = "Set it in that range, or link it from a Tile Test: Settings node whose preset carries it."
+VISION_VALUE_REMEDY = "Set it in that range, or link it from a Tile Test: Settings node."
 
 
-def _check_score(name, value, above_zero=False):
-    # A linked value bypasses the widget's min and max. The tagging stages take a verification
-    # threshold above 0 only.
-    floor_ok = value > 0 if above_zero else value >= 0
-    span = "above 0 and at most 1" if above_zero else "between 0 and 1"
-    if not (floor_ok and value <= 1):
-        raise ValueError(
-            f"{CAPTIONS_NODE} was given {name} {value}, and it is a score {span}. Set it {span}, "
-            "or link it from a Tile Test: Settings node whose preset carries it.")
-
-
-def _caption_megapixels_error(value):
-    # The widget's own range cannot express "0 or at least VL_INPUT_MIN_MEGAPIXELS".
-    if value == 0 or captions.VL_INPUT_MIN_MEGAPIXELS <= value <= vl.PICTURE_CAP_MEGAPIXELS:
-        return None
-    return (
-        "caption_megapixels must be 0, which reads the picture's own size, or between "
-        f"{captions.VL_INPUT_MIN_MEGAPIXELS} and {vl.PICTURE_CAP_MEGAPIXELS}. Got {value}.")
-
-
-def _check_caption_megapixels(value):
-    # A linked value reaches VALIDATE_INPUTS as None, so the rule runs again here.
-    error = _caption_megapixels_error(value)
-    if error is not None:
-        raise ValueError(
-            f"{CAPTIONS_NODE}: {error} Set it in that range, or link it from a Tile Test: "
-            "Settings node.")
+def _refuse(node_name, error, remedy=""):
+    if error is None:
+        return
+    message = f"{node_name}: {error}"
+    raise ValueError(f"{message} {remedy}" if remedy else message)
 
 
 def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_tokens,
@@ -550,40 +520,30 @@ def _socket_preset(texts, prompt, tile_caption_max_tokens, global_style_max_toke
     # text encoder costs minutes to reach the same rejection.
     kind = _text_kind(texts)
     style = texts["global_style_instruction"]
-    _check_caption_megapixels(caption_megapixels)
+    _refuse(CAPTIONS_NODE, captions.caption_megapixels_error(caption_megapixels), VISION_VALUE_REMEDY)
     vision = replace(captions.load_settings().vision, caption_megapixels=caption_megapixels)
     if style:
-        _check_budget("global_style_max_tokens", global_style_max_tokens)
+        _refuse(CAPTIONS_NODE, captions.budget_error("global_style_max_tokens", global_style_max_tokens),
+                PRESET_VALUE_REMEDY)
     if kind == captions.TILE_TEXT_TAGS:
         _check_tags_texts(texts)
-        _check_score("tile_tags_verification_threshold", verification_threshold, above_zero=True)
-        _check_score("tile_tags_position_threshold", position_threshold)
-        _check_score("prompt_tags_verification_threshold", prompt_verification_threshold, above_zero=True)
-        preset = captions.Preset(
-            surface=captions.VLM_METHOD_CAPTIONS,
-            label=CAPTIONS_NODE,
-            vision=vision,
-            style_instruction=style,
-            style_max_tokens=global_style_max_tokens,
-            kind=captions.TILE_TEXT_TAGS,
-            tile_tags_instruction=texts["tile_tags_instruction"],
-            prompt_tags_instruction=texts["prompt_tags_instruction"],
-            tile_tags_verification_statement=texts["tile_tags_verification_statement"],
-            tile_tags_verification_threshold=verification_threshold,
-            prompt_tags_verification_threshold=prompt_verification_threshold,
-            tile_tags_position_threshold=position_threshold,
-        )
+        for key, value, above_zero in (
+                ("tile_tags_verification_threshold", verification_threshold, True),
+                ("tile_tags_position_threshold", position_threshold, False),
+                ("prompt_tags_verification_threshold", prompt_verification_threshold, True)):
+            _refuse(CAPTIONS_NODE, captions.score_error(key, value, above_zero), PRESET_VALUE_REMEDY)
     else:
-        _check_budget("tile_caption_max_tokens", tile_caption_max_tokens)
-        preset = captions.Preset(
-            surface=captions.VLM_METHOD_CAPTIONS,
-            label=CAPTIONS_NODE,
-            vision=vision,
-            tile_instruction=texts["tile_caption_instruction"],
-            tile_max_tokens=tile_caption_max_tokens,
-            style_instruction=style,
-            style_max_tokens=global_style_max_tokens,
-        )
+        _refuse(CAPTIONS_NODE, captions.budget_error("tile_caption_max_tokens", tile_caption_max_tokens),
+                PRESET_VALUE_REMEDY)
+    values = {
+        **texts,
+        "tile_caption_max_tokens": tile_caption_max_tokens,
+        "global_style_max_tokens": global_style_max_tokens,
+        "tile_tags_verification_threshold": verification_threshold,
+        "prompt_tags_verification_threshold": prompt_verification_threshold,
+        "tile_tags_position_threshold": position_threshold,
+    }
+    preset = captions.build_preset(captions.VLM_METHOD_CAPTIONS, CAPTIONS_NODE, vision, kind, values)
     return captions.with_prompt(preset, prompt)
 
 
@@ -892,7 +852,7 @@ class ContextAnchoredTileTestCaptions:
         # VALIDATE_INPUTS states the rule), so the settings file's entire rule is re-checked.
         if caption_megapixels is None:
             return True
-        return _caption_megapixels_error(caption_megapixels) or True
+        return captions.caption_megapixels_error(caption_megapixels) or True
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
@@ -930,7 +890,7 @@ class ContextAnchoredTileTestCaptions:
                                     global_style_max_tokens, caption_megapixels,
                                     tile_tags_verification_threshold, tile_tags_position_threshold,
                                     prompt_tags_verification_threshold)
-        is_tags = run_preset.kind == captions.TILE_TEXT_TAGS
+        is_tags = run_preset.tile_text == captions.TILE_TEXT_TAGS
         all_tiles = layout.layout.tiles
         columns = layout.layout.sol_x.n
         named, captioned = _tiles_to_caption(layout.layout, tiles, with_neighbors)
@@ -967,28 +927,21 @@ class ContextAnchoredTileTestCaptions:
             grid=(columns, layout.layout.sol_y.n),
             rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
                         for tile in all_tiles),
-            kind=run_preset.kind,
+            kind=run_preset.tile_text,
         )
         return (result, str(result), ", ".join(str(index) for index in named), *debug)
 
 
 def _run_preset(surface, canvas_tokens, crop_tokens):
     # The settings file's block with the two widgets written over its [vision] table, so a
-    # token count can be tried without editing the file. Both counts at 0 is what the file
-    # itself rejects at load, and it is rejected here for the same reason.
-    # A linked value bypasses the widget's min and max.
-    for name, value in (("canvas_tokens", canvas_tokens), ("crop_tokens", crop_tokens)):
-        if not 0 <= value <= vl.MAX_VISION_TOKENS:
-            raise ValueError(
-                f"Tile Test: Render was given {name} {value}, and it must be between 0 and "
-                f"{vl.MAX_VISION_TOKENS}. Set {name} in that range.")
-    if canvas_tokens == 0 and crop_tokens == 0:
-        raise ValueError(
-            "Tile Test: Render was given canvas_tokens 0 and crop_tokens 0. A tile needs vision "
-            "rows from at least one of the two.")
+    # token count can be tried without editing the file. A linked value bypasses the widget's
+    # min and max, so the table's own rule runs on the result.
     base = captions.resolve_method(surface)
-    return replace(base, vision=replace(base.vision, canvas_tokens=canvas_tokens,
-                                        crop_tokens=crop_tokens))
+    vision = replace(base.vision, canvas_tokens=canvas_tokens, crop_tokens=crop_tokens)
+    _refuse("Tile Test: Render",
+            captions.vision_error(vision.canvas_tokens, vision.crop_tokens, vision.caption_megapixels),
+            "Change canvas_tokens or crop_tokens, or link both from a Tile Test: Settings node.")
+    return replace(base, vision=vision)
 
 
 def _run_captions(surface, given, test_layout):
@@ -1210,8 +1163,7 @@ class ContextAnchoredTileTestRender:
             return _unsampled_lists(image, layout, requested)
         sampler = comfy.samplers.sampler_object(sampler_name)
         # These rejections need no GPU, and the text-encoder load below costs minutes.
-        sampling._check_sync_intake(sampler, sigmas, sampler_name)
-        sync.check_preconditions(model, sigmas, anchor_source)
+        sync.check_preconditions(model, sigmas, anchor_source, sampler=sampler, sampler_name=sampler_name)
         empty = upscale.encode_empty(clip)
         guider = upscale.build_guider(model, empty, negative or empty, cfg)
         if not requested:

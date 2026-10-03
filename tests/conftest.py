@@ -341,7 +341,7 @@ def comfy_stubs(monkeypatch):
     class StubCFGGuider:
         """comfy.samplers.CFGGuider's construction surface only: the conds land in
         `original_conds` under 'positive'/'negative', which is the convention
-        sampling.refine_image's VL check and per-tile positive swap both rely on."""
+        sync.check_preconditions' guider rule and the per-lane positive swap both rely on."""
 
         def __init__(self, model_patcher):
             self.model_patcher = model_patcher

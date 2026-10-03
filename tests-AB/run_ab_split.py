@@ -199,7 +199,7 @@ def _live_instruction():
     from context_anchored_tile_refine import captions
 
     preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
-    return preset.tile_instruction, preset.tile_max_tokens
+    return preset.tile_caption_instruction, preset.tile_caption_max_tokens
 
 
 def load_or_generate_captions(clip, padded, tiles, force):
