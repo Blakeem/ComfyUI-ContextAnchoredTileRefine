@@ -1,6 +1,5 @@
 import logging
 import math
-import os
 
 import torch
 
@@ -635,48 +634,6 @@ def seam_dc_offset(tile, sub, region, region_mask=None):
     return offset.clamp(-DC_MATCH_CLAMP, DC_MATCH_CLAMP).to(sub.dtype)
 
 
-def _debug_dir():
-    # Opt-in seam debug. When the CATR_DEBUG_DIR env var is set, _refine_tiles writes the
-    # per-tile intermediates (decoded crop, the raw band it encoded, the feather alpha, and
-    # the canvas region before/after the composite) plus a manifest there as PNGs, so the
-    # seam can be inspected tile by tile. Unset (the default) → a single env lookup and no
-    # other work, so the byte-for-byte output path is untouched.
-    return os.environ.get("CATR_DEBUG_DIR") or None
-
-
-def _dump_png(path, tensor):
-    # Save a debug tensor as PNG, batch 0 only. [B,H,W,C]/[H,W,C] → RGB (first 3 channels);
-    # [H,W] (a feather alpha or mask) → grayscale. Values are clamped to [0,1] and quantized
-    # for viewing only — this never feeds back into the pipeline. PIL is imported lazily
-    # because only the opt-in debug path needs it.
-    from PIL import Image
-
-    t = tensor.detach().to("cpu", torch.float32)
-    if t.ndim == 4:
-        t = t[0]
-    if t.ndim == 3:
-        arr = (t[..., :3].clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).contiguous().numpy()
-        Image.fromarray(arr, mode="RGB").save(path)
-    else:
-        arr = (t.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).contiguous().numpy()
-        Image.fromarray(arr, mode="L").save(path)
-
-
-def _manifest_line(tile_idx, tile, dc_offset=None):
-    # One human-readable row per tile for the seam-debug manifest: the geometry needed to
-    # line the dumped PNGs up in canvas space (core is the hard-owned region; paste is the
-    # feathered top/left band; crop is the full sampled extent incl. the frozen anchor ring).
-    # dc_offset is the applied per-channel DC correction — the number the DC match exists to
-    # produce, and it is invisible in the dumped PNGs (which hold the UNcorrected decode), so
-    # it has to be recorded here or it cannot be checked at all.
-    def rc(r):
-        return f"({r.x0},{r.y0})-({r.x1},{r.y1})"
-
-    dc = "" if dc_offset is None else " dc=[{}]".format(
-        ",".join(f"{v:+.6f}" for v in dc_offset.tolist()))
-    return f"t{tile_idx:02d} r{tile.row}c{tile.col} cls={tile.cls} kept_top={tile.kept_top} kept_left={tile.kept_left} core={rc(tile.core)} paste={rc(tile.paste_rect)} crop={rc(tile.crop_rect)}{dc}"
-
-
 def encode_pixels(vae, pixels):
     # The tile encode, batch-safe. A video-family VAE (latent_dim 3 — the Wan family, used
     # by e.g. Krea 2) reshapes a 4-D image batch to [1,C,B,H,W] (comfy/sd.py VAE.encode):
@@ -752,18 +709,6 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # direct call, or a single-picture IMAGE — changes nothing.
     import comfy.model_management
 
-    # Opt-in seam debug (CATR_DEBUG_DIR). Every _save call site sits inside its own
-    # `if debug_dir is not None:` guard, which is what keeps _save undefined and unreachable
-    # when the variable is unset. Nothing below changes the output, only side-effect PNGs and
-    # a manifest are written.
-    debug_dir = _debug_dir()
-    debug_manifest = []
-    if debug_dir is not None:
-        os.makedirs(debug_dir, exist_ok=True)
-
-        def _save(name, tensor):
-            _dump_png(os.path.join(debug_dir, name), tensor)
-
     pixels = image[..., :3]
     padded, (height, width) = pad_image_to_multiple(pixels)
     batch, canvas_h, canvas_w = padded.shape[0], padded.shape[1], padded.shape[2]
@@ -824,8 +769,6 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             iy0, iy1 = inner.y0 - crop.y0, inner.y1 - crop.y0
             ix0, ix1 = inner.x0 - crop.x0, inner.x1 - crop.x0
             enc[:, iy0:iy1, ix0:ix1, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
-            if debug_dir is not None:
-                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_enc.png", enc)
             tile_latent = encode_pixels(vae, enc)
         else:
             # Whole-image / n=1 path: crop == core, no anchor ring and no already-
@@ -928,25 +871,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 sub = torch.where(in_gamut, corrected.clamp(0.0, 1.0), corrected)
             disp_top, disp_left = seam_displacements(tile, sub, region)
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
-            if debug_dir is not None:
-                # region is a VIEW into canvas, so dump it BEFORE the composite overwrites it.
-                tag = f"t{tile_idx:02d}_r{tile.row}c{tile.col}"
-                _save(tag + "_decoded.png", decoded)
-                _save(tag + "_alpha.png", alpha[..., 0])
-                _save(tag + "_region_before.png", region)
             canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
-            if debug_dir is not None:
-                _save(tag + "_region_after.png", canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :])
-                debug_manifest.append(_manifest_line(tile_idx, tile, dc_offset))
         else:
-            if debug_dir is not None:
-                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_decoded.png", decoded)
-                debug_manifest.append(_manifest_line(tile_idx, tile))
             canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :] = decoded
-    if debug_dir is not None:
-        _save("canvas_final.png", crop_image_to(canvas, height, width))
-        with open(os.path.join(debug_dir, "manifest.txt"), "w", encoding="utf-8") as manifest_file:
-            manifest_file.write("\n".join(debug_manifest) + "\n")
     return crop_image_to(canvas, height, width)
 
 
