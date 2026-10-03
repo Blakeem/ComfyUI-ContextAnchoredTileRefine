@@ -247,27 +247,45 @@ def test_full_fake_pipeline_returns_image_tuple(comfy_stubs):
 
 
 def test_multi_tile_smoke(comfy_stubs):
-    # refine() sits below VALIDATE_INPUTS, so tiny caps force a 3x3 grid with fakes.
-    # ctx=overlap=0 is the internal escape hatch (a ring at caps 32 would correctly raise
-    # GridConfigError); feather-active coverage lives in test_tiling.
+    # The smallest legal caps on a 576 px image force a 3x3 grid (base 288 > 256, base 192 fits).
+    # ctx=overlap=0 keeps the fakes simple. Feather-active coverage lives in test_tiling.
     guider, vae, noise = FakeGuider(), FakeVAE(), FakeNoise()
 
     result = ContextAnchoredTileRefine().refine(
-        image=torch.rand(1, 80, 80, 3),
+        image=torch.rand(1, 576, 576, 3),
         guider=guider,
         sampler=object(),
         sigmas=torch.linspace(1.0, 0.0, 5),
         vae=vae,
         noise=noise,
-        max_tile_width=32,
-        max_tile_height=32,
+        max_tile_width=256,
+        max_tile_height=256,
         context_anchor=0,
         context_overlap=0,
         mask=None,
     )
 
     assert isinstance(result, tuple) and len(result) == 1
-    assert result[0].shape == (1, 80, 80, 3)
+    assert result[0].shape == (1, 576, 576, 3)
     assert vae.encode_calls == 9 and vae.decode_calls == 9
     assert guider.sample_calls == 9
     assert len(noise.calls) == 1
+
+
+@pytest.mark.parametrize("node", [ContextAnchoredTileRefine, ContextAnchoredTileRefineVL])
+def test_a_linked_context_anchor_off_the_8_grid_is_refused_before_the_engine_runs(comfy_stubs, monkeypatch, node):
+    # A linked INT skips VALIDATE_INPUTS and core's range check, so refine re-checks it.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run with an off-grid context_anchor")
+
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+    widgets = {
+        "image": torch.rand(1, 96, 104, 3), "guider": FakeGuider(), "sampler": object(),
+        "sigmas": torch.linspace(1.0, 0.0, 5), "vae": FakeVAE(), "noise": FakeNoise(),
+        "max_tile_width": 1024, "max_tile_height": 1024, "context_anchor": 12, "context_overlap": 8,
+    }
+    if node is ContextAnchoredTileRefineVL:
+        widgets.update(anchor_source="source image", vlm_method="vision tokens", clip=object())
+
+    with pytest.raises(ValueError, match="context_anchor must be a multiple of 8, got 12"):
+        node().refine(**widgets)

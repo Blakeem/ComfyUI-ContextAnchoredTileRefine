@@ -32,7 +32,7 @@ class BaseModel:
 
 
 class HoldingModel(BaseModel):
-    """Stands in for WAN21/WAN22/HunyuanVideo/LTXAV: already holds the frozen region clean."""
+    """Stands in for WAN22/WAN21_SCAIL2/HunyuanVideo/LTXAV: already holds the frozen region clean."""
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
         return latent_image

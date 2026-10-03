@@ -215,7 +215,7 @@ def test_a_caption_chunk_snaps_to_its_boundary_on_completion(comfy_stubs):
     ledger.caption_done(1, 2)
 
     assert ledger.value == scaled(12.0)
-    assert ledger.chunks == (1, 2)
+    assert ledger.caption_counters == (1, 2)
 
 
 def test_caption_chunks_are_re_based_onto_this_pictures_segment(comfy_stubs):
@@ -228,7 +228,7 @@ def test_caption_chunks_are_re_based_onto_this_pictures_segment(comfy_stubs):
     assert ledger.value == scaled(12.0)
     ledger.caption_done(4, 4)
     assert ledger.value == scaled(24.0)
-    assert ledger.chunks == (4, 4)
+    assert ledger.caption_counters == (4, 4)
 
 
 # ---- the shim ---------------------------------------------------------------

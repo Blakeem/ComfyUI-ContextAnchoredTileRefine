@@ -443,6 +443,12 @@ def comfy_stubs(monkeypatch):
         return recorded["previewer"]
 
     latent_preview_module.get_previewer = get_previewer
+    latent_preview_module.MAX_PREVIEW_RESOLUTION = 512
+
+    class TAESDPreviewerImpl:
+        pass
+
+    latent_preview_module.TAESDPreviewerImpl = TAESDPreviewerImpl
 
     def prepare_callback(model, steps, x0_output_dict=None):
         recorded["prepare_callback_args"] = (model, steps, x0_output_dict)

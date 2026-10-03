@@ -299,10 +299,10 @@ def _caption_tail_len(clip, caption, probe_image):
     """How many rows this caption's stream carries after vision_end (caption + template
     tail) — the layout contract every arm shares. The tokenizer only counts; the image
     just makes the stream well-formed."""
-    from context_anchored_tile_refine import captions, vl
+    from context_anchored_tile_refine import vl
 
-    _, tail_len = captions._tokenize_images(clip, vl.VISION_BLOCK + caption, probe_image,
-                                            llama_template=vl.KREA2_TEMPLATE)
+    _, tail_len = vl.tokenize_with_image(clip, vl.VISION_BLOCK + caption, probe_image,
+                                         llama_template=vl.KREA2_TEMPLATE)
     return tail_len
 
 
@@ -338,10 +338,10 @@ def _encode_caption_with_image(clip, caption, image):
     dropped — the kept vision rows come from the sliced global encode; the image's content
     (tile crop, or flat grey for the position control) reaches the caption rows through
     attention during this encode."""
-    from context_anchored_tile_refine import captions, vl
+    from context_anchored_tile_refine import vl
 
-    tokens, tail_len = captions._tokenize_images(clip, vl.VISION_BLOCK + caption, image,
-                                                 llama_template=vl.KREA2_TEMPLATE)
+    tokens, tail_len = vl.tokenize_with_image(clip, vl.VISION_BLOCK + caption, image,
+                                              llama_template=vl.KREA2_TEMPLATE)
     encoded = clip.encode_from_tokens_scheduled(tokens)
     seq = int(encoded[0][0].shape[1])
     if seq - 2 - tail_len <= 0:

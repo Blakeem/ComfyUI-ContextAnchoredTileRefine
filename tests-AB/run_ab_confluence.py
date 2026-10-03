@@ -875,7 +875,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
         region = mask_2d(denoise_mask.detach() > 0.5)
         # Elementwise, not count-only (review finding 7): a same-area mask at the wrong
         # position must fail, so compare against the indicator the pipeline itself builds.
-        expected_region = sampling.tile_gradient(crop, inner, scale=8) > 0.5
+        expected_region = sampling.denoise_indicator(crop, inner, scale=8) > 0.5
         if not torch.equal(region.cpu(), expected_region):
             raise RuntimeError(
                 f"pass-2 tile {index}: denoise mask is not the core+overlap indicator of "

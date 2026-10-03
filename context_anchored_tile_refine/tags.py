@@ -6,12 +6,12 @@ Two entry points run one pass. `generate_tag_trace` returns every stage's result
 the engine's, and reads only the texts from that run, as `(style_texts, tile_texts)` in the
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
-    picture pass   the style caption (captions.style_caption), which is the style line
-                   alone, then the prompt tags (logit_classifier.toolkit's tag_prompt): the
-                   language question, a translation when the prompt is not English, one
-                   text-only generate listing the physical things its English text names, and
-                   the thing check, which keeps the ones that are things. They join every
-                   tile's candidates. The prompt reaches no tile question, so a long prompt
+    picture pass   the prompt tags (logit_classifier.toolkit's tag_prompt): the language
+                   question, a translation when the prompt is not English, one text-only
+                   generate listing the physical things its English text names, and the thing
+                   check, which keeps the ones that are things. They join every tile's
+                   candidates. Then the style caption (captions.style_caption), which is the
+                   style line alone. The prompt reaches no tile question, so a long prompt
                    never lengthens a tile's reply.
     per tile row   the toolkit's tag_image on a 1 MP copy of the crop: propose (stopped
                    after MAX_PROPOSED_TAGS tags, asked once more with the fallback question
@@ -277,8 +277,8 @@ def trace_tile(clip, classifier, crop, image, preset, prompt_tags, thing_cache, 
 @dataclass(frozen=True)
 class TagRun:
     """Every stage of one tags pass. `style_texts` is the style line per batch row, "" for
-    none, `prompt` is the prompt tags or None when the preset carries no prompt, and
-    `tiles[tile_index][batch_row]` is a TileTrace."""
+    none, `prompt` is the prompt tags or None when the prompt is blank or
+    `prompt_tags_instruction` is empty, and `tiles[tile_index][batch_row]` is a TileTrace."""
 
     style_texts: tuple
     prompt: PromptTrace | None

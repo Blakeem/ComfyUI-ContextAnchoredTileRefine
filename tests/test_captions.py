@@ -52,7 +52,7 @@ def a_preset(tile="describe", tile_tokens=256, style="", style_tokens=128,
 class FakeCaptionClip:
     """Duck-typed VL clip with a text generator.
 
-    The token stream mirrors the Krea 2 layout captions._tokenize_images parses (prefix,
+    The token stream mirrors the Krea 2 layout vl.tokenize_with_image parses (prefix,
     vision_start, ONE dict image token, vision_end, tail), and the tail grows with the text
     so two different captions really do produce two different sequence lengths. Every
     tokenize/generate/encode is recorded, and the encode is deterministic: feature value ==
@@ -812,8 +812,8 @@ def test_the_settings_file_reaches_the_registry_archive():
     ("  padded  ", "padded"),
     ("<think>reasoning here</think>the answer", "the answer"),
     ("<think>a</think>mid<think>b</think>end", "midend"),
-    # A stray close with no open (the model reopened mid-answer): keep what follows the LAST
-    # close, which is core's own rule in TextGenerateLTX2Prompt.
+    # A stray close with no open (the model reopened mid-answer). Everything before the LAST
+    # close is reasoning, so only what follows it is the answer.
     ("<think>one</think>middle</think>the answer", "the answer"),
     # Unbalanced open with no close at all. With thinking=True there is no answer in the
     # string, only a reasoning turn that ran out of budget, so "" is the honest result and it
@@ -917,6 +917,25 @@ def test_generate_caption_raises_when_every_fallback_is_empty():
     clip = FakeCaptionClip(answer=lambda image, instruction: "")
     with pytest.raises(RuntimeError, match="empty answer after every fallback"):
         captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
+
+
+def test_generate_caption_retries_an_answer_that_cleans_to_empty():
+    # clean_caption drops a line opening with a meta prefix, so a lone "Actually, ..." answer
+    # survives strip_thinking and would still reach the encode as "".
+    answers = ["Actually, a red barn stands in a field.", "a red barn in a field"]
+    clip = FakeCaptionClip(answer=lambda image, instruction: answers[len(clip.generate_calls) - 1])
+
+    text = captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
+
+    assert text == "a red barn in a field"
+    assert [c["do_sample"] for c in clip.generate_calls] == [False, True]
+
+
+def test_generate_caption_raises_when_every_fallback_cleans_to_empty():
+    clip = FakeCaptionClip(answer=lambda image, instruction: "**Answer:**")
+    with pytest.raises(RuntimeError, match="empty answer after every fallback"):
+        captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
+    assert len(clip.generate_calls) == 3
 
 
 def test_generate_caption_rejects_a_clip_that_cannot_generate():

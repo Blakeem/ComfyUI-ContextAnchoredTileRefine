@@ -2,10 +2,11 @@
 
 Core rebuilds a control's working hint from `cond_hint_original` whenever the latent shape
 disagrees with the cached one, by center-crop-to-aspect plus rescale onto the current latent
-(`comfy/controlnet.py:269` and `:279`). Handed a FULL-image hint, every tile therefore gets the
-wrong content at the wrong scale. Handed a hint already cut to the tile's `crop_rect` — whose
-dims are /8 by construction, matching `compression_ratio` — that rescale is an identity and the
-hint lands aligned. That is the whole feature: no new node inputs, no resampling anywhere.
+(the shape check and hint rebuild in `ControlNet.get_control`). Handed a FULL-image hint,
+every tile therefore gets the wrong content at the wrong scale. Handed a hint already cut to
+the tile's `crop_rect` — whose dims are /8 by construction, matching `compression_ratio` — that
+rescale is an identity and the hint lands aligned. That is the whole feature: no new node
+inputs, no resampling anywhere.
 
 Control objects are DUCK-TYPED here (`copy()`, `set_previous_controlnet()`,
 `cond_hint_original`, `extra_concat_orig`, `previous_controlnet`) so this module — like
@@ -39,11 +40,12 @@ def prepare_hint_canvas(original_conds, image_size, bbox=None):
     #
     # An id that is ABSENT from the map means "not canvas-sized — pass through untouched".
     # That is how core's auto-inserted [1,1,1,1] `concat_mask` placeholder
-    # (`comfy/controlnet.py:112-113`) survives: slicing it at a non-origin `crop_rect` would
+    # (`ControlBase.set_cond_hint`) survives: slicing it at a non-origin `crop_rect` would
     # yield a 0-dim tensor and crash core's `common_upscale`.
     #
-    # Hints are CHANNELS-FIRST [B,C,H,W] (`nodes.py:903/941` build them with
-    # `image.movedim(-1,1)`), so every size read and every slice here is on dims (-2,-1).
+    # Hints are CHANNELS-FIRST [B,C,H,W] (`ControlNetApply` / `ControlNetApplyAdvanced` build
+    # them with `image.movedim(-1,1)`), so every size read and every slice here is on dims
+    # (-2,-1).
     height, width = image_size
     canvas = {}
 
@@ -61,8 +63,8 @@ def prepare_hint_canvas(original_conds, image_size, bbox=None):
                 )
             canvas[id(hint)] = _slice_bbox(hint, bbox)
         for extra in getattr(control, "extra_concat_orig", None) or ():
-            # An extra_concat is spatial and core rescales it onto the hint
-            # (`comfy/controlnet.py:287-296`), so a canvas-sized one must follow the hint's
+            # An extra_concat is spatial and core rescales it onto the hint (the extra_concat
+            # block of `ControlNet.get_control`), so a canvas-sized one must follow the hint's
             # crop; anything else is left out of the map on purpose (see above).
             if id(extra) in canvas:
                 continue
@@ -107,7 +109,7 @@ def crop_tile_conds(original_conds, hint_canvas, crop_rect):
     # and control objects come out of a run exactly as they went in.
     #
     # FRESH copies every tile: `get_control` caches the processed hint and only invalidates it
-    # on a SHAPE change (`comfy/controlnet.py:269`), and interior tiles share one crop shape,
+    # on a SHAPE change (`ControlNet.get_control`), and interior tiles share one crop shape,
     # so a reused object would serve tile k's hint to tile k+1.
     memo = {}
     cropped_conds = {}
@@ -128,13 +130,13 @@ def crop_tile_conds(original_conds, hint_canvas, crop_rect):
 
 def strip_control(original_conds):
     # The VL path's transform: a NEW conds map with the `control` key dropped from every cond
-    # dict, so no control chain reaches the sampler on either branch. Clearing `control_active`
-    # only skips the CROP — core still reads `control` off each cond (`comfy/samplers.py:96`)
-    # and `get_control` rebuilds the working hint from `cond_hint_original` whenever it
-    # disagrees with the latent (`comfy/controlnet.py:234-244`), so a control left on the
-    # negative would steer the uncond branch alone against a center-cropped, squashed copy of
-    # the caller's FULL-image hint. Nothing the caller owns is mutated: cond dicts are rebuilt,
-    # never edited in place. Returns the input map unchanged when nothing carries control.
+    # dict, so no control chain reaches the sampler on either branch. Core reads `control` off
+    # every cond (`samplers.get_area_and_mult`) and `ControlNet.get_control` rebuilds the
+    # working hint from `cond_hint_original` whenever it disagrees with the latent, so a
+    # control left on the negative would steer the uncond branch alone against a
+    # center-cropped, squashed copy of the caller's FULL-image hint. Nothing the caller owns
+    # is mutated: cond dicts are rebuilt, never edited in place. Returns the input map
+    # unchanged when nothing carries control.
     if not has_spatial_conds(original_conds):
         return original_conds
     stripped_conds = {}
@@ -150,7 +152,7 @@ def strip_control(original_conds):
 
 def _iter_controls(original_conds):
     # Every control object reachable from the conds, chain links included. Objects repeat (the
-    # positive and negative dicts share one `c_net`, `nodes.py:948-956`); callers memoize.
+    # positive and negative dicts share one `c_net`, `ControlNetApplyAdvanced`); callers memoize.
     for cond_list in original_conds.values():
         for cond in cond_list:
             control = cond.get("control")
@@ -175,7 +177,7 @@ def _crop_hint(tensor, crop_rect):
 
 def _copy_control(control, hint_canvas, crop_rect, memo):
     # One chain link, memoized by id(original) so the positive and negative cond dicts that
-    # share one control object (`nodes.py:948-956`) share one copy — mirroring core, and
+    # share one control object (`ControlNetApplyAdvanced`) share one copy — mirroring core, and
     # halving the hint caches a doubled copy would build.
     copied = memo.get(id(control))
     if copied is not None:
@@ -184,7 +186,7 @@ def _copy_control(control, hint_canvas, crop_rect, memo):
     copied = control.copy()
     previous = getattr(control, "previous_controlnet", None)
     if previous is not None:
-        # `ControlBase.copy_to` (`comfy/controlnet.py:168-183`) carries everything EXCEPT
+        # `ControlBase.copy_to` carries everything EXCEPT
         # `previous_controlnet`, so a multi-ControlNet chain has to be re-linked link by link
         # or every net but the last silently drops out.
         copied.set_previous_controlnet(_copy_control(previous, hint_canvas, crop_rect, memo))

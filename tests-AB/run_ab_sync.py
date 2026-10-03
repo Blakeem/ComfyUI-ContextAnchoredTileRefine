@@ -466,7 +466,7 @@ def sync_refine(canvas_latent, canvas_noise, sigmas, tiles, guider, tile_positiv
     for tile in tiles:
         crop = _latent_rect(tile.crop_rect)   # the /8 guard, not bare //8 (review 4)
         wy0, wy1, wx0, wx1 = crop.y0, crop.y1, crop.x0, crop.x1
-        mask = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        mask = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         alpha = sampling.feather_alpha(
             _latent_rect(tile.paste_rect), _latent_rect(tile.core),
             overlap_cells, tile.kept_top, tile.kept_left, plateau=latent_plateau)

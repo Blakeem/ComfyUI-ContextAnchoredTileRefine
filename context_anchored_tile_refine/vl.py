@@ -10,13 +10,11 @@ vision-language text encoder (Krea 2's Qwen3-VL):
                  capped at PICTURE_CAP_MEGAPIXELS. One encode per picture.
 
 Both counts come from the settings file's [vision] table (captions.load_settings), so a tile
-gets the same rows from each source at every image size and tile count. Settled by the
-owner's block A/B of 2026-09-02 (TESTS.md test 10, `tests-AB/run_ab_tile_phantom.py`): a cell
-carries the picture it was encoded in, so the canvas slice of a flat sky tile grows a copy of
-the image's salient object (a tower in the clouds), larger the more canvas rows it gets; the
-crop rows of that tile hold only sky and cancel the demand. About 100 crop rows do that
-without redrawing a content tile, where 200 swirl the tile's own subject and 768 gouge it. A
-3x3 neighborhood window was tried between the two and fails like the canvas slice.
+gets the same rows from each source at every image size and tile count. A cell carries the
+picture it was encoded in, so the canvas slice of a flat tile can grow a copy of the image's
+salient object, larger the more canvas rows it gets. The tile's crop rows hold only its own
+content and cancel that demand, while too many crop rows redraw the tile's own subject. The
+judged counts live in settings.toml (`tests-AB/run_ab_tile_phantom.py`).
 
 Why vision rows replace the prompt (A/B-settled, AB26-AB36): vision rows are positionally
 exact and demand-free, while text object names act as per-tile re-instantiation demands (a
@@ -45,6 +43,10 @@ VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 # picture of P pixels is P / PIXELS_PER_TOKEN vision tokens at any size.
 MERGED_CELL = 32
 PIXELS_PER_TOKEN = MERGED_CELL * MERGED_CELL
+
+# Core's process_qwen2vl_images min_pixels default. A smaller picture is resized there, so its
+# merged-cell grid would stop matching Encode.n_rows.
+MIN_PICTURE_PIXELS = 3136
 
 # The most picture one encode reads. The owner measured the VLM breaking down past 2 MP
 # (VLMAnchoredRemix), and the tower's own position table is native at 768x768 px with
@@ -111,6 +113,11 @@ def resample_picture(source, budget):
     scale = math.sqrt(budget / (samples.shape[3] * samples.shape[2]))
     width = max(MERGED_CELL, round(samples.shape[3] * scale / MERGED_CELL) * MERGED_CELL)
     height = max(MERGED_CELL, round(samples.shape[2] * scale / MERGED_CELL) * MERGED_CELL)
+    while width * height < MIN_PICTURE_PIXELS:
+        if width < height:
+            width += MERGED_CELL
+        else:
+            height += MERGED_CELL
     resampled = comfy.utils.common_upscale(samples, width, height, "area", "disabled")
     return resampled.movedim(1, -1)[:, :, :, :3], height, width
 
@@ -146,68 +153,42 @@ def slice_indices(crop, canvas_h, canvas_w, enc_h, enc_w, expected_seq, offset_x
     return [0, *rows, 1 + n_rows, *range(1 + n_rows + 1, expected_seq)]
 
 
+def tokenize_with_image(clip, text, image, **kwargs):
+    # The tokenizer guards both VL surfaces share, plus the rows after vision_end (the text and
+    # the template tail) that each surface's layout is checked against. Returns
+    # (tokens, tail_len). Nothing is encoded here.
+    try:
+        tokens = clip.tokenize(text, images=[image], **kwargs)
+    except TypeError as error:
+        raise RuntimeError(
+            "Context-Anchored Tile Refine (VL): this CLIP's tokenizer does not accept images. The "
+            f"node needs a vision-language text encoder (Krea 2 family). ({error})") from error
+    ids = [t[0] for t in tokens[next(iter(tokens))][0]]
+    pad_pos = next((i for i, v in enumerate(ids) if isinstance(v, dict)), None)
+    if pad_pos is None:
+        raise RuntimeError(
+            "Context-Anchored Tile Refine (VL): the tokenizer produced no image tokens. The node "
+            "needs a vision-language text encoder (Krea 2 family).")
+    return tokens, len(ids) - (pad_pos + 2)
+
+
 def _encode_one(clip, picture_copy, grid_h, grid_w):
     # ONE pure-vision encode of one resampled picture. The expected stripped length is
     # derived from the token stream (vision_start + N grid rows + vision_end + tail) and
     # asserted against the encoder's output, so a core layout change fails fast instead
     # of silently scrambling every slice.
     n_rows = grid_h * grid_w
-    try:
-        tokens = clip.tokenize(VISION_BLOCK, images=[picture_copy], llama_template=KREA2_TEMPLATE)
-    except TypeError as error:
-        raise RuntimeError(
-            "VL refine: this CLIP's tokenizer does not accept images. The node needs a "
-            f"vision-language text encoder (Krea 2 family). ({error})") from error
-    ids = [t[0] for t in tokens[next(iter(tokens))][0]]
-    pad_pos = next((i for i, v in enumerate(ids) if isinstance(v, dict)), None)
-    if pad_pos is None:
-        raise RuntimeError(
-            "VL refine: the tokenizer produced no image tokens. The node needs a "
-            "vision-language text encoder (Krea 2 family).")
-    tail_len = len(ids) - (pad_pos + 2)
+    tokens, tail_len = tokenize_with_image(clip, VISION_BLOCK, picture_copy, llama_template=KREA2_TEMPLATE)
     expected_seq = 1 + n_rows + 1 + tail_len
 
     encoded = clip.encode_from_tokens_scheduled(tokens)
     seq = encoded[0][0].shape[1]
     if seq != expected_seq:
         raise RuntimeError(
-            f"VL refine: encoded conditioning has {seq} rows, expected {expected_seq} (vision grid {grid_h}x{grid_w} "
-            f"+ template tail {tail_len}). The text encoder's template or strip layout does not "
-            "match the Krea 2 contract this node slices by.")
+            f"Context-Anchored Tile Refine (VL): encoded conditioning has {seq} rows, expected "
+            f"{expected_seq} (vision grid {grid_h}x{grid_w} + template tail {tail_len}). The text "
+            "encoder's template or strip layout does not match the Krea 2 contract this node slices by.")
     return encoded, expected_seq
-
-
-def _encode_batch(clip, picture_copy, grid_h, grid_w):
-    # One encode PER BATCH ROW, concatenated on the batch axis. Core's tokenizer attaches
-    # images[0] alone (comfy/text_encoders/qwen_vl.py process_qwen2vl_images reads only the
-    # first row), so handing over a whole [B,H,W,3] picture would condition EVERY image on
-    # row 0's picture. Every row is the same size by construction, so _encode_one's own
-    # seq fail-fast covers layout drift and the rows always cat. A batched cond then passes
-    # through core's machinery unchanged (CONDRegular.process_cond -> repeat_to_batch_size
-    # is an identity when the cond batch already matches the latent's). B=1 takes the single
-    # unchanged encode — no cat, byte-for-byte the pre-batch path.
-    batch = int(picture_copy.shape[0])
-    if batch == 1:
-        return _encode_one(clip, picture_copy, grid_h, grid_w)
-
-    per_row = []
-    expected_seq = None
-    for b in range(batch):
-        encoded, expected_seq = _encode_one(clip, picture_copy[b:b + 1], grid_h, grid_w)
-        per_row.append(encoded)
-
-    merged = []
-    # strict: every row went through the same CLIP on the same token layout, so the encodes
-    # carry the same number of cond entries — a mismatch is a contract break, not truncation.
-    for entries in zip(*per_row, strict=True):
-        # Keep the first row's extras (slice_rows drops the attention_mask per tile);
-        # pooled_output is the one extra that is per-image, so cat it as well.
-        extras = dict(entries[0][1])
-        pooled = extras.get("pooled_output")
-        if isinstance(pooled, torch.Tensor):
-            extras["pooled_output"] = torch.cat([entry[1]["pooled_output"] for entry in entries], dim=0)
-        merged.append([torch.cat([entry[0] for entry in entries], dim=0), extras])
-    return merged, expected_seq
 
 
 def encode_picture(clip, picture, budget):
@@ -218,7 +199,7 @@ def encode_picture(clip, picture, budget):
 
     comfy.model_management.throw_exception_if_processing_interrupted()
     copy, enc_h, enc_w = resample_picture(picture, budget)
-    encoded, expected_seq = _encode_batch(clip, copy, enc_h // MERGED_CELL, enc_w // MERGED_CELL)
+    encoded, expected_seq = _encode_one(clip, copy, enc_h // MERGED_CELL, enc_w // MERGED_CELL)
     return Encode(encoded, enc_h, enc_w, expected_seq, copy)
 
 
@@ -284,7 +265,13 @@ def build_vision_rows(clip, source, tiles, vision, offset_x=0, offset_y=0, with_
     the full grid would have.
     """
     if vision.canvas_tokens <= 0 and vision.crop_tokens <= 0:
-        raise ValueError("VL refine: canvas_tokens and crop_tokens are both 0, so a tile would have no vision rows")
+        raise ValueError("Context-Anchored Tile Refine (VL): canvas_tokens and crop_tokens are both 0, so a tile "
+                         "would have no vision rows")
+    if int(source.shape[0]) != 1:
+        raise ValueError(
+            f"Context-Anchored Tile Refine (VL): the vision pre-pass takes one picture, got a batch of "
+            f"{int(source.shape[0])}. refine_image refines one picture at a time, and core's tokenizer "
+            "reads images[0] only.")
     source_h, source_w = int(source.shape[1]), int(source.shape[2])
     canvas = None
     crop_budget = vision.crop_tokens * PIXELS_PER_TOKEN

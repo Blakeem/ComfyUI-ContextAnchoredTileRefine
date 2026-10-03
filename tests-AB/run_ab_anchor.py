@@ -21,7 +21,7 @@ grid, seam at x=768) — then renders arms that vary ONE mechanism each:
                reasons from (first sigma ~0.90 vs ~0.38 — see the printed sigmas).
 
 Hooks reach production code only through call-time seams (sampling.encode_pixels,
-sampling.tile_gradient, vl._encode_batch), restored in finally; production files are
+sampling.denoise_indicator, vl._encode_one), restored in finally; production files are
 untouched.
 
     <venv-python> tests-AB/run_ab_anchor.py                 # all arms
@@ -434,7 +434,7 @@ def gradring_hook(arm):
         yield
         return
 
-    original = sampling.tile_gradient
+    original = sampling.denoise_indicator
     ring_cells = arm.anchor / 8.0
 
     def hook(crop, core, scale=1):
@@ -447,11 +447,11 @@ def gradring_hook(arm):
         d = torch.sqrt(dx[None, :] ** 2 + dy[:, None] ** 2)
         return (1.0 - d / ring_cells).clamp(0.0, 1.0)
 
-    sampling.tile_gradient = hook
+    sampling.denoise_indicator = hook
     try:
         yield
     finally:
-        sampling.tile_gradient = original
+        sampling.denoise_indicator = original
 
 
 @contextlib.contextmanager
@@ -491,18 +491,18 @@ def vl_scale_hook(arm):
         yield
         return
 
-    original = vl._encode_batch
+    original = vl._encode_one
 
     def hook(clip, canvas_copy, grid_h, grid_w):
         encoded, expected_seq = original(clip, canvas_copy, grid_h, grid_w)
         scaled = [[entry[0] * arm.vl_scale, entry[1]] for entry in encoded]
         return scaled, expected_seq
 
-    vl._encode_batch = hook
+    vl._encode_one = hook
     try:
         yield
     finally:
-        vl._encode_batch = original
+        vl._encode_one = original
 
 
 # ------------------------------------------------------------------ render

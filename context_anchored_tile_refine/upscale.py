@@ -224,8 +224,8 @@ def build_sigmas(model, scheduler, steps, denoise):
 
 def build_guider(model, positive, negative, cfg):
     # comfy_extras/nodes_custom_sampler.py CFGGuider.execute. It must be core's CFGGuider
-    # specifically: the VL path in sampling.refine_image swaps each tile's positive inside
-    # `original_conds`, which is that class's convention.
+    # specifically: sync.build_lane_guiders copies it per lane and replaces
+    # original_conds["positive"], which is that class's convention.
     import comfy.samplers
 
     guider = comfy.samplers.CFGGuider(model)
@@ -235,7 +235,7 @@ def build_guider(model, positive, negative, cfg):
 
 
 def encode_empty(clip):
-    # nodes.py CLIPTextEncode.encode with an empty prompt. The VL node has no prompt input:
-    # this is the positive placeholder vl.py overwrites per tile, and the negative whenever
-    # the optional negative input is unconnected.
+    # nodes.py CLIPTextEncode.encode with an empty prompt. It is the placeholder positive
+    # that each lane's own positive replaces, and the negative whenever no negative is
+    # connected. The prompt input reaches only the VL model, never this encode.
     return clip.encode_from_tokens_scheduled(clip.tokenize(""))

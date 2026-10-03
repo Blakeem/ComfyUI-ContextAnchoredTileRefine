@@ -88,7 +88,7 @@ class LostCondsGuider(SyncGuider):
 
 
 class OverridingModel(BaseModel):
-    """WAN21/WAN22/HunyuanVideo/LTXAV: already holds the frozen region clean, so the ring
+    """WAN22/WAN21_SCAIL2/HunyuanVideo/LTXAV: already holds the frozen region clean, so the ring
     construction the engine is derived for does not apply."""
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
@@ -185,7 +185,7 @@ def test_lane_masks_are_binary_and_already_normalized(comfy_stubs, vl_clip):
     layout = expected_layout()
 
     for tile, lane in zip(layout.tiles, run.lanes, strict=True):
-        expected = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        expected = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         assert lane.denoise_mask.shape == (1, 1, *expected.shape)
         assert lane.denoise_mask.dtype == torch.float32
         assert torch.equal(lane.denoise_mask[0, 0], expected)
@@ -221,7 +221,7 @@ def test_the_region_gate_is_the_max_pool_cover_of_the_mask(comfy_stubs, vl_clip)
     expected_region[:, 4:8, 4:8] = 1.0
     for tile, lane in zip(layout.tiles, run.lanes, strict=True):
         rect = sync._latent_rect(tile.crop_rect)
-        gradient = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        gradient = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         expected = gradient * expected_region[:, rect.y0:rect.y1, rect.x0:rect.x1]
         assert torch.equal(lane.denoise_mask[0], expected)
         assert set(lane.denoise_mask.unique().tolist()) <= {0.0, 1.0}
@@ -1080,6 +1080,43 @@ def test_no_preview_at_step_zero_and_one_bar_over_the_whole_run(comfy_stubs, vl_
     assert [value for value, _total, _preview in pbar.updates] == [1, 2, 3, 4]
     assert pbar.updates[0][2] is None
     assert [update[2] for update in pbar.updates[1:]] == ["preview-1", "preview-2", "preview-3"]
+
+
+def _preview_once(comfy_stubs, previewer, canvas):
+    # One whole-canvas lane through the progress hook at step 1, the first step that previews.
+    comfy_stubs["previewer"] = previewer
+    model_patcher = SimpleNamespace(load_device="cpu", model=SimpleNamespace(latent_format=None))
+    lane = SimpleNamespace(window=(0, canvas.shape[-2], 0, canvas.shape[-1]), denoised=canvas)
+    update = sync.make_sync_progress(model_patcher, 2)
+    update(1, torch.zeros_like(canvas), [lane])
+    return previewer.previews[-1][1]
+
+
+def test_a_taesd_kind_preview_is_cut_to_its_pixel_budget_in_cells(comfy_stubs):
+    # A TAE previewer decodes 8 px per cell, so a 512 px preview needs 64 cells on the long
+    # side. An 8K canvas handed whole would make a TAE previewer's VAE free the DiT per step.
+    import latent_preview
+
+    class TaesdKindPreviewer(RecordingPreviewer, latent_preview.TAESDPreviewerImpl):
+        pass
+
+    preview = _preview_once(comfy_stubs, TaesdKindPreviewer(), torch.rand(1, 16, 1, 576, 1024))
+
+    assert tuple(preview.shape) == (1, 16, 1, 36, 64)
+
+
+def test_a_cell_per_pixel_preview_is_cut_to_the_preview_resolution(comfy_stubs):
+    preview = _preview_once(comfy_stubs, RecordingPreviewer(), torch.rand(1, 16, 1, 576, 1024))
+
+    assert tuple(preview.shape) == (1, 16, 1, 288, 512)
+
+
+def test_a_preview_within_its_budget_arrives_unchanged(comfy_stubs):
+    canvas = torch.rand(1, 16, 1, 36, 64)
+
+    preview = _preview_once(comfy_stubs, RecordingPreviewer(), canvas)
+
+    assert torch.equal(preview, canvas)
 
 
 def test_the_bar_spans_the_whole_picture_batch(comfy_stubs, vl_clip, lane_stamp):

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from test_captions import FakeCaptionClip
+from test_sync import ModelPatcher
 from test_tags import (
     PROMPT_ONLY_THRESHOLD,
     PROMPT_TAGS,
@@ -34,7 +35,8 @@ from test_tags import (
     toolkit_defaults,
 )
 
-from context_anchored_tile_refine import captions, grid, progress, sampling, tags, testing, upscale, vl
+from conftest import BaseModel
+from context_anchored_tile_refine import captions, grid, progress, sampling, sync, tags, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileUpscaleVL
 from context_anchored_tile_refine.testing import (
     ContextAnchoredTileTestCaptions,
@@ -152,6 +154,12 @@ def test_the_second_tiles_core_starts_at_its_scaled_column():
 def test_the_layout_node_rejects_a_batch_above_one():
     with pytest.raises(ValueError, match="got a batch of 2"):
         _solve(image=torch.rand(2, 700, 1000, 3))
+
+
+def test_the_layout_node_rejects_a_linked_context_anchor_off_the_8_grid():
+    # A linked INT skips VALIDATE_INPUTS and core's range check, so the solve re-checks it.
+    with pytest.raises(ValueError, match="context_anchor must be a multiple of 8, got 12"):
+        _solve(context_anchor=12)
 
 
 def test_validate_inputs_returns_the_base_nodes_own_message():
@@ -435,8 +443,20 @@ def test_a_linked_budget_below_one_is_refused_naming_it(comfy_stubs, name):
     # caption budget.
     clip = _asking_clip()
 
-    with pytest.raises(ValueError, match=rf"was given {name} 0.*budget of 1 token or more"):
+    with pytest.raises(ValueError, match=rf"was given {name} 0.*between 1 and {captions.MAX_CAPTION_TOKENS} tokens"):
         _caption(clip, global_style_instruction="name the medium", **{name: 0})
+    assert clip.generate_calls == []
+
+
+@pytest.mark.parametrize("name", ["tile_caption_max_tokens", "global_style_max_tokens"])
+def test_a_linked_budget_above_the_cap_is_refused_naming_it(comfy_stubs, name):
+    # A linked value bypasses the widget's max, which is the settings file's typo guard.
+    clip = _asking_clip()
+    over = captions.MAX_CAPTION_TOKENS + 1
+    message = rf"was given {name} {over}.*between 1 and {captions.MAX_CAPTION_TOKENS} tokens"
+
+    with pytest.raises(ValueError, match=message):
+        _caption(clip, global_style_instruction="name the medium", **{name: over})
     assert clip.generate_calls == []
 
 
@@ -472,7 +492,6 @@ def test_the_caption_kind_writes_from_the_sockets_and_the_budget_widgets(comfy_s
     # The style caption is kept apart from the tile captions. The Render node joins them.
     assert result.written.style == ("asked name the medium",)
     assert result.written.captions == (("asked name the objects",),) * 2
-    assert result.written.preset == "Tile Test: Captions"
     assert result.written.kind == captions.TILE_TEXT_CAPTION
 
 
@@ -745,7 +764,6 @@ def _tag_run(clip=None, **overrides):
 def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
     clip, result = _tag_run()
 
-    assert result.written.preset == "Tile Test: Captions"
     assert result.written.kind == captions.TILE_TEXT_TAGS
     assert result.written.captions == (("red apple, moon",),) * 2
     assert result.written.style == ("Oil painting.",)
@@ -1181,16 +1199,16 @@ def _captions_for(layout, only=None, style=None):
         grid=(layout.layout.sol_x.n, layout.layout.sol_y.n),
         rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
                     for tile in tiles),
-        preset="standard",
     )
 
 
 def _render(monkeypatch, layout=None, image=None, given_captions=None, negative=None,
-            sigmas=None, recorded=None, **overrides):
+            sigmas=None, recorded=None, model=None, real_preconditions=False, **overrides):
     """Run the Render node with every collaborator faked; return (recorded, result).
 
     `recorded` may be passed in, so a test that expects a raise can still read how far the node
-    got before it."""
+    got before it. The engine's precondition check is faked too, since the default MODEL is a
+    bare object, unless `real_preconditions` asks for it with a MODEL it can read."""
     recorded = {} if recorded is None else recorded
     recorded.update({
         "calls": [],
@@ -1232,6 +1250,9 @@ def _render(monkeypatch, layout=None, image=None, given_captions=None, negative=
     monkeypatch.setattr(upscale, "build_guider", fake_build_guider)
     monkeypatch.setattr(upscale, "build_sigmas", fake_build_sigmas)
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+    monkeypatch.setattr(sampling, "_check_sync_intake", lambda sampler, sigmas, sampler_name=None: None)
+    if not real_preconditions:
+        monkeypatch.setattr(sync, "check_preconditions", lambda model_patcher, sigmas, anchor_source: None)
     # The noise object stays REAL, since its rect is what the block run is pinned on. Only the
     # field provider is a sentinel, so the value refine_image receives is traceable to it.
     monkeypatch.setattr(upscale.SlicedCanvasNoise, "noise_fields",
@@ -1240,7 +1261,7 @@ def _render(monkeypatch, layout=None, image=None, given_captions=None, negative=
     recorded["layout"] = _render_layout() if layout is None else layout
     target = recorded["layout"].target_size
     recorded["image"] = torch.rand(1, target[1], target[0], 3) if image is None else image
-    recorded["model"] = object()
+    recorded["model"] = object() if model is None else model
     recorded["clip"] = object()
     recorded["vae"] = FakeVAE()
 
@@ -1641,6 +1662,28 @@ def test_a_block_whose_ring_reaches_past_its_neighbour_is_rejected_before_the_cl
     with pytest.raises(ValueError, match="so a tile's frozen ring reaches past its bordering tile"):
         _render(monkeypatch, layout=layout, tiles="5", recorded=recorded)
     assert recorded["build_sigmas"] is None and recorded["encode_empty"] is None
+
+
+class EpsModelSampling:
+    """A model_sampling that is not CONST, as an SD1.5 or SDXL MODEL carries."""
+
+
+@pytest.mark.parametrize(("model_sampling", "anchor_source", "message"), [
+    (EpsModelSampling(), "source image", "CONST"),
+    (None, "live canvas", r"x / \(1 - sigma\)"),
+])
+def test_engine_preconditions_are_refused_before_the_clip_call(comfy_stubs, monkeypatch, model_sampling,
+                                                               anchor_source, message):
+    # Each needs only the MODEL and the schedule, so it lands before the text-encoder load. The
+    # default schedule starts at sigma 1.0.
+    recorded = {}
+    model = ModelPatcher(BaseModel(model_sampling=model_sampling))
+
+    with pytest.raises(RuntimeError, match=message):
+        _render(monkeypatch, recorded=recorded, model=model, real_preconditions=True,
+                anchor_source=anchor_source)
+
+    assert recorded["encode_empty"] is None and recorded["calls"] == []
 
 
 def test_the_render_node_rejects_an_image_that_is_not_an_image_tensor(comfy_stubs, monkeypatch):

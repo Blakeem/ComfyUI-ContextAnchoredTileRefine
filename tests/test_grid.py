@@ -503,7 +503,7 @@ def test_sub_layout_rejects_an_invalid_range():
 
 # --- Equivalence with the harness rule that produced the judged renders ---
 # block_rect, block_layout and block_mask, inlined from tests-AB/run_ab_tile_phantom.py. That rule
-# produced TESTS.md test 10's judged renders, so it is kept here as the reference after its removal
+# produced the harness's judged renders, so it is kept here as the reference after its removal
 # from the harness.
 
 

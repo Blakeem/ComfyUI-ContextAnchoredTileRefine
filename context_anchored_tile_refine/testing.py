@@ -28,9 +28,9 @@ survive a seed re-roll further down the chain. Its tiles output feeds the Render
 input, so one tile is captioned and rendered together.
 
 `ContextAnchoredTileTestRender` runs the production VL engine over that canvas. Named tiles
-are rendered one at a time as region runs over the block the tile and its bordering tiles
-occupy, at the parent grid's own rects, captions and noise slice, so one tile can be judged
-without paying for the entire canvas.
+are rendered one at a time as region runs over the block the tile occupies, with its
+bordering tiles when with_neighbors is on, at the parent grid's own rects, captions and noise
+slice, so one tile can be judged without paying for the entire canvas.
 
 The `TestLayout` object carries the widgets the grid was solved from, so every node further
 down the chain reads its geometry from the LAYOUT rather than from its own copy of the
@@ -47,7 +47,7 @@ from typing import ClassVar
 
 import torch
 
-from . import captions, grid, node, progress, sampling, tags, upscale, vl
+from . import captions, grid, node, progress, sampling, sync, tags, upscale, vl
 
 CAPTIONS_NODE = "Tile Test: Captions"
 
@@ -161,8 +161,8 @@ class TestCaptions:
     captioned. A caption belongs to a tile rect,
     so `target_size`, `grid` (columns, rows) and `rects` (every tile's `crop_rect` as (x0, y0,
     x1, y1), in order) let a consumer reject captions written for another grid at the same
-    size. `preset` is the label they were written from and `kind` that preset's tile text
-    kind, so a tags set holds each tile's tag text where a caption set holds its caption.
+    size. `kind` is the tile text kind, so a tags set holds each tile's tag text where a
+    caption set holds its caption.
 
     `str()` is the Markdown listing, which is what core's Preview as Text node shows for a
     value it cannot serialize as JSON, so the socket reads the same as the tile_texts output.
@@ -174,7 +174,6 @@ class TestCaptions:
     target_size: tuple
     grid: tuple
     rects: tuple
-    preset: str
     kind: str = captions.TILE_TEXT_CAPTION
 
     def __str__(self):
@@ -349,6 +348,7 @@ class ContextAnchoredTileTestLayout:
 
     def solve_layout(self, image, upscale_by, max_tile_width, max_tile_height, context_anchor, context_overlap):
         # ---- inputs
+        node._require_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
         if image.shape[0] != 1:
             raise ValueError(
                 f"Tile Test: Layout lays out one picture at a time, got a batch of {image.shape[0]}.")
@@ -505,13 +505,13 @@ def _check_tags_texts(texts):
 
 
 def _check_budget(name, value):
-    # A linked value bypasses the widget's min, and a tags Tile Test: Settings node outputs 0
-    # for the caption budget it does not carry.
-    if value < 1:
+    # A linked value bypasses the widget's min and max, and a tags Tile Test: Settings node
+    # outputs 0 for the caption budget it does not carry.
+    if not 1 <= value <= captions.MAX_CAPTION_TOKENS:
         raise ValueError(
-            f"{CAPTIONS_NODE} was given {name} {value}, and a caption needs a budget of 1 token "
-            f"or more. Set {name} to 1 or more, or link it from a Tile Test: Settings node whose "
-            "preset carries it.")
+            f"{CAPTIONS_NODE} was given {name} {value}, and a caption budget is between 1 and "
+            f"{captions.MAX_CAPTION_TOKENS} tokens. Set {name} in that range, or link it from a "
+            "Tile Test: Settings node whose preset carries it.")
 
 
 def _check_score(name, value, above_zero=False):
@@ -896,8 +896,8 @@ class ContextAnchoredTileTestCaptions:
 
     @classmethod
     def IS_CHANGED(s, **kwargs):
-        # ComfyUI folds this value into the node's cache key, and the preset's [vision] table
-        # is read from the settings file at run time, so the key follows the file.
+        # A settings file edit re-runs the chain from this node down, and the caption and tag
+        # caches serve every text that did not change.
         return captions.settings_fingerprint()
 
     def caption_tiles(self, image, layout, clip, tiles, with_neighbors, position_terms,
@@ -967,7 +967,6 @@ class ContextAnchoredTileTestCaptions:
             grid=(columns, layout.layout.sol_y.n),
             rects=tuple((tile.crop_rect.x0, tile.crop_rect.y0, tile.crop_rect.x1, tile.crop_rect.y1)
                         for tile in all_tiles),
-            preset=run_preset.label,
             kind=run_preset.kind,
         )
         return (result, str(result), ", ".join(str(index) for index in named), *debug)
@@ -1123,8 +1122,9 @@ class ContextAnchoredTileTestRender:
 
     This is a testing node and not one of the production nodes. With an empty tiles list it is
     a full run over the canvas and returns the refined picture. With a comma separated list of
-    tile numbers it renders each named tile as one region run, over the block that tile and its
-    bordering tiles occupy, and returns the tiles and the blocks as image lists.
+    tile numbers it renders each named tile as one region run, over the block that tile
+    occupies, with its bordering tiles when with_neighbors is on, and returns the tiles and the
+    blocks as image lists.
     The geometry comes from the layout and the captions from Tile Test: Captions, so a tile can
     be re-rendered at a new seed or a new token count while every node above stays cached.
     """
@@ -1208,9 +1208,12 @@ class ContextAnchoredTileTestRender:
         sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
         if sigmas.numel() < 2:
             return _unsampled_lists(image, layout, requested)
+        sampler = comfy.samplers.sampler_object(sampler_name)
+        # These rejections need no GPU, and the text-encoder load below costs minutes.
+        sampling._check_sync_intake(sampler, sigmas, sampler_name)
+        sync.check_preconditions(model, sigmas, anchor_source)
         empty = upscale.encode_empty(clip)
         guider = upscale.build_guider(model, empty, negative or empty, cfg)
-        sampler = comfy.samplers.sampler_object(sampler_name)
         if not requested:
             refined = sampling.refine_image(
                 image, guider, sampler, sigmas, vae, upscale.Noise_RandomNoise(seed),

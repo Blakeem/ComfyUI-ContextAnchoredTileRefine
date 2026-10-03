@@ -44,7 +44,7 @@ def test_zero_displacement_reproduces_the_straight_ramp_bit_for_bit():
     assert torch.equal(_alpha(disp_left=zeros_left), _alpha())
 
 
-# --- The core-safety invariant, which every seam mode must respect ------------------------
+# --- The core-safety invariant, which every min-error displacement must respect -----------
 # Inside the core, `region` is RAW un-refined canvas (no tile has pasted there yet), so any
 # alpha < 1 would blend raw pixels into finished content. The ramp is only ever written into
 # the band slice, so this must hold for ANY displacement, however extreme.
