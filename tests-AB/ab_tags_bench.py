@@ -402,12 +402,38 @@ def arm_baseline(ctx, scene, prompt, canvas, layout):
     return trace_record(run, scene.tiles, per_tile, total)
 
 
+def arm_prior(ctx, scene, prompt, canvas, layout):
+    """The shipped pass with the library's running prior on, learned across one picture's tiles.
+
+    The toolkit builds its classifier with the prior off. This arm asks whether the prior,
+    which the library's HTTP service runs by default, would help the tile pass.
+    """
+    from logit_classifier.classifier import Classifier
+
+    from context_anchored_tile_refine import tags
+
+    original = tags.build_classifier
+
+    def with_prior(clip):
+        shipped = original(clip)
+        return Classifier(replace(shipped.config, use_prior_debias=True, calibration_path=None), shipped.backend)
+
+    tags.build_classifier = with_prior
+    try:
+        return arm_baseline(ctx, scene, prompt, canvas, layout)
+    finally:
+        tags.build_classifier = original
+
+
 # The shipped pass under the labels of its three recorded runs, which were logged at different
-# commits. A rerun of any label runs today's code into that label's record.
+# commits. A rerun of any label runs today's code into that label's record. `prior-off` and
+# `prior-on` are the running prior A/B, both run on one commit.
 ARMS = {
     "baseline": arm_baseline,
     "base+graphs": arm_baseline,
     "prod": arm_baseline,
+    "prior-off": arm_baseline,
+    "prior-on": arm_prior,
 }
 
 
