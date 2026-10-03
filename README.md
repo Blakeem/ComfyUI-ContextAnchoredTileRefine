@@ -120,6 +120,7 @@ Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-C
 |---|:-:|:-:|:-:|
 | [Dynamic tile layout](#dynamic-tile-layout) | ✓ | ✓ | ✓ |
 | [Context rings](#context-rings) | ✓ | ✓ | ✓ |
+| [Shared noise](#shared-noise) | ✓ | ✓ | ✓ |
 | [Anchor conditioning](#anchor-conditioning) | ✓ | | |
 | [Directional feather](#directional-feather) | ✓ | ✓ | ✓ |
 | [Minimum error boundary cut](#minimum-error-boundary-cut) | ✓ | | |
@@ -144,6 +145,10 @@ The grid is solved from the image size and `max_tile_width` / `max_tile_height`.
 #### Context rings
 
 Each tile is sampled with two extra rings that are cropped away after. `context_overlap` is the band shared with the neighboring tiles. `context_anchor` is pure context beyond that. The tile conditions on the anchor ring, so it continues its neighbors instead of drifting away from them. On the VL nodes, [`anchor_source`](#anchor-source) picks what the ring shows.
+
+#### Shared noise
+
+Each tile starts from its part of one noise pattern over the entire image. Samplers such as `dpmpp_2m_sde` add fresh noise at every step, and each step's noise comes from one pattern in the same way. This way both tiles that diffuse a shared band add the same noise there, so the feather blends two similar textures. On the base node, `dpmpp_sde` (both variants) draws its step noise per tile, since its draws within a step depend on each other. Samplers implemented in other node packs also draw it per tile.
 
 ### Seams on the base node
 
