@@ -86,7 +86,7 @@ def test_masked_refine_anchor0_corner_mask_on_non_multiple_image(comfy_stubs):
 
 def test_region_gate_is_grad_times_region_latent(comfy_stubs):
     # ctx=8 extends the crop to the full /8 image so background cells (region 0) sit inside
-    # the crop; overlap=16 forces a 2x2 grid so denoise_indicator is a real ring indicator.
+    # the crop. overlap=16 forces a 2x2 grid so denoise_indicator is a real ring indicator.
     image = torch.rand(1, 80, 80, 3)
     mask = torch.zeros(1, 80, 80)
     mask[:, 16:64, 16:64] = 1.0

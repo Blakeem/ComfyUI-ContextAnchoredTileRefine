@@ -1,5 +1,5 @@
 """tests-AB/ab_tags_bench.py's export: one manifest entry per tile and prompt, and PNGs that keep an
-8-bit crop's pixels. Also its run's refusal to mix encoders in one record."""
+8-bit crop's pixels. Also its run's refusal to mix encoders or library versions in one record."""
 
 import importlib.util
 import io
@@ -82,11 +82,24 @@ def test_a_run_refuses_a_record_holding_another_encoders_results(bench):
     fp8, int8 = "qwen3vl_4b_fp8_scaled.safetensors", "qwen3-vl-4b-heretic_int8.safetensors"
     record = {"cyber8k": {"none": {"clip": fp8}, "long": {"clip": fp8}}}
 
-    bench.check_record_encoder({}, fp8, "prod.json")
-    bench.check_record_encoder(record, fp8, "prod.json")
-    with pytest.raises(SystemExit, match=f"prod.json holds results from {fp8}, and this run uses {int8}"):
-        bench.check_record_encoder(record, int8, "prod.json")
+    bench.check_record_stamp({}, "clip", fp8, "prod.json")
+    bench.check_record_stamp(record, "clip", fp8, "prod.json")
+    with pytest.raises(SystemExit, match=f"prod.json holds results with clip {fp8}, and this run uses clip {int8}"):
+        bench.check_record_stamp(record, "clip", int8, "prod.json")
     # A result from before the stamp counts as another encoder.
     record["cyber8k"]["short"] = {}
-    with pytest.raises(SystemExit, match=f"from {fp8}, unstamped, and .* Pass --fresh"):
-        bench.check_record_encoder(record, fp8, "prod.json")
+    with pytest.raises(SystemExit, match=f"with clip {fp8}, unstamped, and .* Pass --fresh"):
+        bench.check_record_stamp(record, "clip", fp8, "prod.json")
+
+
+def test_a_run_refuses_a_record_holding_another_library_versions_results(bench):
+    record = {"cyber8k": {"none": {"logit_classifier": "0.5.0"}}}
+
+    bench.check_record_stamp(record, "logit_classifier", "0.5.0", "prior-on.json")
+    with pytest.raises(SystemExit, match=r"with logit_classifier 0\.5\.0, and this run uses logit_classifier 0\.6\.0"):
+        bench.check_record_stamp(record, "logit_classifier", "0.6.0", "prior-on.json")
+    # The prior records predate the stamp, so a partial rerun of them needs --fresh.
+    unstamped = {"cyber8k": {"none": {"clip": "qwen3vl_4b_fp8_scaled.safetensors"}}}
+    with pytest.raises(SystemExit, match=r"with logit_classifier unstamped, and this run uses logit_classifier "
+                                         r"0\.5\.0\. Pass --fresh"):
+        bench.check_record_stamp(unstamped, "logit_classifier", "0.5.0", "prior-on.json")

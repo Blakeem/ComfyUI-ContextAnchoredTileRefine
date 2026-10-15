@@ -730,14 +730,15 @@ def present_live_ring(lanes, ring_gates, sigma, zero_noise=False):
     THE ALGEBRA. comfy rebuilds the model's input at every eval as
         x * denoise_mask + scale_latent_inpaint(sigma, noise, latent_image) * (1 - denoise_mask)
     (samplers.py:634-643), and core's default scale_latent_inpaint is CONST's noise_scaling,
-    `sigma * noise + (1 - sigma) * latent_image` (model_base.py:415 — the precondition check
-    rejects every model that overrides it). So with a lane's `noise` ring cells zeroed ONCE and
-    its `latent_image` ring cells rewritten each step to `x_ring / (1 - sigma_step)`, the
-    presented ring collapses to exactly `x_ring` — and `x` is the consolidated canvas, because
-    the surgery hook has just scattered it into every lane. Two consequences, both deliberate:
-      * the equality is EXACT at each step's FIRST eval, which is where the hook runs; a
+    `sigma * noise + (1 - sigma) * latent_image` (model_base.py:415). The precondition check
+    rejects every model that overrides scale_latent_inpaint. So with a lane's `noise` ring
+    cells zeroed ONCE and its `latent_image` ring cells rewritten each step to
+    `x_ring / (1 - sigma_step)`, the presented ring collapses to exactly `x_ring`. Here `x` is
+    the consolidated canvas, because the surgery hook has just scattered it into every lane.
+    Two consequences, both deliberate:
+      * the equality is EXACT at each step's FIRST eval, which is where the hook runs. A
         2-eval sampler's intra-step eval sees the same state rescaled by
-        (1 - sigma_mid) / (1 - sigma_step) — the same within-step deviation a stock
+        (1 - sigma_mid) / (1 - sigma_step). That is the same within-step deviation a stock
         frozen-ring run carries (tests-AB/run_ab_sync.py:117-121), not a defect.
       * `1 - sigma_step` must stay positive. check_preconditions already rejects a schedule
         starting at sigma >= 1 in this mode and sigmas are strictly decreasing, so this guard

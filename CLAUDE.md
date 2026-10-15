@@ -132,6 +132,8 @@ without that doc's temporal design.
   encode/sample/decode from a live canvas, directional-feather composite, crop back). With a mask
   it crops to the mask bbox plus `context_anchor`, gates every tile's denoise mask to the region,
   and composites back through a 1px anti-aliased edge, leaving everything outside byte-identical.
+  The shipped package writes no debug files. The seam debug dump of a raster run, every tile's
+  intermediates as PNGs, is the `tests-AB/seam_dump.py` context manager.
   **THE SHARED STEP NOISE (2026-10-03)**: a stochastic sampler's PER-STEP draws on the raster path
   come from ONE canvas-wide field, as its start noise already did. `_refine_tiles` calls
   `build_step_noise` once (the swap point a harness patches), and for a sampler named in
@@ -235,17 +237,18 @@ without that doc's temporal design.
   before the decode.
 - `context_anchored_tile_refine/sync.py`: the VL path's engine — the run's components, the run
   loop (`_refine_canvas`) and the region path (`refine_sync`, which owns the bbox crop and the
-  1px anti-aliased composite back). Stages: solve the grid ONCE and run the VL conditioning
-  pre-pass over THAT layout, so a tile's positive can never be sliced for a rect it does not
-  sample; per-tile `vae.encode` of each tile's RAW `encode_window` with the butted CORES
-  assembled into ONE canvas latent C_0 and coverage asserted (never a whole-canvas VAE call — its
-  ~21 GiB spike is why the engine tiles at all); ONE canvas-shaped noise draw sliced per lane, the identical
-  contract as the raster path so a picture keeps the noise it would have had; one lane per tile,
-  each with its OWN guider carrying that tile's positive; ONE stepper run whose per-step hook
-  consolidates the lanes into the maintained canvas (directional feather at LATENT scale, raster
-  order) and scatters every window back, so no two lanes disagree on a shared cell at a step
-  start; then per-tile decode of the CANVAS windows — never a lane's own `x`, whose ring cells
-  carry the unrefined source — composited by the stock pixel feather.
+  1px anti-aliased composite back). The stages run in this order. The grid is solved ONCE and
+  the VL conditioning pre-pass runs over THAT layout, so a tile's positive can never be sliced
+  for a rect it does not sample. Each tile's RAW `encode_window` gets its own `vae.encode`, and
+  the butted CORES are assembled into ONE canvas latent C_0 with coverage asserted. The engine
+  never makes a whole-canvas VAE call, since that call's ~21 GiB spike is why the engine tiles
+  at all. ONE canvas-shaped noise draw is sliced per lane, the identical contract as the raster
+  path, so a picture keeps the noise it would have had. Each tile is one lane with its OWN
+  guider carrying that tile's positive. ONE stepper run's per-step hook consolidates the lanes
+  into the maintained canvas (directional feather at LATENT scale, raster order) and scatters
+  every window back, so no two lanes disagree on a shared cell at a step start. Each tile then
+  decodes its CANVAS window, never a lane's own `x`, whose ring cells carry the unrefined
+  source. The stock pixel feather composites the decoded windows.
 - **The two VAE windows are sized to what each stage KEEPS, not to the sampled extent**
   (`VAE_ENCODE_MARGIN` / `VAE_DECODE_MARGIN` and `encode_window` / `decode_window` in
   `sync.py`). Both calls used the whole `crop_rect` until 2026-08-22, which is
@@ -485,7 +488,9 @@ without that doc's temporal design.
   (frozen and hashable), the pixel caps, the position words and threshold, the style instruction,
   the prompt and the scope. Bench and log: `tests-AB/ab_tags_bench.py`,
   `tests-AB/tags-bench-log.md`. torch + stdlib at module scope, comfy and logit_classifier lazy,
-  so a missing library fails with its pip command.
+  so a missing library fails with its pip command. `captions.comfy_toolkit` also compares the
+  library's `__version__` against `captions.LIBRARY_VERSION` (0.5.0, the plural grounding fix),
+  never importlib.metadata, since an editable install can keep a stale dist version.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the

@@ -308,12 +308,12 @@ class ArmPatches:
                 else self.captions_mod.VLM_METHOD_VISION)
 
     def preset(self):
-        """The standard preset's wording (RICH_GROUPED, 768 tokens, no style caption) at the
+        """The (standard) preset's question (ab_env.rich_grouped_question, no style caption) at the
         arm's megapixels. Built directly so the 2 MP ceiling settings.toml enforces does not
         apply: the sweep exists to look past it."""
-        standard = self.captions_mod.resolve_method(f"{self.captions_mod.VLM_METHOD_CAPTIONS} (standard)")
-        return dataclasses.replace(standard, label=f"budget-sweep-{self.arm}",
-                                   vision=dataclasses.replace(standard.vision, caption_megapixels=self.megapixels))
+        pinned = ab_env.caption_preset(*ab_env.rich_grouped_question(), surface=self.captions_mod.VLM_METHOD_CAPTIONS)
+        return dataclasses.replace(pinned, label=f"budget-sweep-{self.arm}",
+                                   vision=dataclasses.replace(pinned.vision, caption_megapixels=self.megapixels))
 
     def __enter__(self):
         captions, vl = self.captions_mod, self.vl_mod

@@ -90,9 +90,8 @@ THING_THRESHOLD = 0.1
 
 def check_tags_ready(clip):
     """Raises before any generate when a tags preset cannot run: a logit_classifier missing or
-    older than captions.LIBRARY_VERSION, or a CLIP that is not a Qwen3-VL text encoder with its
-    vision tower. The library is never judged by importlib.metadata, since an editable install
-    can report a stale version in its dist metadata."""
+    older than captions.LIBRARY_VERSION (the version gate in captions.comfy_toolkit), or a CLIP
+    that is not a Qwen3-VL text encoder with its vision tower."""
     build_classifier(clip)
 
 

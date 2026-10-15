@@ -143,25 +143,17 @@ def _digest(payload):
 
 
 def _arm_instruction(method):
-    """This campaign's instruction table, with the "pos" arms pinned rather than resolved
-    through the live lookup.
+    """This campaign's instruction table, pinned rather than resolved through the live lookup.
 
-    The live wording (captions.resolve_method over settings.toml, prompts.toml before that,
-    CAPTION_INSTRUCTIONS before that) moved VLM_METHOD_VISION_CAPTIONS from SETTLED_POSITION
-    to RICH_GROUPED on 2026-08-16. Resolving through it would silently re-caption the "pos"
-    arms with the "vlcap" arms' text, making the two render identically while every label,
-    PNG tEXt stamp and cache key still said "settled-position". The "pos" arms stay pinned to
-    the instruction they were judged with, and the other arms are pinned to the (standard)
-    preset, whose tile_caption_instruction IS RICH_GROUPED_INSTRUCTION character for
-    character. Resolving the bare method would take the settings file's FIRST preset, which
-    is (artwork) and a different question, re-captioning the -cap/-vlcap arms while their
-    cache key still stamped "rich-grouped"."""
+    The live wording moves with the settings file, so resolving it would re-caption a judged
+    arm while every label, PNG tEXt stamp and cache key still named the old question. The
+    "pos" arms keep the SETTLED_POSITION wording they were judged with. The -cap and -vlcap
+    arms keep the (standard) preset's question (ab_env.rich_grouped_question)."""
     from context_anchored_tile_refine import captions
 
     if method == captions.VLM_METHOD_VISION_CAPTIONS:
         return captions.SETTLED_POSITION_INSTRUCTION, captions.SETTLED_POSITION_MAX_TOKENS
-    preset = captions.resolve_method(f"{method} (standard)")
-    return preset.tile_caption_instruction, preset.tile_caption_max_tokens
+    return ab_env.rich_grouped_question()
 
 
 def load_or_generate_captions(scene, clip, padded, tiles, force, method=None):

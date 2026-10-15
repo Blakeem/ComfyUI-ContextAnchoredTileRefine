@@ -1067,17 +1067,69 @@ def test_the_guard_refuses_a_clip_loaded_without_its_vision_tower_naming_the_nod
 def test_the_guard_names_the_pip_command_when_the_library_is_missing_or_too_old(monkeypatch, module):
     monkeypatch.setitem(sys.modules, module, None)
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
+    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.5.0"')):
         tags.check_tags_ready(FakeTagClip())
 
 
-def test_the_guard_names_the_pip_command_for_a_0_3_library_without_presence_statement(monkeypatch):
-    import logit_classifier.toolkit.tags as library_tags
+# A pre-release or a dev build of the floor sorts below it, as pip orders it.
+@pytest.mark.parametrize("version", ["0.4.0", "0.4.99rc1", "0.5.0rc1", "0.5.0.dev1", "0.5.0a1"])
+def test_the_guard_names_the_pip_command_for_a_library_older_than_the_floor(monkeypatch, version):
+    import logit_classifier
 
-    monkeypatch.delattr(library_tags, "presence_statement")
+    monkeypatch.setattr(logit_classifier, "__version__", version)
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
+    with pytest.raises(RuntimeError, match=re.escape(f'version {version} is installed. Install or upgrade it in the '
+                                                     'ComfyUI Python environment with: pip install -U '
+                                                     '"logit-classifier>=0.5.0"')):
         tags.check_tags_ready(FakeTagClip())
+
+
+# "0.10.0" pins an integer compare, since a string compare orders it below "0.5.0". A local or a post
+# suffix counts as the release, and a pre-release of a later release is above the floor.
+@pytest.mark.parametrize("version", ["0.5.0", "0.5", "0.5.1", "0.10.0", "0.5.0+local", "0.5.0.post1",
+                                     "0.5.1rc1", "1.0.0rc1"])
+def test_the_version_gate_passes_the_floor_and_every_newer_library(monkeypatch, version):
+    import logit_classifier
+    import logit_classifier.toolkit.comfyui as toolkit
+
+    monkeypatch.setattr(logit_classifier, "__version__", version)
+
+    assert captions.comfy_toolkit() is toolkit
+
+
+@pytest.mark.parametrize("version", ["dev", "", "0.5.0-garbage"])
+def test_the_version_gate_refuses_a_version_it_cannot_read(monkeypatch, version):
+    import logit_classifier
+
+    monkeypatch.setattr(logit_classifier, "__version__", version)
+
+    with pytest.raises(RuntimeError, match=re.escape(f"reports version {version!r}, which is not a version number. "
+                                                     'Install or upgrade it in the ComfyUI Python environment with: '
+                                                     'pip install -U "logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
+
+
+# packaging raises TypeError, not InvalidVersion, for a version that is not a string.
+def test_the_version_gate_refuses_a_version_that_is_not_a_string(monkeypatch):
+    import logit_classifier
+
+    monkeypatch.setattr(logit_classifier, "__version__", 5)
+
+    with pytest.raises(RuntimeError, match=re.escape("reports version 5, which is not a version number. "
+                                                     'Install or upgrade it in the ComfyUI Python environment with: '
+                                                     'pip install -U "logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
+
+
+def test_the_version_gate_refuses_a_library_that_reports_no_version(monkeypatch):
+    import logit_classifier
+
+    monkeypatch.delattr(logit_classifier, "__version__")
+
+    with pytest.raises(RuntimeError, match=re.escape('the installed library reports no version. Install or upgrade it '
+                                                     'in the ComfyUI Python environment with: pip install -U '
+                                                     '"logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
 
 
 def test_the_strip_statements_are_the_librarys_presence_statements():

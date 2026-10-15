@@ -805,25 +805,45 @@ def picture_digest(picture):
     return (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
 
 
-# logit_classifier.toolkit arrived in 0.3.0, and presence_statement, which tags.py builds each strip statement with,
-# in 0.4.0.
-LIBRARY_VERSION = "0.4.0"
+# 0.5.0 grounds a prompt tag "sky" in a prompt reading "skies". The tags pass keeps a prompt tag only when every word
+# grounds, so an older library drops correct prompt tags.
+LIBRARY_VERSION = "0.5.0"
+
+
+def _library_error(reason):
+    return RuntimeError(
+        f"Context-Anchored Tile Refine (VL): every VL run needs logit-classifier {LIBRARY_VERSION} or newer, "
+        f"and {reason}. Install or upgrade it in the ComfyUI Python environment with: "
+        f'pip install -U "logit-classifier>={LIBRARY_VERSION}"')
 
 
 def comfy_toolkit():
     """logit_classifier.toolkit.comfyui, or a RuntimeError naming the pip command that installs
-    LIBRARY_VERSION when the library is missing or older."""
-    try:
-        import logit_classifier.toolkit.comfyui as toolkit
+    LIBRARY_VERSION when the library is missing, older, or reports no version this gate can read."""
+    installed = None
+    installed_version = None
 
-        # A 0.3 library would otherwise pass here and fail at the strips, after the tile generates.
-        from logit_classifier.toolkit.tags import presence_statement  # noqa: F401
+    try:
+        import logit_classifier
+        import logit_classifier.toolkit.comfyui as toolkit
     except ImportError as error:
-        raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): every VL run needs logit-classifier "
-            f"{LIBRARY_VERSION} or newer, and its toolkit cannot be imported "
-            f"({error}). Install or upgrade it in the ComfyUI Python environment with: "
-            f'pip install -U "logit-classifier>={LIBRARY_VERSION}"') from error
+        raise _library_error(f"its toolkit cannot be imported ({error})") from error
+    # Core requires transformers, which requires packaging, so pip's own PEP 440 ordering is present wherever this
+    # node runs.
+    from packaging.version import InvalidVersion, Version
+
+    # The module attribute, never importlib.metadata, since an editable install can keep a stale version in its
+    # dist metadata.
+    installed = getattr(logit_classifier, "__version__", None)
+    if installed is None:
+        raise _library_error("the installed library reports no version")
+    try:
+        installed_version = Version(installed)
+    except (InvalidVersion, TypeError) as error:
+        raise _library_error(
+            f"the installed library reports version {installed!r}, which is not a version number") from error
+    if installed_version < Version(LIBRARY_VERSION):
+        raise _library_error(f"version {installed} is installed")
     return toolkit
 
 

@@ -3,14 +3,14 @@
 Core rebuilds a control's working hint from `cond_hint_original` whenever the latent shape
 disagrees with the cached one, by center-crop-to-aspect plus rescale onto the current latent
 (the shape check and hint rebuild in `ControlNet.get_control`). Handed a FULL-image hint,
-every tile therefore gets the wrong content at the wrong scale. Handed a hint already cut to
-the tile's `crop_rect` — whose dims are /8 by construction, matching `compression_ratio` — that
+every tile therefore gets the wrong content at the wrong scale. A tile's `crop_rect` has /8
+dims by construction, matching `compression_ratio`. Handed a hint already cut to that rect, the
 rescale is an identity and the hint lands aligned. That is the whole feature: no new node
 inputs, no resampling anywhere.
 
 Control objects are DUCK-TYPED here (`copy()`, `set_previous_controlnet()`,
-`cond_hint_original`, `extra_concat_orig`, `previous_controlnet`) so this module — like
-`sampling.py` — imports torch and stdlib only at module scope, never `comfy`.
+`cond_hint_original`, `extra_concat_orig`, `previous_controlnet`) so this module, like
+`sampling.py`, imports torch and stdlib only at module scope, never `comfy`.
 
 Only the `control` key is transformed. The other spatial cond keys (`gligen`, `area`, `mask`,
 `reference_latents`) pass through untouched: their coordinate-space semantics on the node's mask
@@ -152,7 +152,7 @@ def strip_control(original_conds):
 
 def _iter_controls(original_conds):
     # Every control object reachable from the conds, chain links included. Objects repeat (the
-    # positive and negative dicts share one `c_net`, `ControlNetApplyAdvanced`); callers memoize.
+    # positive and negative dicts share one `c_net`, `ControlNetApplyAdvanced`), so callers memoize.
     for cond_list in original_conds.values():
         for cond in cond_list:
             control = cond.get("control")
@@ -177,8 +177,8 @@ def _crop_hint(tensor, crop_rect):
 
 def _copy_control(control, hint_canvas, crop_rect, memo):
     # One chain link, memoized by id(original) so the positive and negative cond dicts that
-    # share one control object (`ControlNetApplyAdvanced`) share one copy — mirroring core, and
-    # halving the hint caches a doubled copy would build.
+    # share one control object (`ControlNetApplyAdvanced`) share one copy. This mirrors core and
+    # halves the hint caches a doubled copy would build.
     copied = memo.get(id(control))
     if copied is not None:
         return copied

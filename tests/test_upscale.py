@@ -6,6 +6,7 @@ residency branches (with and without `.patcher`) and the OOM tile-halving retry.
 builder tests pin the BasicScheduler / Noise_RandomNoise arithmetic against the stubbed
 core functions. The upscale model is a duck-typed fake and comfy is the `comfy_stubs`
 fixture: no GPU, no real model."""
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -120,6 +121,30 @@ def test_model_output_already_at_target_skips_the_second_resize(comfy_stubs, lan
     assert len(comfy_stubs["tiled_scale_calls"]) == 1
     assert lanczos_calls == []
     assert out.shape == (1, 16, 16, 3)
+    assert float(out.max()) == 1.0 and float(out.min()) == 0.0
+
+
+def test_the_clamp_updates_an_inference_tensor_in_place_outside_inference_mode(comfy_stubs, monkeypatch):
+    # Core's tiled_scale_multidim runs under @torch.inference_mode(), so a direct caller outside it
+    # gets an inference tensor back, and the clamp must still run in place to keep the RAM peak down.
+    returned = []
+
+    @torch.inference_mode()
+    def inference_tiled_scale(samples, function, **kwargs):
+        upscaled = function(samples)
+        returned.append(upscaled)
+        return upscaled
+
+    monkeypatch.setattr(sys.modules["comfy.utils"], "tiled_scale", inference_tiled_scale)
+    image = torch.full((1, 8, 8, 3), 2.0)
+    image[0, 0, 0, :] = -1.0
+    model = FakeUpscaleModel(scale=2, patcher=FakePatcher())
+
+    assert not torch.is_inference_mode_enabled()
+    out = upscale._upscale_with_model(model, image)
+
+    assert returned[0].is_inference()
+    assert float(returned[0].max()) == 1.0 and float(returned[0].min()) == 0.0
     assert float(out.max()) == 1.0 and float(out.min()) == 0.0
 
 

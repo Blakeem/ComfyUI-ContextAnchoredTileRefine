@@ -1121,11 +1121,9 @@ def load_or_render_draft(arm, canvas, tiles, clip, model, vae, negative, empty,
 def build_settings(arm, tile_captions, mid, head, tail, stage="final"):
     from context_anchored_tile_refine import captions
 
-    # PINNED to (standard), whose wording IS RICH_GROUPED_INSTRUCTION: the unlabeled
-    # surface would resolve to the settings file's first preset, re-captioning this
-    # campaign under a different question while the stamps still named the old one.
-    preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
-    instruction, max_length = preset.tile_caption_instruction, preset.tile_caption_max_tokens
+    # PINNED to the (standard) preset's question, which the settings file no longer ships, so
+    # the stamps name the question this campaign was captioned with.
+    instruction, max_length = ab_env.rich_grouped_question()
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm if stage == "final" else f"{arm}-{stage}",

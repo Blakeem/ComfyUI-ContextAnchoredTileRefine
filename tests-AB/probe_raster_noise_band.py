@@ -11,6 +11,9 @@ twice:
                    a smudged band
 
     python tests-AB/probe_raster_noise_band.py --arm per-tile --seed 42
+    python tests-AB/probe_raster_noise_band.py --arm shipped --scene market --seed 42 --tag before
+
+`--tag` names the record, so one command measures a scene before and after a production change.
 """
 import argparse
 import contextlib
@@ -112,6 +115,7 @@ def main():
     parser.add_argument("--arm", choices=ab.ARMS, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--scene", choices=sorted(ab.SCENES), default="dark-city")
+    parser.add_argument("--tag", default="")
     args = parser.parse_args()
     ab_env.bootstrap()
 
@@ -145,7 +149,8 @@ def main():
         "dc_offset_255": round(statistics.mean(r["dc_offset_255"] or 0.0 for r in records), 3),
         "band_detail": round(statistics.mean(r["band_detail"] for r in detail), 4),
     }
-    out = ab.OUTPUT_DIR / f"band__{args.scene}__{args.arm}__s{args.seed}.json"
+    suffix = f"__{args.tag}" if args.tag else ""
+    out = ab.OUTPUT_DIR / f"band__{args.scene}__{args.arm}__s{args.seed}{suffix}.json"
     out.write_text(json.dumps({"summary": summary, "disagreement": records, "band_detail": detail}, indent=1))
     print(json.dumps(summary))
 

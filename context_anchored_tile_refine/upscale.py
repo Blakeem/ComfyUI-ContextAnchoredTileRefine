@@ -138,9 +138,10 @@ def _upscale_with_model(upscale_model, image, progress=None):
     finally:
         if patcher is None:
             upscale_model.to("cpu")
-    # In place, because tiled_scale returns a fresh tensor and a second full-size copy of it
-    # is this stage's RAM peak at a 16K intermediate.
-    upscaled.clamp_(0, 1.0)
+    # In place, because a second full-size copy is this stage's RAM peak at a 16K intermediate. Core's tiled_scale
+    # returns an inference tensor, which accepts an in-place update only inside inference mode.
+    with torch.inference_mode():
+        upscaled.clamp_(0, 1.0)
     result = upscaled.movedim(-3, -1).to(comfy.model_management.intermediate_dtype())
     if alpha is not None:
         alpha = comfy.utils.common_upscale(alpha.movedim(-1, -3).to(result), result.shape[2], result.shape[1], "bilinear", "disabled")

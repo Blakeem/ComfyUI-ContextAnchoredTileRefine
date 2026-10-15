@@ -264,7 +264,7 @@ def test_schedule_defaults_to_enabled():
 
 
 def ring_entries(monkeypatch, **refine_kwargs):
-    """Drive refine_image end to end with fakes; return (schedule entries, tiles sampled)."""
+    """Drive refine_image end to end with fakes and return (schedule entries, tiles sampled)."""
     import contextlib
 
     entries = []

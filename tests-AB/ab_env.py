@@ -165,6 +165,22 @@ def caption_preset(instruction, max_tokens, surface=None):
         global_style_instruction="", global_style_max_tokens=max_tokens)
 
 
+RICH_GROUPED_MAX_TOKENS = 768
+
+
+def rich_grouped_question():
+    """The (standard) preset's question as (instruction, max_tokens), for the harnesses whose judged
+    arms were captioned with it.
+
+    settings.toml no longer ships (standard), so resolving it raises. Its wording is
+    captions.RICH_GROUPED_INSTRUCTION character for character, and every settings file that
+    carried it set 768 tokens, which the arms' cache keys hold.
+    """
+    from context_anchored_tile_refine import captions
+
+    return captions.RICH_GROUPED_INSTRUCTION, RICH_GROUPED_MAX_TOKENS
+
+
 def version(root):
     """ComfyUI's reported version string, or '?' if the file is missing."""
     marker = Path(root) / "comfyui_version.py"

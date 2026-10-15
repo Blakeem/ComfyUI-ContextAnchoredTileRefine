@@ -21,7 +21,7 @@ grid, seam at x=768) — then renders arms that vary ONE mechanism each:
                reasons from (first sigma ~0.90 vs ~0.38 — see the printed sigmas).
 
 Hooks reach production code only through call-time seams (sampling.encode_pixels,
-sampling.denoise_indicator, vl._encode_one), restored in finally; production files are
+sampling.denoise_indicator, vl._encode_one), restored in finally. Production files are
 untouched.
 
     <venv-python> tests-AB/run_ab_anchor.py                 # all arms

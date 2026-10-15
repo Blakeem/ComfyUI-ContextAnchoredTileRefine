@@ -2266,7 +2266,7 @@ def test_the_region_path_tags_the_region_crop_and_styles_the_full_image(comfy_st
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (FakeVLClip(seq_override=ENC_SEQ), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
 ])
 def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs, monkeypatch, clip,
                                                                      missing, error, message):

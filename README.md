@@ -148,7 +148,7 @@ Each tile is sampled with two extra rings that are cropped away after. `context_
 
 #### Shared noise
 
-Each tile starts from its part of one noise pattern over the entire image. Samplers such as `dpmpp_2m_sde` add fresh noise at every step, and each step's noise comes from one pattern in the same way. This way both tiles that diffuse a shared band add the same noise there, so the feather blends two similar textures. On the base node, `dpmpp_sde` (both variants) draws its step noise per tile, since its draws within a step depend on each other. Samplers implemented in other node packs also draw it per tile.
+Each tile starts from its part of one noise pattern over the entire image. Samplers such as `dpmpp_2m_sde` add fresh noise at every step, and each step's noise comes from one pattern in the same way. This way both tiles that diffuse a shared band add the same noise there, so the feather blends two similar textures. On the base node, a sampler draws its step noise per tile when its draws cannot follow the shared pattern. `dpmpp_sde` (both variants) is one, since its draws within a step depend on each other. The `SamplerDPMAdaptative` node with `eta` above 0 is another, since its step count adapts to each tile's content. A sampler that makes its own draws also draws per tile, such as the `SamplerLCMUpscale` node or a sampler implemented in another node pack.
 
 ### Seams on the base node
 
