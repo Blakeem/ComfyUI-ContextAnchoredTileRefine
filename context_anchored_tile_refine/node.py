@@ -103,6 +103,13 @@ def check_geometry(max_tile_width=None, max_tile_height=None, context_anchor=Non
     return True
 
 
+def _require_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap):
+    # A linked value reaches refine with no VALIDATE_INPUTS or core range check.
+    message = check_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
+    if message is not True:
+        raise ValueError(message)
+
+
 def _validate_image(image):
     if image.ndim != 4:
         raise ValueError(f"image must be a [B,H,W,C] IMAGE tensor, got {image.ndim} dimensions")
@@ -111,15 +118,13 @@ def _validate_image(image):
 
 
 def _normalize_mask(mask, image):
-    # Normalize a 2D [H,W] mask to [1,H,W]; reject any other rank.
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
     if mask.ndim != 3:
         raise ValueError(f"mask must be a [H,W] or [B,H,W] MASK tensor, got {mask.ndim} dimensions")
-    # Strict spatial match (no resample — a resized mask would misalign the region).
+    # Strict spatial match (no resample, since a resized mask would misalign the region).
     if mask.shape[1] != image.shape[1] or mask.shape[2] != image.shape[2]:
         raise ValueError(f"mask size {mask.shape[1]}x{mask.shape[2]} must match image size {image.shape[1]}x{image.shape[2]}")
-    # Batch must be 1 (broadcast to every image) or exactly the image batch.
     if mask.shape[0] not in (1, image.shape[0]):
         raise ValueError(f"mask batch {mask.shape[0]} must be 1 or match image batch {image.shape[0]}")
     if mask.shape[0] == 1 and image.shape[0] != 1:
@@ -162,17 +167,11 @@ class ContextAnchoredTileRefine:
     @classmethod
     def VALIDATE_INPUTS(s, max_tile_width=None, max_tile_height=None, context_anchor=None, context_overlap=None, vlm_method=None, sampler_name=None):
         # Naming widgets here disables ComfyUI's default min/max validation for them,
-        # so ranges are re-checked alongside the /8 constraint (widget step is UI-only;
+        # so ranges are re-checked alongside the /8 constraint. The widget step is UI-only,
         # API-submitted workflows can send arbitrary INTs, and all derived geometry
-        # must stay on the /8 grid the VAE requires).
-        # vlm_method is named for the OTHER validation the same bypass covers: core rejects
-        # a combo value that is not in the widget's own list (execution.py:1047, inside the
-        # `x not in validate_function_inputs` guard). Every caption option gained a preset
-        # label in 2026-08-22, so a workflow saved before that carries a bare
-        # "vision tokens and captions" the current list no longer holds and would fail to
-        # queue. captions.method_surface accepts it and resolve_method routes it to the
-        # first preset. The SURFACE is all that is checked here — a label naming an absent
-        # preset is named by resolve_method, which reads the file the run will actually use.
+        # must stay on the /8 grid the VAE requires.
+        # vlm_method is named so core's combo-list check skips it: the first preset's labeled
+        # form still resolves, and resolve_method names a label whose preset no longer ships.
         # This is None on the base node, which offers no such widget. sampler_name is None on
         # every node but the Upscale (VL) node.
         if vlm_method is not None:
@@ -189,6 +188,7 @@ class ContextAnchoredTileRefine:
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None):
         _validate_image(image)
+        _require_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
         if mask is not None:
             mask = _normalize_mask(mask, image)
         from . import sampling
@@ -198,19 +198,20 @@ class ContextAnchoredTileRefine:
 class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
     """The vision-conditioned variant for VLM-encoder models (Krea 2 family).
 
-    The tiles are stepped TOGETHER as lanes of one synchronized run (sync.py), and every
-    tile's positive conditioning is replaced by vision rows from the required CLIP: the
-    tokens of its own crop plus its slice of one encode of the entire image (vl.py), sized by
-    the settings file's [vision] table. Positionally exact, free of text demands, and aware
-    of its place in the image, so tiles neither re-instantiate prompt objects they don't
-    contain nor drift apart in story (gaze, tone, palette). The guider's positive text is
-    ignored by construction; its negative still applies. The `prompt` input is not DiT text:
-    it fills {PROMPT} in the caption preset's instructions, so the VL model reads it when it
-    writes a tile's caption (captions.with_prompt). ControlNet is ignored on this node (the
-    per-tile positive carries no control chain); use the base Context-Anchored Tile Refine
-    node for control.
-    vlm_method picks WHICH surface fills that positive: the vision rows, a per-tile VLM
-    caption of the tile's own crop, or both (default, see captions.py).
+    The tiles are stepped TOGETHER as lanes of one synchronized run (sync.py), and each
+    tile's positive conditioning is replaced by the vlm_method surface built from the
+    required CLIP. Its vision rows are the tokens of its own crop plus its slice of one
+    encode of the entire image (vl.py), sized by the settings file's [vision] table.
+    Positionally exact, free of text demands, and aware of its place in the image, so tiles
+    neither re-instantiate prompt objects they don't contain nor drift apart in story (gaze,
+    tone, palette). The guider's positive text is ignored by construction. Its negative
+    still applies. The `prompt` input is not DiT text.
+    With the tags preset it fills prompt_tags_instruction, and a listed thing joins a tile's
+    tags only when the VL model confirms it there. In a caption preset it fills {PROMPT}
+    (captions.with_prompt). ControlNet is ignored on this node, since the per-tile positive
+    carries no control chain. Use the base Context-Anchored Tile Refine node for control.
+    vlm_method picks WHICH surface fills that positive: the vision rows, the tile's own text
+    (tags in the shipped preset, a caption in a caption preset), or both (default).
     With a mask, the canvas rows come from the FULL image, so a masked refine stays aware
     of its surroundings.
     """
@@ -248,6 +249,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
 
     def refine(self, image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, anchor_source, vlm_method, clip, mask=None, prompt=None, unique_id=None):
         _validate_image(image)
+        _require_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
         if mask is not None:
             mask = _normalize_mask(mask, image)
         from . import captions, progress, sampling, tags
@@ -256,7 +258,7 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
         # the preset's {PROMPT} before the engine's pre-pass, and an unconnected prompt against
         # a preset that asks for one fails before any VAE or VL encode.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
-        if preset.kind == captions.TILE_TEXT_TAGS:
+        if preset.tile_text == captions.TILE_TEXT_TAGS:
             tags.check_tags_ready(clip)
 
         # THE LEDGER IS CREATED HERE, on the VL nodes only: this is the one place the whole
@@ -274,17 +276,18 @@ class ContextAnchoredTileRefineVL(ContextAnchoredTileRefine):
 class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
     """Upscale + VL tile refine in one node: image in, refined image out.
 
-    Same engine as ContextAnchoredTileRefineVL, with the four custom-sampling inputs
-    (NOISE / SAMPLER / SIGMAS / GUIDER) built in-process from widgets by upscale.py, and
-    the whole-image upscale stage run first so no tile is ever resampled. No mask input
-    (use ContextAnchoredTileRefineVL for a region pass) and no positive prompt input —
-    the positive is a placeholder that every tile's vision rows replace, so DiT text
-    here would only re-admit the phantom objects the VL path exists to remove. The
-    `prompt` input fills {PROMPT} in the caption preset's instructions instead, so it
-    reaches the VL model's question and never the DiT. The optional negative is the one
-    text channel that still applies.
-    vlm_method picks WHICH surface fills that positive: the vision rows, a per-tile VLM
-    caption of the tile's own crop, or both (default, see captions.py).
+    Same engine as ContextAnchoredTileRefineVL, with the four custom-sampling inputs built
+    in-process from widgets: NOISE, SIGMAS and GUIDER by upscale.py, SAMPLER by core's
+    sampler_object. The whole-image upscale stage runs first so no tile is ever resampled.
+    No mask input (use ContextAnchoredTileRefineVL for a region pass) and no positive prompt
+    input. The positive is a placeholder that each tile's own positive replaces, so DiT text
+    here would only re-admit the phantom objects the VL path exists to remove. The `prompt`
+    input reaches the VL model's question and never the DiT. With the tags preset it fills
+    prompt_tags_instruction, and a listed thing joins a tile's tags only when the VL model
+    confirms it there. In a caption preset it fills {PROMPT}. The optional negative is the
+    one text channel that still applies.
+    vlm_method picks WHICH surface fills that positive: the vision rows, the tile's own text
+    (tags in the shipped preset, a caption in a caption preset), or both (default).
     """
 
     OUTPUT_TOOLTIPS = (
@@ -334,7 +337,7 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         # Lazy import: node.py's module scope stays comfy-free (pinned by a subprocess test).
         import comfy.samplers
 
-        from . import captions, progress, sampling, tags, upscale
+        from . import captions, grid, progress, sampling, sync, tags, upscale
 
         empty_cond = None
         upscaled = None
@@ -342,15 +345,28 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
         sigmas = None
         sampler = None
         noise = None
+        target_width = None
+        target_height = None
 
         _validate_image(image)
+        _require_geometry(max_tile_width, max_tile_height, context_anchor, context_overlap)
         # The settings file is read FIRST and the block handed down: this node runs the
         # upscale-model pass and the text-encoder load before the engine's pre-pass, so a typo
         # in the file, or an unconnected prompt against a preset that asks for one, would
         # otherwise cost minutes of GPU time to reach.
         preset = captions.with_prompt(captions.resolve_method(vlm_method), prompt)
-        if preset.kind == captions.TILE_TEXT_TAGS:
+        if preset.tile_text == captions.TILE_TEXT_TAGS:
             tags.check_tags_ready(clip)
+
+        # These rejections need no GPU, and the upscale pass and the CLIP load below cost
+        # minutes. The grid is solved as the Layout test node solves it, on the padded target.
+        sampler = comfy.samplers.sampler_object(sampler_name)
+        sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
+        if sigmas.numel() >= 2:
+            sync.check_preconditions(model, sigmas, anchor_source, sampler=sampler, sampler_name=sampler_name)
+            target_width, target_height = upscale.scale_target(int(image.shape[2]), int(image.shape[1]), upscale_by)
+            grid.solve_layout(grid.round8_up(target_width), grid.round8_up(target_height),
+                              max_tile_width, max_tile_height, context_anchor, context_overlap)
 
         # THE LEDGER IS CREATED HERE, before the first phase it covers (the upscale model
         # pass), and `with` scopes the comfy.utils.ProgressBar shim to the whole run.
@@ -366,20 +382,19 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             if upscaled.shape[1] < 8 or upscaled.shape[2] < 8:
                 raise ValueError(f"upscale_by {upscale_by} takes the {image.shape[1]}x{image.shape[2]} input to {upscaled.shape[1]}x{upscaled.shape[2]}. The upscaled image must be at least 8x8 pixels")
 
-            # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returns an empty
+            # denoise 0.0 is a legitimate "upscale only" setting: build_sigmas returned an empty
             # schedule. Checked BEFORE the first CLIP call below, because that call pays
             # CLIP.load_model (minutes on a cold cache) for a run that samples nothing. The
             # return value is refine_image's own zero-step result, so a direct caller of the
             # engine sees the same picture. finish() counts the never-opened plan as done, so
             # the bar lands on its total instead of freezing mid-run.
-            sigmas = upscale.build_sigmas(model, scheduler, steps, denoise)
             if sigmas.numel() < 2:
                 ledger.finish()
                 return (upscaled[..., :3].clone(),)
 
-            # One empty encode serves as the positive placeholder (vl.py replaces every tile's
-            # positive with its own vision rows) and, unless the optional input is connected,
-            # as the negative.
+            # One empty encode serves as the positive placeholder (sync.build_lane_guiders
+            # replaces it per lane with that tile's own positive) and, unless the optional
+            # input is connected, as the negative.
             # It is also the run's FIRST CLIP call, which pays CLIP.load_model and moves the
             # text encoder onto the GPU — minutes on a cold cache, with nothing else covering
             # it. Its own segment buys it an honest share of the total and its own status
@@ -388,7 +403,6 @@ class ContextAnchoredTileUpscaleVL(ContextAnchoredTileRefine):
             ledger.open(progress.CLIP_LOAD)
             empty_cond = upscale.encode_empty(clip)
             guider = upscale.build_guider(model, empty_cond, empty_cond if negative is None else negative, cfg)
-            sampler = comfy.samplers.sampler_object(sampler_name)
             noise = upscale.Noise_RandomNoise(seed)
 
             # sampler_name rides along beside the built SAMPLER: the sync engine rejects an

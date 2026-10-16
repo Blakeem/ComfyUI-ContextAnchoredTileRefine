@@ -108,9 +108,9 @@ COORDINATE CONTRACT (verified against the installed comfy 0.32.0 source):
     rewrites only sigmas[0] >= 1; sigma[0] is 0.7596 here, asserted < 1.
   * Blending in the canonical form is exact: process_latent_out is per-channel
     affine and the feather weights sum to 1, so the blend commutes with it.
-  * THE RING: anchor_ring=False — the lead schedule is inapplicable (it exists to
-    bridge a FROZEN REFINED ring to a noisy core; here nothing refined exists
-    mid-run). With the per-step noise tensor zero, KSamplerX0Inpaint's ring input
+  * THE RING: no shipped schedule. The lead schedule is inapplicable, since it exists
+    to bridge a FROZEN REFINED ring to a noisy core, and here nothing refined exists
+    mid-run. With the per-step noise tensor zero, KSamplerX0Inpaint's ring input
     at the step's first model eval is (1-sigma[i]) * z_ring = the LIVE trajectory
     at exactly sigma[i]; at the second eval the same state rescaled to sigma[i+1].
     Step 0 re-noises the raw ring from the canvas-noise slice — the cores' own
@@ -322,8 +322,8 @@ def lead_ring_patch(model, sigma_first):
     factor is untouched and only its NORMALIZATION is fixed, which no module-level
     override can express. Patches the model INSTANCE (core caches model objects
     session-wide — a class patch would leak into the app) and restores in finally,
-    exactly like the shipped context manager. sample_latent runs with
-    anchor_ring=False, so the shipped schedule never shadows this patch."""
+    exactly like the shipped context manager. sample_latent never enters the
+    shipped schedule, so it never shadows this patch."""
     from context_anchored_tile_refine import sampling
 
     if sigma_first <= 0.0:
@@ -466,7 +466,7 @@ def sync_refine(canvas_latent, canvas_noise, sigmas, tiles, guider, tile_positiv
     for tile in tiles:
         crop = _latent_rect(tile.crop_rect)   # the /8 guard, not bare //8 (review 4)
         wy0, wy1, wx0, wx1 = crop.y0, crop.y1, crop.x0, crop.x1
-        mask = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        mask = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         alpha = sampling.feather_alpha(
             _latent_rect(tile.paste_rect), _latent_rect(tile.core),
             overlap_cells, tile.kept_top, tile.kept_left, plateau=latent_plateau)
@@ -521,7 +521,7 @@ def sync_refine(canvas_latent, canvas_noise, sigmas, tiles, guider, tile_positiv
                 try:
                     out = sampling.sample_latent(
                         guider, sampler, sigma_pair, noise_in, settings.seed, latent_in,
-                        denoise_mask=mask, callback=_noop_callback, anchor_ring=False)
+                        denoise_mask=mask, callback=_noop_callback)
                 finally:
                     guider.original_conds = pristine_conds
                 out = out.detach().to("cpu", torch.float32)

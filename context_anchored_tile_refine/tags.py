@@ -6,12 +6,12 @@ Two entry points run one pass. `generate_tag_trace` returns every stage's result
 the engine's, and reads only the texts from that run, as `(style_texts, tile_texts)` in the
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
-    picture pass   the style caption (captions.style_caption), which is the style line
-                   alone, then the prompt tags (logit_classifier.toolkit's tag_prompt): the
-                   language question, a translation when the prompt is not English, one
-                   text-only generate listing the physical things its English text names, and
-                   the thing check, which keeps the ones that are things. They join every
-                   tile's candidates. The prompt reaches no tile question, so a long prompt
+    picture pass   the prompt tags (logit_classifier.toolkit's tag_prompt): the language
+                   question, a translation when the prompt is not English, one text-only
+                   generate listing the physical things its English text names, and the thing
+                   check, which keeps the ones that are things. They join every tile's
+                   candidates. Then the style caption (captions.style_caption), which is the
+                   style line alone. The prompt reaches no tile question, so a long prompt
                    never lengthens a tile's reply.
     per tile row   the toolkit's tag_image on a 1 MP copy of the crop: propose (stopped
                    after MAX_PROPOSED_TAGS tags, asked once more with the fallback question
@@ -90,9 +90,8 @@ THING_THRESHOLD = 0.1
 
 def check_tags_ready(clip):
     """Raises before any generate when a tags preset cannot run: a logit_classifier missing or
-    older than captions.LIBRARY_VERSION, or a CLIP that is not a Qwen3-VL text encoder with its
-    vision tower. The library is never judged by importlib.metadata, since an editable install
-    can report a stale version in its dist metadata."""
+    older than captions.LIBRARY_VERSION (the version gate in captions.comfy_toolkit), or a CLIP
+    that is not a Qwen3-VL text encoder with its vision tower."""
     build_classifier(clip)
 
 
@@ -277,8 +276,8 @@ def trace_tile(clip, classifier, crop, image, preset, prompt_tags, thing_cache, 
 @dataclass(frozen=True)
 class TagRun:
     """Every stage of one tags pass. `style_texts` is the style line per batch row, "" for
-    none, `prompt` is the prompt tags or None when the preset carries no prompt, and
-    `tiles[tile_index][batch_row]` is a TileTrace."""
+    none, `prompt` is the prompt tags or None when the prompt is blank or
+    `prompt_tags_instruction` is empty, and `tiles[tile_index][batch_row]` is a TileTrace."""
 
     style_texts: tuple
     prompt: PromptTrace | None
@@ -302,7 +301,7 @@ def _tag_cache_key(image, preset, scope):
     # serves text written under the old one. An image of None keys a text-only request.
     digest = () if image is None else captions.picture_digest(image)
     return (digest, tag_settings(preset), VL_MAX_PIXELS, STRIP_MEGAPIXELS, ROW_WORDS, COLUMN_WORDS,
-            preset.tile_tags_position_threshold, preset.style_instruction, preset.prompt, scope)
+            preset.tile_tags_position_threshold, preset.global_style_instruction, preset.prompt, scope)
 
 
 def _cached(key, clip, compute):
@@ -333,9 +332,9 @@ def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0,
     import comfy.model_management
     import comfy.utils
 
-    if preset.kind != captions.TILE_TEXT_TAGS:
+    if preset.tile_text != captions.TILE_TEXT_TAGS:
         raise RuntimeError(
-            f"Context-Anchored Tile Refine (VL): preset {preset.label!r} is the {preset.kind!r} "
+            f"Context-Anchored Tile Refine (VL): preset {preset.label!r} is the {preset.tile_text!r} "
             "kind and the tags pass runs only a preset with tile_text = "
             f"{captions.TILE_TEXT_TAGS!r}. Hand a caption preset to captions.generate_caption_set.")
     captions._check_prompt_filled(preset)

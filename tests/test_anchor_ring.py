@@ -32,7 +32,7 @@ class BaseModel:
 
 
 class HoldingModel(BaseModel):
-    """Stands in for WAN21/WAN22/HunyuanVideo/LTXAV: already holds the frozen region clean."""
+    """Stands in for WAN22/WAN21_SCAIL2/HunyuanVideo/LTXAV: already holds the frozen region clean."""
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
         return latent_image
@@ -251,30 +251,6 @@ def test_schedule_defaults_to_enabled():
         assert "scale_latent_inpaint" in vars(model)
 
 
-def test_sample_latent_forwards_the_gate(comfy_stubs, monkeypatch):
-    # The flag has to reach the call site, not just exist on the context manager.
-    import contextlib
-
-    seen = []
-
-    @contextlib.contextmanager
-    def recording(guider, sigmas, enabled=True):
-        seen.append(enabled)
-        yield
-
-    monkeypatch.setattr(sampling, "anchor_ring_schedule", recording)
-
-    class Guider:
-        def sample(self, *args, **kwargs):
-            return torch.zeros(1, 4, 8, 8)
-
-    latent = torch.zeros(1, 4, 8, 8)
-    for flag in (True, False):
-        sampling.sample_latent(Guider(), object(), SIGMAS, torch.zeros_like(latent), 7, latent,
-                               callback=lambda *a: None, anchor_ring=flag)
-    assert seen == [True, False]
-
-
 # WHO GETS THE RING, since 1.6.0. The ring is a VL-path behaviour and the VL path is the sync
 # engine, so the decision left here is the raster path's own — permanently off — and the three
 # tests that used to pin the retired leading/adjacent select moved WITH the decision:
@@ -287,27 +263,36 @@ def test_sample_latent_forwards_the_gate(comfy_stubs, monkeypatch):
 #     test_live_canvas_never_enters_the_ring_schedule.
 
 
-def ring_flags(monkeypatch, **refine_kwargs):
-    """Drive refine_image end to end with fakes; return the anchor_ring flag per tile."""
-    seen = []
+def ring_entries(monkeypatch, **refine_kwargs):
+    """Drive refine_image end to end with fakes and return (schedule entries, tiles sampled)."""
+    import contextlib
+
+    entries = []
+    samples = []
     original = sampling.sample_latent
 
-    def recording(*args, **kwargs):
-        seen.append(kwargs.get("anchor_ring"))
+    @contextlib.contextmanager
+    def recording_schedule(guider, sigmas, enabled=True):
+        entries.append(enabled)
+        yield
+
+    def recording_sample(*args, **kwargs):
+        samples.append(1)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(sampling, "sample_latent", recording)
+    monkeypatch.setattr(sampling, "anchor_ring_schedule", recording_schedule)
+    monkeypatch.setattr(sampling, "sample_latent", recording_sample)
     sampling.refine_image(torch.zeros(1, 64, 64, 3), FakeGuider(), object(), SIGMAS,
                           FakeVAE(), FakeNoise(), 64, 64, 8, 8, **refine_kwargs)
-    return seen
+    return entries, len(samples)
 
 
 def test_the_raster_path_never_runs_the_ring(comfy_stubs, monkeypatch):
     # The base node's plain conditioning was consistently worse under the lead schedule in the
-    # owner's A/B, so _refine_tiles hands sample_latent a literal False and has no gate left to
-    # resolve. Asserted through refine_image, so a future re-wiring of the argument cannot pass.
+    # owner's A/B, so the raster path never enters it. Asserted through refine_image, so a
+    # future re-wiring that enters the schedule anywhere on this path cannot pass.
     mask = torch.zeros(1, 64, 64)
     mask[:, 16:48, 16:48] = 1.0
     for extra in ({}, {"mask": mask}):
-        flags = ring_flags(monkeypatch, **extra)
-        assert flags and all(flag is False for flag in flags), extra
+        entries, tiles_sampled = ring_entries(monkeypatch, **extra)
+        assert tiles_sampled > 0 and entries == [], extra

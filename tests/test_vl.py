@@ -164,12 +164,10 @@ class FakeVLClip:
 class RecordingVLClip(FakeVLClip):
     """FakeVLClip that records every picture it is handed and tags each encode with its call
     index (+100 per call), so a build has to show which encode every row came from, in
-    order. `tag_pooled` gives each encode a real pooled_output as well, for the batch cat
-    test alone: Krea 2 returns None there, which is what lets two blocks concatenate."""
+    order."""
 
-    def __init__(self, tail_len=4, seq_override=None, tag_pooled=False):
+    def __init__(self, tail_len=4, seq_override=None):
         super().__init__(tail_len=tail_len, seq_override=seq_override)
-        self.tag_pooled = tag_pooled
         self.canvases = []
 
     def tokenize(self, text, images=None, llama_template=None):
@@ -180,8 +178,6 @@ class RecordingVLClip(FakeVLClip):
         call = len(self.canvases) - 1
         encoded = super().encode_from_tokens_scheduled(tokens)
         encoded[0][0] += 100.0 * call
-        if self.tag_pooled:
-            encoded[0][1]["pooled_output"] = torch.full((1, 4), float(call))
         return encoded
 
 
@@ -319,26 +315,17 @@ def test_a_region_crop_that_overruns_the_image_is_clamped(stubbed_vl):
     assert tuple(clip.canvases[0].shape) == (1, 16, 16, 3)
 
 
-def test_batched_canvas_is_encoded_one_row_at_a_time(stubbed_vl):
-    # Core's tokenizer attaches images[0] alone (qwen_vl.process_qwen2vl_images), so handing
-    # over the whole [B,H,W,3] canvas would condition EVERY image on row 0's picture. Each
-    # row is encoded on its own and the results are concatenated on the batch axis, in order.
+def test_a_batched_source_is_rejected_before_any_encode(stubbed_vl):
+    # Core's tokenizer attaches images[0] alone (qwen_vl.process_qwen2vl_images), so a
+    # [B,H,W,3] source would condition every picture on row 0's.
     source = torch.zeros(2, CANVAS_H, CANVAS_W, 3)
+    clip = RecordingVLClip()
 
-    clip = RecordingVLClip(tag_pooled=True)
-    positives = stubbed_vl.build_global_slices(clip, source, strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)),
-                                               vision(canvas=1, crop=0))
+    with pytest.raises(ValueError, match="takes one picture, got a batch of 2"):
+        stubbed_vl.build_global_slices(clip, source, strip_tiles(Rect(0, 0, CANVAS_W, CANVAS_H)),
+                                       vision(canvas=1, crop=0))
 
-    assert len(clip.canvases) == 2
-    assert [tuple(canvas.shape) for canvas in clip.canvases] == [(1, CANVAS_H, CANVAS_W, 3)] * 2
-    tensor, extras = positives[0][0]
-    assert tensor.shape == (2, EXPECTED_SEQ, 8)
-    assert tensor[0, :, 0].tolist() == list(range(EXPECTED_SEQ))
-    assert tensor[1, :, 0].tolist() == [100.0 + i for i in range(EXPECTED_SEQ)]
-    # pooled_output is per-image, so it rides the same cat; the canvas mask is still dropped.
-    assert extras["pooled_output"].shape == (2, 4)
-    assert extras["pooled_output"][:, 0].tolist() == [0.0, 1.0]
-    assert "attention_mask" not in extras
+    assert clip.canvases == []
 
 
 def test_single_row_canvas_takes_one_unconcatenated_encode(stubbed_vl):
@@ -441,6 +428,19 @@ def test_resample_picture_snaps_to_merged_cells(comfy_env):
     assert enc_h % vl.MERGED_CELL == 0 and enc_w % vl.MERGED_CELL == 0
     assert copy.shape == (1, 1024, 768, 3)
     assert enc_h * enc_w == 768 * 1024
+
+
+@pytest.mark.comfy
+@pytest.mark.parametrize("cells", [1, 2, 4])
+@pytest.mark.parametrize(("source_h", "source_w"), [(512, 512), (256, 512)])
+def test_a_tiny_budget_still_reaches_the_tokenizers_minimum_picture(comfy_env, cells, source_h, source_w):
+    # Core's process_qwen2vl_images resizes any picture under its min_pixels, which would
+    # break the merged-cell grid the slice layout asserts.
+    source = torch.rand(1, source_h, source_w, 3)
+    copy, enc_h, enc_w = vl.resample_picture(source, cells * vl.PIXELS_PER_TOKEN)
+    assert enc_h * enc_w >= vl.MIN_PICTURE_PIXELS == 3136
+    assert enc_h % vl.MERGED_CELL == 0 and enc_w % vl.MERGED_CELL == 0
+    assert copy.shape == (1, enc_h, enc_w, 3)
 
 
 @pytest.mark.comfy
@@ -589,8 +589,9 @@ def test_controlnet_is_ignored_on_the_vl_path(comfy_stubs, pipeline_clip, caplog
 
 
 def test_the_vl_dispatch_rejects_a_sampler_the_engine_cannot_time(comfy_stubs, pipeline_clip):
-    # Fail fast AT the dispatch, before any VAE or VL encode: the stepper's own rejection
-    # would otherwise arrive one whole-canvas encode and one canvas of tile encodes later.
+    # Fail fast at the engine's intake, before any VAE or VL encode: the stepper's own
+    # rejection would otherwise arrive one whole-canvas encode and one canvas of tile encodes
+    # later.
     vae, noise = GridVAE(), GridNoise()
 
     with pytest.raises(ValueError, match="only supports standard"):
@@ -619,7 +620,7 @@ def test_the_vl_dispatch_rejects_a_schedule_the_lanes_cannot_share(comfy_stubs, 
     # sigma 0) is named here rather than mistiming the barrier later.
     vae, noise = GridVAE(), GridNoise()
 
-    with pytest.raises(ValueError, match="strictly decreasing and end at 0"):
+    with pytest.raises(ValueError, match="not strictly decreasing"):
         sampling.refine_image(
             torch.rand(1, 80, 80, 3), VLGuider(), sync_sampler(),
             torch.tensor([1.0, 0.5, 0.7, 0.0]), vae, noise, max_tile_width=56,

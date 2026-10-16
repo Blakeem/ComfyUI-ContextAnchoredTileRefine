@@ -172,7 +172,7 @@ def instrument(clock, clip, tags, captions, lc_tags, backend_cls):
 
 
 def run_condition(clip, canvas, tiles, prompt_key, with_style):
-    import logit_classifier.tags as lc_tags
+    import logit_classifier.toolkit.tags as lc_tags
     import torch
     from logit_classifier.backends.comfy_clip import ComfyClipBackend
 
@@ -183,7 +183,7 @@ def run_condition(clip, canvas, tiles, prompt_key, with_style):
     preset = captions.with_prompt(captions.resolve_method(captions.default_vlm_method()),
                                   PROMPTS[prompt_key])
     if not with_style:
-        preset = replace(preset, style_instruction="")
+        preset = replace(preset, global_style_instruction="")
     clock = Clock(torch)
     undo = instrument(clock, clip, tags, captions, lc_tags, ComfyClipBackend)
     try:
@@ -196,7 +196,7 @@ def run_condition(clip, canvas, tiles, prompt_key, with_style):
 
 
 def summarize(prompt_key, preset, clock, run, tiles):
-    from logit_classifier.tags import split_prompt
+    from logit_classifier.toolkit.tags import split_prompt
 
     traces = [row[0] for row in run.tiles]
     stage_names = ("style caption", "fragment sort", "propose", "verify", "locate strips")

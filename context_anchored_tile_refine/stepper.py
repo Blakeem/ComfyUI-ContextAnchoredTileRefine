@@ -2,17 +2,19 @@
 
 Each LANE is one tile running an ORDINARY full-length `guider.sample()` on its own
 cooperative thread. A barrier inside the model callable holds every lane at each sigma
-step until all have arrived; a caller-supplied surgery hook then edits the lanes' live
-tensors in place; then all lanes release. Because every lane runs the stock k-diffusion
+step until all have arrived. A caller-supplied surgery hook then edits the lanes' live
+tensors in place, and then all lanes release. Because every lane runs the stock k-diffusion
 function end to end on its own stack, multistep solver state (dpmpp_2m's `old_denoised`,
-a Brownian stream's position) needs no unrolling and no resume identity — the
+a Brownian stream's position) needs no unrolling and no resume identity. The
 sigma-slicing traps in docs/sync-tiling-research-and-port-plan.md are structurally
-absent because nothing is sliced. The only per-sampler knowledge left is EVALS_PER_STEP:
-which model evals BEGIN a sigma step.
+absent because nothing is sliced. The per-sampler knowledge left is two tables.
+EVALS_PER_STEP times the barrier for every supported sampler, and SDE_NOISE_KIND names the
+shared field a stochastic sampler draws from (a sampler absent from it is treated as
+deterministic).
 
     stage 1   `run_lanes` resolves the SAMPLER once (name, option carry, rejections)
               and precomputes the eval -> step map from the shared schedule.
-    stage 2   one thread per lane, started together; a `threading.Condition` scheduler
+    stage 2   one thread per lane, started together. A `threading.Condition` scheduler
               lets exactly ONE lane run at any moment (round-robin inside an eval index,
               handed on when a lane blocks at a barrier or finishes). No concurrent comfy
               calls, no reliance on comfy thread-safety, one GPU stream.
@@ -25,30 +27,31 @@ which model evals BEGIN a sigma step.
 Exceptions: a lane failure, or a hook failure, sets a layer-wide abort flag. Every lane
 tests that flag at both wait points, so the fleet unwinds instead of each released lane
 running out its remaining full-length schedule. The FIRST exception reaches the caller
-UNCHANGED; every thread is joined. Both catch sites take BaseException, not Exception,
+UNCHANGED, and every thread is joined. Both catch sites take BaseException, not Exception,
 because comfy's InterruptProcessingException derives from BaseException
-(comfy/model_management.py:2098) — a user cancel is raised inside a lane thread's model
-forward, the interrupt flag is CONSUMED by the first checker, so a swallowed one is lost
-for good and ComfyUI would report a failure instead of an interruption.
+(comfy/model_management.py:2175). A user cancel is raised inside a lane thread's model
+forward, and the first checker CONSUMES the interrupt flag. A swallowed cancel is therefore
+lost for good, and ComfyUI would report a failure instead of an interruption.
 
 KNOWN RESIDUAL (carried from tests-AB/run_ab_sync.py:355-399): under sync surgery a
 MULTISTEP sampler's per-lane history is its own PRE-blend prediction, while the `x` it
-corrects was feather-blended with the neighbour's write in the overlap bands — so a
-stale term enters those bands each step. Second order in inter-tile disagreement and
-band-confined; single-step samplers carry none of it. If a band artifact appears under
-a multistep sampler only, suspect this before geometry.
+corrects was feather-blended with the neighbour's write in the overlap bands, so a
+stale term enters those bands each step. The term is second order in inter-tile
+disagreement and confined to the bands. Single-step samplers carry none of it. If a band
+artifact appears under a multistep sampler only, suspect this before geometry.
 
 STOCHASTIC samplers draw from a SHARED CANVAS FIELD, never from a private per-lane one:
 `build_noise_fields` returns one canvas-shaped provider and `run_lanes` injects each lane's
 window slice of it as the sampler's `noise_sampler`, ADDED over the merged extra_options so
 the node SAMPLER's own eta/s_noise/solver_type still ride along. Two lanes whose windows
-overlap therefore hold torch.equal noise on every shared cell; a per-lane noise sampler
+overlap therefore hold torch.equal noise on every shared cell. A per-lane noise sampler
 would put an independent field on each side of every band, which is the seam this engine
 exists to remove.
 
-torch + stdlib at module scope; `comfy` is imported lazily inside functions (a subprocess
+torch + stdlib at module scope. `comfy` is imported lazily inside functions (a subprocess
 test pins it).
 """
+import concurrent.futures
 import functools
 import threading
 
@@ -56,33 +59,33 @@ import torch
 
 # Model evals per sigma step, keyed by the resolved sampler name, as
 # (evals, evals_on_a_step_whose_NEXT_sigma_is_0). Verified line by line against the
-# installed ComfyUI 0.33.0 comfy/k_diffusion/sampling.py — a comfy-side change to any of
+# installed ComfyUI 0.38.0 comfy/k_diffusion/sampling.py. A comfy-side change to any of
 # these silently mistimes the surgery, which is what the completion cross-check in
 # `run_lanes` exists to catch.
 #   euler          :190  one `model(...)` per loop iteration, no branch.
-#   dpmpp_2m       :796  one `model(...)` per loop iteration; the sigmas[i+1] == 0 case
+#   dpmpp_2m       :864  one `model(...)` per loop iteration. The sigmas[i+1] == 0 case
 #                        changes the update, not the eval count.
 #   heun           :269  two evals, falling back to a single Euler eval at sigma_next == 0.
 #   dpm_2          :304  two evals, same Euler fallback at sigma_next == 0.
-#   exp_heun_2_x0  :1655 an alias that forwards to sample_seeds_2 (:1592) with eta=0,
-#                        s_noise=0, r=1 — two evals, and `if sigmas[i+1] == 0: x =
+#   exp_heun_2_x0  :1723 an alias that forwards to sample_seeds_2 (:1660) with eta=0,
+#                        s_noise=0, r=1. Two evals, and `if sigmas[i+1] == 0: x =
 #                        denoised; continue` makes the last step a single eval.
-#   dpmpp_2m_sde   :822  one `model(...)` per loop iteration (:845); the sigmas[i+1] == 0
-#                        case short-circuits to `x = denoised` (:848), which changes the
+#   dpmpp_2m_sde   :890  one `model(...)` per loop iteration (:913). The sigmas[i+1] == 0
+#                        case short-circuits to `x = denoised` (:916), which changes the
 #                        update, not the eval count.
-#   dpmpp_2m_sde_gpu      :965
-#   dpmpp_2m_sde_heun     :877
-#   dpmpp_2m_sde_heun_gpu :955
+#   dpmpp_2m_sde_gpu      :1033
+#   dpmpp_2m_sde_heun     :945
+#   dpmpp_2m_sde_heun_gpu :1023
 #                        thin wrappers over sample_dpmpp_2m_sde whose ONLY delta is the
 #                        device of the default BrownianTreeNoiseSampler they build when
-#                        `noise_sampler is None` — which never happens here, the layer
+#                        `noise_sampler is None`. That never happens here, since the layer
 #                        always injects one, so they are exact passthroughs. They MUST be
 #                        supported: core's own SamplerDPMPP_2M_SDE emits `dpmpp_2m_sde_gpu`
 #                        by DEFAULT (its noise_device combo lists 'gpu' first,
 #                        comfy_extras/nodes_custom_sampler.py:431-442).
 #   exp_heun_2_x0_sde
-#                  :1661 the same sample_seeds_2 alias with eta/s_noise live and r=1 — two
-#                        evals, and the same `x = denoised; continue` (:1618-1620) makes the
+#                  :1729 the same sample_seeds_2 alias with eta/s_noise live and r=1. Two
+#                        evals, and the same `x = denoised; continue` (:1686-1688) makes the
 #                        last step a single eval.
 EVALS_PER_STEP = {
     "euler": (1, 1),
@@ -121,11 +124,11 @@ def unsupported_sampler_message(name):
 # samplers are ABSENT: they take no `noise_sampler` at all, so `build_noise_fields` answers
 # None for them and `run_lanes` injects nothing.
 #   brownian   the dpmpp_2m_sde family: ONE `noise_sampler(sigmas[i], sigmas[i + 1])` per
-#              non-final step (:869). A BrownianTree draw is a deterministic function of that
+#              non-final step (:937). A BrownianTree draw is a deterministic function of that
 #              (sigma, sigma_next) pair, so a single canvas-wide tree hands every lane the
 #              same field with no coordination at all.
-#   generator  exp_heun_2_x0_sde: sample_seeds_2 draws TWICE per non-final step (:1634,
-#              :1650) and at its r == 1 the two draws' sigma pairs COINCIDE (sigma_s_1 ==
+#   generator  exp_heun_2_x0_sde: sample_seeds_2 draws TWICE per non-final step (:1702,
+#              :1718) and at its r == 1 the two draws' sigma pairs COINCIDE (sigma_s_1 ==
 #              sigmas[i + 1]), so a (sigma, sigma_next) key cannot tell them apart — the
 #              field is keyed by (step, draw index) off one run-long generator instead. At
 #              r == 1 the second draw's integrator weight is exactly zero (segment_factor =
@@ -139,7 +142,7 @@ SDE_NOISE_KIND = {
     "exp_heun_2_x0_sde": "generator",
 }
 
-# sample_seeds_2's noise draws per non-final sigma step (:1634 and :1650, both under
+# sample_seeds_2's noise draws per non-final sigma step (:1702 and :1718, both under
 # `if inject_noise`) — what maps a lane's Nth request onto the run's Nth (step, draw) field.
 SEEDS_2_DRAWS_PER_STEP = 2
 
@@ -203,14 +206,23 @@ class _Aborted(Exception):
     `run_lanes` re-raises the first real exception instead."""
 
 
-def _resolve_sampler_name(sampler):
-    # Sampler intake. The layer needs the k-diffusion function's identity to time the
-    # barrier, and only a stock KSAMPLER exposes it in a form the table can key on.
+def sampler_function_name(sampler):
+    # The name both engines key their sampler tables on. Only a stock KSAMPLER exposes its
+    # k-diffusion function, so any other object has no name and gets None.
     import comfy.samplers
 
     if not isinstance(sampler, comfy.samplers.KSAMPLER):
+        return None
+    return getattr(sampler.sampler_function, "__name__", "").removeprefix("sample_")
+
+
+def _resolve_sampler_name(sampler):
+    # Sampler intake. The layer needs the k-diffusion function's identity to time the
+    # barrier, and only a stock KSAMPLER exposes it in a form the table can key on.
+    name = sampler_function_name(sampler)
+    if name is None:
         raise ValueError(
-            "ContextAnchoredTileRefine: the synchronized stepper only supports standard "
+            "Context-Anchored Tile Refine (sync): the synchronized stepper only supports standard "
             f"KSAMPLER samplers, got {type(sampler).__name__}. Custom sampler objects expose "
             "no k-diffusion function to time the per-step barrier against."
         )
@@ -219,20 +231,13 @@ def _resolve_sampler_name(sampler):
         # that private draw collides with the shared per-lane noise field the sync engine
         # feeds every lane. It is reachable only through sampler_object("ddim") (:1393).
         raise ValueError(
-            "ContextAnchoredTileRefine: the synchronized stepper does not support the 'ddim' "
+            "Context-Anchored Tile Refine (sync): the synchronized stepper does not support the 'ddim' "
             "sampler (inpaint_options random noise): its seed+1 noise redraw collides with the "
             "shared noise field every lane samples against."
         )
 
-    raw_name = getattr(sampler.sampler_function, "__name__", "")
-    name = raw_name[len("sample_"):] if raw_name.startswith("sample_") else raw_name
     if name not in EVALS_PER_STEP:
-        raise ValueError(
-            f"ContextAnchoredTileRefine: sampler '{name or raw_name}' is not supported by the "
-            f"synchronized stepper. Supported: {', '.join(EVALS_PER_STEP)}. "
-            f"{', '.join(UNSUPPORTED_BY_DESIGN)} are unsupported BY DESIGN. They own their own "
-            "schedule or internal history, so no evals-per-step entry can time them."
-        )
+        raise ValueError(unsupported_sampler_message(name))
     return name
 
 
@@ -252,13 +257,81 @@ class _NoiseFields:
     def for_window(self, window):
         raise NotImplementedError
 
+    def close(self):
+        # Only a provider that owns a worker thread has anything to stop.
+        return None
+
+
+def _noisy_step_pairs(sigmas):
+    # The (t0, t1) pair core's BatchedBrownianTree.__call__ hands each torchsde tree, per step
+    # that draws noise: sorted, then a CPU float32 copy. A step whose next sigma is 0 draws none.
+    pairs = []
+    for step in range(int(sigmas.shape[-1]) - 1):
+        sigma, sigma_next = sigmas[step], sigmas[step + 1]
+        if float(sigma_next) == 0.0:
+            continue
+        low, high = (sigma, sigma_next) if sigma < sigma_next else (sigma_next, sigma)
+        pairs.append((low.detach().cpu().float(), high.detach().cpu().float()))
+    return pairs
+
+
+class _PrefetchedTree:
+    """One torchsde tree whose next noisy step's query runs ahead on the provider's worker.
+
+    Core queries the tree only after a lane's model eval, and the lanes are serial, so a
+    synchronous query (2 to 4 s at an 8K canvas) leaves the GPU idle for its whole length.
+    Only the raw query moves off the lane: core's sort, stack, cast and scale stay where they
+    were, so a served result is the bits the lane would have computed.
+    """
+
+    def __init__(self, tree, executor, pairs):
+        self._tree = tree
+        self._executor = executor
+        self._pairs = pairs
+        self._next = 0
+        self._key = None
+        self._future = None
+        self._submit_next()
+
+    def _query(self, t0, t1):
+        # Inference mode is thread-local, the lanes run inside it, and torchsde caches the
+        # tensors it returns, so the worker must build them under the same mode.
+        with torch.inference_mode():
+            return self._tree(t0, t1)
+
+    def _submit_next(self):
+        if self._executor is None or self._next >= len(self._pairs):
+            return
+        t0, t1 = self._pairs[self._next]
+        self._next += 1
+        self._key = (float(t0), float(t1))
+        self._future = self._executor.submit(self._query, t0, t1)
+
+    def __call__(self, t0, t1):
+        future, key = self._future, self._key
+        self._future, self._key = None, None
+        if future is not None:
+            # Also the guard against two queries on one tree at once: a mismatched query
+            # waits for the in-flight one before touching the tree itself.
+            concurrent.futures.wait([future])
+        if future is not None and not future.cancelled() and key == (float(t0), float(t1)):
+            result = future.result()
+        else:
+            result = self._tree(t0, t1)
+        self._submit_next()
+        return result
+
+    def close(self):
+        self._executor = None
+
 
 class _BrownianNoiseFields(_NoiseFields):
     """The dpmpp_2m_sde family's field: ONE canvas-shaped BrownianTreeNoiseSampler over the
     run's whole sigma range, sliced per lane window.
 
-    `cpu=True` is sample_dpmpp_2m_sde's own default (:833). The `_gpu` wrappers differ only
-    in the device they would build a default sampler on, which never happens here.
+    `cpu=True` is sample_dpmpp_2m_sde's own default (:901). The `_gpu` wrappers differ only
+    in the device they would build a default sampler on, which never happens here. Each step's
+    torchsde query is prefetched behind the lane evals (`_PrefetchedTree`) until `close()`.
     """
 
     def __init__(self, shape, seed, sigmas):
@@ -267,7 +340,7 @@ class _BrownianNoiseFields(_NoiseFields):
         positive = sigmas[sigmas > 0]
         if positive.numel() == 0:
             raise ValueError(
-                "ContextAnchoredTileRefine: a stochastic sampler's Brownian noise tree needs a "
+                "Context-Anchored Tile Refine (sync): a stochastic sampler's Brownian noise tree needs a "
                 "positive sigma to span, and this schedule has none."
             )
         self._tree = comfy.k_diffusion.sampling.BrownianTreeNoiseSampler(
@@ -275,6 +348,27 @@ class _BrownianNoiseFields(_NoiseFields):
         )
         self._key = None
         self._canvas_field = None
+        self._executor = None
+        self._prefetched = ()
+        # A core that renamed this attribute path keeps the synchronous query, without error.
+        batched = getattr(self._tree, "tree", None)
+        trees = getattr(batched, "trees", None)
+        if isinstance(trees, tuple) and trees:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="catr-sde-prefetch")
+            pairs = _noisy_step_pairs(sigmas)
+            self._prefetched = tuple(_PrefetchedTree(tree, self._executor, pairs) for tree in trees)
+            batched.trees = self._prefetched
+
+    def close(self):
+        # wait=False so a cancelled run is not held behind a running query. Each tree still
+        # waits for that query before its next one.
+        if self._executor is None:
+            return
+        for tree in self._prefetched:
+            tree.close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor = None
 
     def _canvas(self, sigma, sigma_next):
         # A one-entry cache, and an OPTIMIZATION only: the tree is deterministic in
@@ -326,14 +420,14 @@ class _GeneratorNoiseFields(_NoiseFields):
         # field a given (step, draw) gets. Lanes run cooperatively serial, so no lock.
         # ONE slot, never a per-index cache: a canvas field is latent-sized, so retaining the
         # run's would cost 2 * noisy_steps * that at once (gigabytes at production canvas x
-        # step count). One suffices because a BARRIER separates draw k from draw k+1 —
-        # sample_seeds_2 makes a model call between them (:1636) and between the step's last
-        # draw and the next step's first (:1614), and every model call is a barrier — so every
-        # lane consumes k before any lane can ask for k+1. A backwards request would mean that
-        # invariant broke, so it raises rather than silently serving the wrong field.
+        # step count). One suffices because a BARRIER separates draw k from draw k+1. Core's
+        # sample_seeds_2 makes a model call between them (:1704) and between the step's last
+        # draw and the next step's first (:1682), and every model call is a barrier. Every
+        # lane therefore consumes k before any lane can ask for k+1. A backwards request would
+        # mean that invariant broke, so it raises rather than silently serving the wrong field.
         if index < self._index:
             raise RuntimeError(
-                f"ContextAnchoredTileRefine: a lane asked for SDE noise draw {index + 1} after the "
+                f"Context-Anchored Tile Refine (sync): a lane asked for SDE noise draw {index + 1} after the "
                 f"fleet had moved on to draw {self._index + 1}. The lanes are no longer stepping "
                 "the shared schedule in lockstep."
             )
@@ -354,7 +448,7 @@ class _GeneratorNoiseFields(_NoiseFields):
             state["index"] = index + 1
             if index >= total:
                 raise RuntimeError(
-                    f"ContextAnchoredTileRefine: a lane requested SDE noise draw {index + 1} but "
+                    f"Context-Anchored Tile Refine (sync): a lane requested SDE noise draw {index + 1} but "
                     f"this schedule plans {total} ({self._noisy_steps} noisy sigma steps x "
                     f"{self._draws_per_step} draws). The draws-per-step contract no longer "
                     "matches this ComfyUI's sampler."
@@ -383,14 +477,18 @@ class _OffsetNoiseFields(_NoiseFields):
         return self._fields.for_window(
             (y0 + self._dy, y1 + self._dy, x0 + self._dx, x1 + self._dx))
 
+    def close(self):
+        self._fields.close()
+
 
 def build_noise_fields(sampler, shape, seed, sigmas):
     """The shared canvas-wide SDE noise for `sampler`, or None when it is deterministic.
 
     `shape` is the CANVAS latent shape; every lane draws that ONE field sliced to its own
     window, so overlapping lanes hold torch.equal noise on every shared cell. Hand the
-    result straight to `run_lanes(..., noise_fields=)`. None is a real answer, not a
-    failure: a deterministic sampler accepts no `noise_sampler` argument at all.
+    result straight to `run_lanes(..., noise_fields=)`, and `close()` it when sampling ends to
+    stop its prefetch worker. None is a real answer, not a failure: a deterministic sampler
+    accepts no `noise_sampler` argument at all.
     """
     kind = SDE_NOISE_KIND.get(_resolve_sampler_name(sampler))
     if kind is None:
@@ -420,14 +518,14 @@ def _validate_noise_fields(sampler_name, noise_fields):
     stochastic = sampler_name in SDE_NOISE_KIND
     if stochastic and noise_fields is None:
         raise ValueError(
-            f"ContextAnchoredTileRefine: sampler '{sampler_name}' is stochastic, so it needs the "
+            f"Context-Anchored Tile Refine (sync): sampler '{sampler_name}' is stochastic, so it needs the "
             "shared canvas noise field. Build it with stepper.build_noise_fields(...) and pass "
             "it as noise_fields. Without it every lane draws its own independent noise and each "
             "overlap band carries two different fields."
         )
     if not stochastic and noise_fields is not None:
         raise ValueError(
-            f"ContextAnchoredTileRefine: sampler '{sampler_name}' is deterministic and takes no "
+            f"Context-Anchored Tile Refine (sync): sampler '{sampler_name}' is deterministic and takes no "
             "noise_sampler, so noise_fields must be None. That is what build_noise_fields "
             "returns for it."
         )
@@ -441,7 +539,7 @@ def _reject_carried_noise_sampler(sampler, lane_specs):
     for owner, options in sources:
         if options and "noise_sampler" in options:
             raise ValueError(
-                f"ContextAnchoredTileRefine: {owner} extra_options already carries a "
+                f"Context-Anchored Tile Refine (sync): {owner} extra_options already carries a "
                 "'noise_sampler'. The synchronized stepper injects the shared canvas-wide field "
                 "every lane draws from, so it would silently replace that one. A per-lane "
                 "noise sampler is exactly the seam this engine exists to remove."
@@ -480,7 +578,7 @@ class _LaneModel:
 
     The proxy is load-bearing, not politeness: samplers reach THROUGH the model object
     (`model.inner_model.model_patcher.get_model_object('model_sampling')` at
-    k_diffusion/sampling.py:836 for the dpmpp_2m_sde family and :1604 for the seeds_2
+    k_diffusion/sampling.py:904 for the dpmpp_2m_sde family and :1672 for the seeds_2
     family that exp_heun_2_x0 aliases), so a call-only wrapper would break them.
     """
 
@@ -503,7 +601,7 @@ class _LaneModel:
 
         if index >= scheduler.total_evals:
             raise RuntimeError(
-                f"ContextAnchoredTileRefine: sampler '{scheduler.sampler_name}' asked for model "
+                f"Context-Anchored Tile Refine (sync): sampler '{scheduler.sampler_name}' asked for model "
                 f"eval {index + 1} but EVALS_PER_STEP predicts {scheduler.total_evals} for this "
                 "schedule. The evals-per-step table no longer matches this ComfyUI's sampler."
             )
@@ -615,7 +713,7 @@ class _Scheduler:
                 # A lane that stopped short would otherwise strand the rest at a barrier that can
                 # never fill; a lane that ran long is caught in _LaneModel.__call__.
                 self._abort = RuntimeError(
-                    f"ContextAnchoredTileRefine: sampler '{self.sampler_name}' performed "
+                    f"Context-Anchored Tile Refine (sync): sampler '{self.sampler_name}' performed "
                     f"{lane.eval_count} model evals but EVALS_PER_STEP predicts "
                     f"{self.total_evals} for this schedule — the evals-per-step table no longer "
                     "matches this ComfyUI's sampler."
@@ -625,7 +723,7 @@ class _Scheduler:
 
 def _wrap_sampler_function(real_fn, lane, scheduler):
     # KSAMPLER.sample calls this as sampler_function(model_k, noise, sigmas, extra_args=,
-    # callback=, disable=, **extra_options) (comfy/samplers.py:1006). Everything is forwarded
+    # callback=, disable=, **extra_options) (comfy/samplers.py:1005). Everything is forwarded
     # untouched except model_k, which is swapped for the lane's barrier wrapper.
     @functools.wraps(real_fn)
     def wrapped(model_k, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
@@ -659,12 +757,12 @@ def _build_lane_sampler(sampler, lane, scheduler, extra_options, noise_sampler):
 
 def _validate_specs(lane_specs):
     if not lane_specs:
-        raise ValueError("ContextAnchoredTileRefine: the synchronized stepper needs at least one lane.")
+        raise ValueError("Context-Anchored Tile Refine (sync): the synchronized stepper needs at least one lane.")
 
     guider_ids = {id(spec.guider) for spec in lane_specs}
     if len(guider_ids) != len(lane_specs):
         raise ValueError(
-            "ContextAnchoredTileRefine: every lane needs its OWN guider. comfy's CFGGuider "
+            "Context-Anchored Tile Refine (sync): every lane needs its OWN guider. comfy's CFGGuider "
             "stores per-run state on itself and tears it down when its sample() returns, so "
             "two lanes sharing one guider corrupt each other."
         )
@@ -673,7 +771,7 @@ def _validate_specs(lane_specs):
     for position, spec in enumerate(lane_specs[1:], start=1):
         if not torch.equal(spec.sigmas, first):
             raise ValueError(
-                f"ContextAnchoredTileRefine: lane {position} was handed a different sigma "
+                f"Context-Anchored Tile Refine (sync): lane {position} was handed a different sigma "
                 "schedule. Every lane must step the SAME schedule, which is the whole point of "
                 "the barrier."
             )
@@ -694,7 +792,7 @@ def _run_lane(scheduler, lane, spec, lane_sampler):
             pass
         except BaseException as error:
             # BaseException, not Exception: comfy's InterruptProcessingException derives from
-            # BaseException (comfy/model_management.py:2098) and is raised from INSIDE the model
+            # BaseException (comfy/model_management.py:2175) and is raised from INSIDE the model
             # forward (comfy/ops.py run_every_op), i.e. inside a lane thread. `except Exception`
             # would let it kill the thread unhandled, leaving _abort unset — the user's cancel
             # lost (the flag is consumed by the first checker, so nothing re-raises it) and

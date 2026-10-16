@@ -1,5 +1,8 @@
+import hashlib
+import itertools
 import logging
 import math
+import struct
 
 import torch
 
@@ -27,9 +30,10 @@ from . import captions, conds, grid
 #   plateau 10% — the plateau only has to cover the seam-adjacent pixels; past that it
 #     spends band on a hard-edged solid region instead of on the fall-off that hides the DC
 #     step, so wider strictly wastes the band. At every /8 overlap 10% pins the seam-adjacent
-#     pixel of the UNDISPLACED ramp to exactly 1.0, which is the whole job. (A seam mode can
-#     displace it slightly below 1.0 — at overlap 8, to ~0.95 worst case; harmless, because
-#     the band holds the neighbor's already-refined output, never raw canvas.)
+#     pixel of the UNDISPLACED ramp to exactly 1.0, which is the whole job. (The min-error
+#     displacement can push it slightly below 1.0, to ~0.95 worst case at overlap 8. That
+#     is harmless, because the band holds the neighbor's already-refined output, never raw
+#     canvas.)
 #   falloff 2.0 — the lowest exponent that still meets 0 with zero slope (no slope
 #     discontinuity against the neighbor); higher made the fall-off itself visible.
 # Scene difficulty is absorbed by context_overlap instead (32 normally, up to 128 for a
@@ -37,16 +41,16 @@ from . import captions, conds, grid
 FEATHER_PLATEAU = 0.10
 FEATHER_FALLOFF = 2.0
 
-# The frozen context_anchor ring is re-presented to the model at EVERY step: comfy
-# samplers.py:639 rebuilds the model's input as
+# The frozen context_anchor ring is re-presented to the model at EVERY step: core's
+# KSamplerX0Inpaint.__call__ rebuilds the model's input as
 #     x*denoise_mask + scale_latent_inpaint(x, sigma, noise, latent_image)*(1 - denoise_mask)
-# and core's default scale_latent_inpaint (comfy model_base.py:408) re-noises the frozen
+# and core's default BaseModel.scale_latent_inpaint re-noises the frozen
 # region to the CURRENT sigma. At denoise 0.35 the first sigma is 0.63, so the ring reaches
 # the model as ~63% noise exactly while composition is being decided — the anchor is barely
 # legible when it matters most. That default is principled (one consistent noise level across
-# the latent), not a bug; the video families deliberately trade it away instead, overriding
-# scale_latent_inpaint to return the clean latent ("Hold anchor constant across all sigmas",
-# comfy model_base.py:2058 WAN22, also WAN21 :1919 / HunyuanVideo :1391 / LTXAV :1237).
+# the latent), not a bug. Some video families trade it away instead, overriding
+# scale_latent_inpaint to return the clean latent: WAN22, WAN21_SCAIL2, HunyuanVideo, LTXAV
+# ("Hold anchor constant across all sigmas" is WAN21_SCAIL2's override).
 # Those models are LEFT ALONE — holding clean is the endpoint this schedule approaches.
 #
 # For every model on core's default, the ring is instead presented at
@@ -108,8 +112,8 @@ def anchor_ring_schedule(guider, sigmas, enabled=True):
     # Applies anchor_ring_factor for the duration of ONE sampler run. Patches the model
     # INSTANCE, never the class: core caches model objects for the whole session, so a class
     # patch would follow the model into every other node in the graph. Restored in `finally`.
-    # `enabled` is the per-path gate: False from the raster path (_refine_tiles, the base
-    # node), and on the sync path whatever anchor_source resolves to (sync._refine_canvas).
+    # `enabled` is whatever anchor_source resolves to (sync._refine_canvas). The raster path
+    # never enters this schedule.
     import contextlib
 
     @contextlib.contextmanager
@@ -130,8 +134,8 @@ def anchor_ring_schedule(guider, sigmas, enabled=True):
             # harness can swap the curve at one point without patching comfy at all.
             factor = anchor_ring_factor(float(sigma.reshape(-1)[0]) / sigma_first)
             scaled = sigma * factor
-            # core's own reshape (comfy model_base.py:409): sigma is per-batch-item and has to
-            # broadcast over the latent's trailing dims.
+            # core's own reshape in BaseModel.scale_latent_inpaint: sigma is per-batch-item and
+            # has to broadcast over the latent's trailing dims.
             shape = [scaled.shape[0]] + [1] * (len(noise.shape) - 1)
             return model.model_sampling.noise_scaling(scaled.reshape(shape), noise, latent_image)
 
@@ -167,24 +171,21 @@ def crop_image_to(image, height, width):
     return image[:, :height, :width, :]
 
 
-def tile_gradient(crop, core, scale=1):
-    # Binary denoise-mask indicator: 1 for
-    # every cell whose center lies inside the `core` rect, 0 outside. Cell centers
-    # (k+0.5) so one formula works at any grid resolution via `scale`; the pipeline uses
-    # scale=8 and passes overlap_inner_rect as `core` (core+overlap diffused at full
-    # strength, context_anchor ring frozen). The mask stays binary because ComfyUI's static
-    # inpaint blend (KSamplerX0Inpaint) re-applies denoise_mask on every step, so a
-    # fractional cell is only ever partially denoised — at low step counts (z-image turbo
-    # ~8 steps) that leaves an under-refined halo along the seam. A binary {0,1} mask
-    # fully diffuses every released cell and hard-freezes the rest, with no partial band.
+def denoise_indicator(crop, inner, scale=1):
+    # 1 for every cell of `crop` whose center lies inside `inner`, 0 outside. Cell centers
+    # (k+0.5) so one formula works at any grid resolution via `scale`. Both engines pass
+    # overlap_inner_rect as `inner` at scale=8 (core+overlap diffused at full strength,
+    # context_anchor ring frozen). The mask stays binary because ComfyUI's static inpaint
+    # blend (KSamplerX0Inpaint) re-applies denoise_mask on every step, so a fractional cell
+    # is only ever partially denoised. At low step counts (z-image turbo ~8 steps) that
+    # leaves an under-refined halo along the seam.
     w = (crop.x1 - crop.x0) // scale
     h = (crop.y1 - crop.y0) // scale
     xs = torch.arange(w, dtype=torch.float32) + 0.5
     ys = torch.arange(h, dtype=torch.float32) + 0.5
-    dx = ((core.x0 - crop.x0) / scale - xs).clamp(min=0) + (xs - (core.x1 - crop.x0) / scale).clamp(min=0)
-    dy = ((core.y0 - crop.y0) / scale - ys).clamp(min=0) + (ys - (core.y1 - crop.y0) / scale).clamp(min=0)
-    d = torch.sqrt(dx[None, :] ** 2 + dy[:, None] ** 2)
-    return (d == 0).to(torch.float32)
+    inside_x = (xs >= (inner.x0 - crop.x0) / scale) & (xs <= (inner.x1 - crop.x0) / scale)
+    inside_y = (ys >= (inner.y0 - crop.y0) / scale) & (ys <= (inner.y1 - crop.y0) / scale)
+    return (inside_y[:, None] & inside_x[None, :]).to(torch.float32)
 
 
 def _feather_ramp(band, plateau, k):
@@ -206,9 +207,9 @@ def _feather_ramp(band, plateau, k):
 
 def _ramp_curve(u, plateau, k):
     # The feather curve evaluated at arbitrary band coordinates `u` (any shape). Split out
-    # of _feather_ramp so the displaced (2-D) seam modes reuse the exact same curve — only
-    # WHERE it is sampled changes, never its shape. The clamp to [0,1] is what makes every
-    # seam mode safe: it bounds alpha, and it guarantees the base is never negative, so a
+    # of _feather_ramp so the min-error displaced (2-D) ramp reuses the exact same curve. Only
+    # WHERE it is sampled changes, never its shape. The clamp to [0,1] is what makes the
+    # displacement safe: it bounds alpha, and it guarantees the base is never negative, so a
     # fractional `k` can never produce NaN no matter how far a displacement pushes `u`.
     denom = max(1e-6, 1.0 - plateau)                             # guard plateau -> 1
     base = (u / denom).clamp(0.0, 1.0)                           # 1.0 through the plateau
@@ -248,7 +249,7 @@ def feather_alpha(paste_rect, core, overlap, kept_top, kept_left, plateau=FEATHE
     # analogous on x. alpha = ay (x) ax; the corner is the product of the two ramps.
     #
     # With no kept side (overlap == 0, or a top-left tile) both ramps are all-ones, so the
-    # composite reduces to the fe6f6a7 hard core paste, byte-identical, regardless of
+    # composite reduces to a hard core paste, byte-identical, regardless of
     # plateau/k. plateau=0, k=1 reproduces the original linear-ramp feather exactly.
     #
     # disp_top ([w]) / disp_left ([h]) optionally slide the transition along each seam (the
@@ -298,7 +299,7 @@ def _min_error_path(err):
     # The scan is inherently sequential along the seam, so it is a Python loop over columns.
     # It runs in numpy on preallocated buffers, not torch: the per-column arrays are tiny
     # (3 x band) and torch's per-op dispatch overhead dominates there — numpy is ~10x faster
-    # for the same arithmetic. Imported lazily to keep the module scope torch-only.
+    # for the same arithmetic.
     import numpy as np
 
     e = err.detach().cpu().numpy().astype(np.float32, copy=False)
@@ -366,12 +367,11 @@ def _normalize_denoise_mask(denoise_mask, latent_samples, load_device):
     return denoise_mask.reshape(mask_shape).to(device=load_device, dtype=torch.float32)
 
 
-def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None, anchor_ring=True):
+def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, denoise_mask=None, callback=None):
     # The per-tile reuse seam. Mirrors SamplerCustomAdvanced.sample with three deliberate
     # deviations: no fix_empty_latent_channels (the latent always comes from a real
     # vae.encode), no x0_output dict (the denoised output is unused; previews work
     # without it), and the denoise mask is handed over pre-normalized (below).
-    # denoise_mask/callback are injectable for the later tiling feature.
     import comfy.model_management
     import comfy.utils
     import latent_preview
@@ -381,10 +381,7 @@ def sample_latent(guider, sampler, sigmas, noise_tensor, seed, latent_samples, d
     if denoise_mask is not None:
         denoise_mask = _normalize_denoise_mask(denoise_mask, latent_samples, guider.model_patcher.load_device)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    # anchor_ring is False from _refine_tiles (the base node's raster path); the VL path's
-    # lead schedule is entered by the sync engine itself, once around the whole run.
-    with anchor_ring_schedule(guider, sigmas, enabled=anchor_ring):
-        samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    samples = guider.sample(noise_tensor, latent_samples, sampler, sigmas, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
     return samples.to(comfy.model_management.intermediate_device())
 
 
@@ -640,50 +637,6 @@ def seam_dc_offset(tile, sub, region, region_mask=None):
     return offset.clamp(-DC_MATCH_CLAMP, DC_MATCH_CLAMP).to(sub.dtype)
 
 
-def _debug_dir():
-    # Opt-in seam debug. When the CATR_DEBUG_DIR env var is set, _refine_tiles writes the
-    # per-tile intermediates (decoded crop, the raw band it encoded, the feather alpha, and
-    # the canvas region before/after the composite) plus a manifest there as PNGs, so the
-    # seam can be inspected tile by tile. Unset (the default) → a single env lookup and no
-    # other work, so the byte-for-byte output path is untouched. Read lazily (not at module
-    # scope) to keep sampling.py's module scope torch-only.
-    import os
-    return os.environ.get("CATR_DEBUG_DIR") or None
-
-
-def _dump_png(path, tensor):
-    # Save a debug tensor as PNG, batch 0 only. [B,H,W,C]/[H,W,C] → RGB (first 3 channels);
-    # [H,W] (a feather alpha or mask) → grayscale. Values are clamped to [0,1] and quantized
-    # for viewing only — this never feeds back into the pipeline. PIL is imported lazily so
-    # the module scope stays torch-only (a subprocess test pins that).
-    from PIL import Image
-
-    t = tensor.detach().to("cpu", torch.float32)
-    if t.ndim == 4:
-        t = t[0]
-    if t.ndim == 3:
-        arr = (t[..., :3].clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).contiguous().numpy()
-        Image.fromarray(arr, mode="RGB").save(path)
-    else:
-        arr = (t.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).contiguous().numpy()
-        Image.fromarray(arr, mode="L").save(path)
-
-
-def _manifest_line(tile_idx, tile, dc_offset=None):
-    # One human-readable row per tile for the seam-debug manifest: the geometry needed to
-    # line the dumped PNGs up in canvas space (core is the hard-owned region; paste is the
-    # feathered top/left band; crop is the full sampled extent incl. the frozen anchor ring).
-    # dc_offset is the applied per-channel DC correction — the number the DC match exists to
-    # produce, and it is invisible in the dumped PNGs (which hold the UNcorrected decode), so
-    # it has to be recorded here or it cannot be checked at all.
-    def rc(r):
-        return f"({r.x0},{r.y0})-({r.x1},{r.y1})"
-
-    dc = "" if dc_offset is None else " dc=[{}]".format(
-        ",".join(f"{v:+.6f}" for v in dc_offset.tolist()))
-    return f"t{tile_idx:02d} r{tile.row}c{tile.col} cls={tile.cls} kept_top={tile.kept_top} kept_left={tile.kept_left} core={rc(tile.core)} paste={rc(tile.paste_rect)} crop={rc(tile.crop_rect)}{dc}"
-
-
 def encode_pixels(vae, pixels):
     # The tile encode, batch-safe. A video-family VAE (latent_dim 3 — the Wan family, used
     # by e.g. Krea 2) reshapes a 4-D image batch to [1,C,B,H,W] (comfy/sd.py VAE.encode):
@@ -719,6 +672,85 @@ def build_canvas_noise(vae, noise, canvas_h, canvas_w, batch=1, batch_size=1, ba
     return canvas_noise
 
 
+# A sampler qualifies when its noise_sampler call count depends only on the sigmas and options and every call is an
+# independent normal. dpmpp_sde is out: its two draws per step span nested intervals from one sigma, so they must correlate.
+SHARED_NOISE_SAMPLERS = frozenset({
+    "euler_ancestral", "euler_ancestral_cfg_pp", "dpm_2_ancestral", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp",
+    "lcm", "ddpm", "er_sde", "seeds_2", "seeds_3", "exp_heun_2_x0_sde", "sa_solver", "sa_solver_pece",
+    "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
+    "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu",
+})
+
+
+class StepNoiseField:
+    """One canvas-wide per-step noise field for the raster path's stochastic samplers.
+
+    `shape` is the tile canvas's latent shape, 4-D or 5-D. `for_window` hands one tile a
+    `noise_sampler` whose call k returns draw k over that tile's latent window. Every tile runs
+    the same sampler over the same sigmas, so call k lines up across tiles and overlapping tiles
+    hold torch.equal noise on every shared cell.
+    """
+
+    # A tile draws only the blocks under its crop, about 9 MB and 1.4 s per 8K run at 9 steps. Caching each step's
+    # canvas field costs 293 to 978 MB, and redrawing it per tile 11 to 39 s (tests-AB/probe_canvas_noise_memory.py).
+    BLOCK_CELLS = 64
+
+    def __init__(self, shape, seed, batch_index=0):
+        self.shape = tuple(shape)
+        self.seed = int(seed)
+        self.batch_index = int(batch_index)
+
+    def _block(self, ordinal, by, bx):
+        # blake2b, never hash(): Python does not promise hash() values across versions.
+        key = hashlib.blake2b(struct.pack("<5Q", self.seed, self.batch_index, ordinal, by, bx), digest_size=8).digest()
+        generator = torch.Generator().manual_seed(int.from_bytes(key, "little") >> 1)
+        return torch.randn((*self.shape[:-2], self.BLOCK_CELLS, self.BLOCK_CELLS), generator=generator)
+
+    def _draw(self, ordinal, y0, y1, x0, x1):
+        size = self.BLOCK_CELLS
+        window = torch.empty((*self.shape[:-2], y1 - y0, x1 - x0))
+        for by in range(y0 // size, (y1 - 1) // size + 1):
+            for bx in range(x0 // size, (x1 - 1) // size + 1):
+                top, left = by * size, bx * size
+                cy0, cy1 = max(y0, top), min(y1, top + size)
+                cx0, cx1 = max(x0, left), min(x1, left + size)
+                block = self._block(ordinal, by, bx)
+                window[..., cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = block[..., cy0 - top:cy1 - top, cx0 - left:cx1 - left]
+        return window
+
+    def for_window(self, y0, y1, x0, x1):
+        if not (0 <= y0 < y1 <= self.shape[-2] and 0 <= x0 < x1 <= self.shape[-1]):
+            raise ValueError(
+                f"Context-Anchored Tile Refine: noise window rows {y0}:{y1}, columns {x0}:{x1} does not lie "
+                f"inside the {self.shape[-2]}x{self.shape[-1]} latent canvas.")
+        ordinals = itertools.count()
+
+        def noise_sampler(sigma, sigma_next):
+            return self._draw(next(ordinals), y0, y1, x0, x1).to(device=sigma.device)
+
+        return noise_sampler
+
+
+def build_step_noise(sampler, canvas_shape, seed, batch_index=0):
+    # The raster path's one swap point for the shared field, which tests-AB patches by name.
+    # None keeps the caller's sampler and its per-tile draw, and a caller's own noise_sampler wins.
+    import comfy.samplers
+
+    from . import stepper
+
+    # A subclass may override sample(), which the plain KSAMPLER copy made per tile would drop.
+    if type(sampler) is not comfy.samplers.KSAMPLER:
+        return None
+    if stepper.sampler_function_name(sampler) not in SHARED_NOISE_SAMPLERS:
+        return None
+    if sampler.extra_options.get("noise_sampler") is not None:
+        return None
+    # A NOISE object from another pack may carry a seed the unsigned 64-bit block key cannot hold.
+    if not isinstance(seed, int) or not 0 <= seed <= 0xFFFFFFFFFFFFFFFF:
+        return None
+    return StepNoiseField(canvas_shape, seed, batch_index)
+
+
 def region_gates(region_pixel, canvas_h, canvas_w):
     # The region gate at pixel and at latent resolution, as (region_padded, region_latent).
     # The pixel mask is padded onto the /8 canvas with constant 0 (the padded strip is always
@@ -748,7 +780,8 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # The BASE node's path only: since 1.6.0 the VL nodes tile through the sync engine
     # (sync.py), so nothing VL — no CLIP, no per-tile positive, no conditioning-surface
     # select — reaches this function at all.
-    # A 1x1 grid (or overlap=ctx=0) reproduces the feature-2 whole-image path bit for bit.
+    # A 1x1 grid (or overlap=ctx=0) is the whole-image refine bit for bit, except under a
+    # SHARED_NOISE_SAMPLERS sampler, whose per-step draws come from the canvas-wide field.
     # region_pixel (optional [B,H,W] binary float at input pixel size) gates each tile's
     # denoise_mask to the masked region so only it diffuses; the background stays frozen,
     # and it gates the DC measurement to the same region (see seam_dc_offset).
@@ -758,19 +791,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
     # (batch == 1 there). They reach the noise draw and the progress bar only; 1/0 — a
     # direct call, or a single-picture IMAGE — changes nothing.
     import comfy.model_management
-
-    # Opt-in seam debug (CATR_DEBUG_DIR). Every _save call site sits inside its own
-    # `if debug_dir is not None:` guard, which is what keeps _save undefined and unreachable
-    # when the variable is unset. Nothing below changes the output, only side-effect PNGs and
-    # a manifest are written.
-    debug_dir = _debug_dir()
-    debug_manifest = []
-    if debug_dir is not None:
-        import os
-        os.makedirs(debug_dir, exist_ok=True)
-
-        def _save(name, tensor):
-            _dump_png(os.path.join(debug_dir, name), tensor)
+    import comfy.samplers
 
     pixels = image[..., :3]
     padded, (height, width) = pad_image_to_multiple(pixels)
@@ -791,6 +812,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
 
     layout = grid.solve_layout(canvas_w, canvas_h, max_tile_width, max_tile_height, context_anchor, context_overlap)
     canvas_noise = build_canvas_noise(vae, noise, canvas_h, canvas_w, batch, batch_size, batch_index)
+    # Per-tile per-step draws refine every overlap band with two unrelated textures, which the
+    # feather then smudges together (tests-AB/probe_raster_noise_band.py).
+    step_noise = build_step_noise(sampler, canvas_noise.shape, noise.seed, batch_index)
 
     steps = sigmas.shape[-1] - 1
     for_tile = make_tile_progress(guider.model_patcher, steps, len(layout.tiles), batch_size, batch_index)
@@ -832,18 +856,22 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             iy0, iy1 = inner.y0 - crop.y0, inner.y1 - crop.y0
             ix0, ix1 = inner.x0 - crop.x0, inner.x1 - crop.x0
             enc[:, iy0:iy1, ix0:ix1, :] = source[:, inner.y0:inner.y1, inner.x0:inner.x1, :]
-            if debug_dir is not None:
-                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_enc.png", enc)
             tile_latent = encode_pixels(vae, enc)
         else:
             # Whole-image / n=1 path: crop == core, no anchor ring and no already-
-            # processed neighbor, so encode the live crop directly (feature-2, byte-
-            # for-byte). Kept exactly as before to preserve the whole-image path.
+            # processed neighbor, so encode the live crop directly.
             tile_latent = encode_pixels(vae, canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :])
         # .contiguous() because downstream sampler code may .view() the slice; a 1x1
         # grid slices the full tensor, so it returns self unchanged. The ellipsis
         # slices the trailing spatial dims of both the 4-D and the 5-D noise layout.
-        tile_noise = canvas_noise[..., crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8].contiguous()
+        ly0, ly1, lx0, lx1 = crop.y0 // 8, crop.y1 // 8, crop.x0 // 8, crop.x1 // 8
+        tile_noise = canvas_noise[..., ly0:ly1, lx0:lx1].contiguous()
+        tile_sampler = sampler
+        if step_noise is not None:
+            tile_sampler = comfy.samplers.KSAMPLER(
+                sampler.sampler_function,
+                extra_options={**sampler.extra_options, "noise_sampler": step_noise.for_window(ly0, ly1, lx0, lx1)},
+                inpaint_options=dict(sampler.inpaint_options))
         # Fail fast on any encode/noise layout divergence encode_pixels does not already
         # resolve — a VAE folding an image batch outside the video family it handles, or a
         # spatial compression the /8 grid math does not model. A mismatch here would
@@ -855,25 +883,22 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 "into frames, or a non-8x spatial compression).")
         # Binary latent denoise_mask: full-strength denoise over core+overlap
         # (== tile.overlap_inner_rect), frozen only through the context_anchor ring.
-        # Passing overlap_inner_rect as the "core" arg makes tile_gradient return its
-        # hard indicator (1 inside, 0 outside) — deliberately NOT a fractional ramp: the
-        # static inpaint blend re-applies this mask every step, so a fractional cell would
-        # only partly denoise (an under-refined seam halo). At context_overlap=0,
-        # overlap_inner_rect == core, bit-identical to the prior binary core indicator.
-        # With a region mask the gradient is intersected with the tile's region_latent
+        # Binary because the static inpaint blend re-applies this mask every step, so a
+        # fractional cell would only partly denoise (an under-refined seam halo).
+        # With a region mask the indicator is intersected with the tile's region_latent
         # slice ([B,th,tw], still binary) so only the masked region diffuses and the
         # surrounding background stays frozen context; the n=1 (unexpanded) masked case
         # yields denoise_mask = region_latent (NOT None), anchoring the in-crop background.
         if region_pixel is None:
-            denoise_mask = tile_gradient(crop, tile.overlap_inner_rect, scale=8) if expanded else None
+            denoise_mask = denoise_indicator(crop, tile.overlap_inner_rect, scale=8) if expanded else None
         else:
             reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
-            # .to(reg.device): tile_gradient builds its indicator from torch.arange, so it is
+            # .to(reg.device): denoise_indicator builds its mask from torch.arange, so it is
             # always CPU, while region_latent follows the MASK/IMAGE device (CUDA under
             # --gpu-only). The multiply below is elementwise, so it would raise across devices
             # on every multi-tile masked refine. A no-op when both are already CPU.
-            grad = tile_gradient(crop, tile.overlap_inner_rect, scale=8).to(reg.device) if expanded else 1.0
-            denoise_mask = grad * reg
+            inner_mask = denoise_indicator(crop, tile.overlap_inner_rect, scale=8).to(reg.device) if expanded else 1.0
+            denoise_mask = inner_mask * reg
         # Per-tile ControlNet swap: the swapped map's control chains are fresh copies whose
         # hints are this tile's crop_rect slice, so core's rescale is an identity and the hint
         # lands aligned.
@@ -885,21 +910,16 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             pristine_conds = guider.original_conds
             guider.original_conds = conds.crop_tile_conds(pristine_conds, hint_canvas, crop)
         try:
-            # anchor_ring=False, always: the lead schedule is the VL path's, and the VL path
-            # IS the sync engine since 1.6.0 (it enters anchor_ring_schedule itself, once for
-            # the whole run). On this node's plain conditioning the schedule was consistently
-            # worse in the owner's visual A/B (2026-08-13, tests-AB/run_ab_matrix.py, scene
-            # `portrait`): a distorted ear, duller colour and texture at the seam. The
-            # mechanism fits — the ring resolves ahead of the core so the core follows it, and
-            # only a VL positive tells a tile what its neighbourhood contains, so without one
-            # the tile is pulled toward a ring it cannot interpret.
-            samples = sample_latent(guider, sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx), anchor_ring=False)
+            # No lead ring schedule on this path. On plain conditioning it was consistently worse
+            # in the owner's visual A/B (tests-AB/run_ab_matrix.py, scene `portrait`), because
+            # only a VL positive tells a tile what the ring it follows contains.
+            samples = sample_latent(guider, tile_sampler, sigmas, tile_noise, noise.seed, tile_latent, denoise_mask=denoise_mask, callback=for_tile(tile_idx))
         finally:
             if pristine_conds is not None:
                 guider.original_conds = pristine_conds
         decoded = fold_decoded_frames(vae.decode(samples))
         if expanded:
-            # Directional feather (docs/CLAUDE.md prime directive 2): write paste_rect
+            # Directional feather (CLAUDE.md prime directive 3): write paste_rect
             # — the core plus the context_overlap band ONLY on sides bordering an
             # already-processed neighbor (top/left in raster order) — cross-dissolving
             # this tile into that neighbor. feather_alpha is 1 through the core (so the
@@ -912,7 +932,7 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
             # (this tile encoded the neighbor's finished pixels from the live canvas),
             # never a wide/divergent blend. With no kept side (top-left tile, or
             # context_overlap=0) paste_rect == core and alpha is all-ones, so this
-            # reduces to the fe6f6a7 hard core paste, byte-identical.
+            # reduces to a hard core paste, byte-identical.
             # .to() aligns the VAE output to the canvas device (under --gpu-only decode
             # lands on the GPU intermediate device while the cloned canvas stays on the
             # input device); a no-op when they already match (CPU tests bit-identical).
@@ -945,25 +965,9 @@ def _refine_tiles(image, guider, sampler, sigmas, vae, noise, max_tile_width, ma
                 sub = torch.where(in_gamut, corrected.clamp(0.0, 1.0), corrected)
             disp_top, disp_left = seam_displacements(tile, sub, region)
             alpha = feather_alpha(paste, core, layout.overlap, tile.kept_top, tile.kept_left, disp_top=disp_top, disp_left=disp_left).to(canvas.device)[..., None]
-            if debug_dir is not None:
-                # region is a VIEW into canvas, so dump it BEFORE the composite overwrites it.
-                tag = f"t{tile_idx:02d}_r{tile.row}c{tile.col}"
-                _save(tag + "_decoded.png", decoded)
-                _save(tag + "_alpha.png", alpha[..., 0])
-                _save(tag + "_region_before.png", region)
             canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :] = alpha * sub + (1.0 - alpha) * region
-            if debug_dir is not None:
-                _save(tag + "_region_after.png", canvas[:, paste.y0:paste.y1, paste.x0:paste.x1, :])
-                debug_manifest.append(_manifest_line(tile_idx, tile, dc_offset))
         else:
-            if debug_dir is not None:
-                _save(f"t{tile_idx:02d}_r{tile.row}c{tile.col}_decoded.png", decoded)
-                debug_manifest.append(_manifest_line(tile_idx, tile))
             canvas[:, crop.y0:crop.y1, crop.x0:crop.x1, :] = decoded
-    if debug_dir is not None:
-        _save("canvas_final.png", crop_image_to(canvas, height, width))
-        with open(os.path.join(debug_dir, "manifest.txt"), "w", encoding="utf-8") as manifest_file:
-            manifest_file.write("\n".join(debug_manifest) + "\n")
     return crop_image_to(canvas, height, width)
 
 
@@ -978,41 +982,16 @@ def _mask_row(mask, batch_index):
     return mask[row:row + 1]
 
 
-def _check_sync_intake(sampler, sigmas, sampler_name=None):
-    # The VL dispatch's fail-fast, run BEFORE any VAE encode or VL encode — both of which
-    # cost minutes and GPU memory the user would spend only to hit the same rejection deep
-    # inside the engine. Two things the sync engine cannot work around:
-    #   * the sampler must be one the stepper can time (its EVALS_PER_STEP table). When the
-    #     caller knows the NAME (the all-in-one node's widget), it is checked first: core's
-    #     sampler_object wraps several names in a private function (dpm_fast ->
-    #     dpm_fast_function), so the object alone would name something no widget offers.
-    #   * every lane steps ONE shared schedule, so the schedule must be strictly decreasing
-    #     and end at 0 — true of simple/normal/beta/sgm_uniform, so this needs no
-    #     per-scheduler knowledge. The engine's own preconditions re-check it.
-    from . import stepper
-
-    sampler_message = None if sampler_name is None else stepper.unsupported_sampler_message(sampler_name)
-    if sampler_message is not None:
-        raise ValueError(sampler_message)
-    stepper._resolve_sampler_name(sampler)
-    if not bool(torch.all(sigmas[1:] < sigmas[:-1])) or float(sigmas[-1]) != 0.0:
-        raise ValueError(
-            "Context-Anchored Tile Refine (VL): every tile of a synchronized run steps ONE "
-            "shared schedule, so sigmas must be strictly decreasing and end at 0.0. Got a "
-            f"schedule of {int(sigmas.numel())} sigmas from {float(sigmas.reshape(-1)[0])} to "
-            f"{float(sigmas.reshape(-1)[-1])}.")
-
-
 def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height, context_anchor, context_overlap, mask=None, vl_clip=None, vlm_method=captions.VLM_METHOD_VISION, anchor_source=None, sampler_name=None, batch_size=1, batch_index=0, progress=None, preset=None, tile_captions=None, layout=None, noise_fields=None):
     # Entry point, and the ONE place all three nodes meet. With a vl_clip the whole refine is
     # handed to the sync engine (sync.py) — mask or no mask — and everything below it is the
     # BASE node's raster path.
-    # Without a mask this is the whole-image / multi-tile refine, byte-for-
-    # byte the extracted _refine_tiles body. With a mask: harden (>=0.5) → bbox of THIS
-    # picture's mask row → crop to bbox + context_anchor (frozen-background halo) → tile-refine the
-    # crop with every tile's denoise_mask gated to the masked region → composite the
-    # refined crop back through a 1px anti-aliased edge. The mask=0 background survives from
-    # the ORIGINAL pixels (never the VAE-decoded crop), so it is never re-diffused.
+    # Without a mask this is _refine_tiles over the whole image. With a mask: harden (>=0.5)
+    # → bbox of THIS picture's mask row → crop to bbox + context_anchor (frozen-background
+    # halo) → tile-refine the crop with every tile's denoise_mask gated to the masked region
+    # → composite the refined crop back through a 1px anti-aliased edge. The mask=0
+    # background survives from the ORIGINAL pixels (never the VAE-decoded crop), so it is
+    # never re-diffused.
     # The minimum-error routing and the per-tile DC match shape the inter-TILE directional
     # feather only; neither touches the mask boundary, which stays a hard binary gate plus a
     # 1px anti-alias (mask-boundary-conditioning-not-feather). The DC measurement is gated to
@@ -1076,14 +1055,8 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
     original_conds = getattr(guider, "original_conds", None)
     control_active = conds.has_spatial_conds(original_conds)
     if vl_clip is not None:
-        # The per-tile positive swap needs the CFGGuider conds convention; anything else
-        # would silently sample with the swap never taking effect.
-        if not isinstance(original_conds, dict) or "positive" not in original_conds:
-            raise ValueError(
-                "VL refine needs a guider that keeps 'positive' in original_conds "
-                f"(the CFGGuider convention). Got {sorted(original_conds) if isinstance(original_conds, dict) else type(original_conds).__name__}")
         # ControlNet is a BASE-node feature only. Each tile's positive is replaced outright
-        # by a fresh vision-slice cond that carries no control chain, so a cropped hint would
+        # by its own tile conditioning, which carries no control chain, so a cropped hint would
         # reach the negative branch alone — asymmetric CFG, with the hint steering only the
         # unconditional side — and every per-tile positive control copy would be built and
         # thrown away. Drop the whole hint pipeline here and say so once; the sync engine
@@ -1092,8 +1065,9 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         if control_active:
             logging.warning(
                 "Context-Anchored Tile Refine (VL): ControlNet conditioning is ignored by the "
-                "VL nodes, because every tile's positive is replaced by its vision slice. Use "
-                "the base Context-Anchored Tile Refine node for control.")
+                "VL nodes, because every tile's positive is replaced by its own tile "
+                "conditioning, which carries no control chain. Use the base "
+                "Context-Anchored Tile Refine node for control.")
         # THE VL PATH IS THE SYNC ENGINE, for the masked refine as much as the whole-image
         # one: refine_sync owns the bbox crop, the region gate and the anti-aliased composite
         # itself, and it is what builds the (full image, bbox x0, bbox y0) triple the
@@ -1103,13 +1077,13 @@ def refine_image(image, guider, sampler, sigmas, vae, noise, max_tile_width, max
         # own module scope, so the pair is acyclic only while this stays inside the function.
         from . import sync
 
-        _check_sync_intake(sampler, sigmas, sampler_name)
         return sync.refine_sync(
             image, guider, sampler, sigmas, vae, noise, max_tile_width, max_tile_height,
             context_anchor, context_overlap, vl_clip, mask=mask, vlm_method=vlm_method,
             anchor_source=sync.ANCHOR_SOURCE_IMAGE if anchor_source is None else anchor_source,
             batch_size=batch_size, batch_index=batch_index, progress=progress,
-            preset=preset, tile_captions=tile_captions, layout=layout, noise_fields=noise_fields)
+            sampler_name=sampler_name, preset=preset, tile_captions=tile_captions, layout=layout,
+            noise_fields=noise_fields)
     if mask is None:
         hint_canvas = conds.prepare_hint_canvas(original_conds, (image.shape[1], image.shape[2])) if control_active else None
         # Picture b must be conditioned on hint row b — see conds.slice_hint_row. Skipped

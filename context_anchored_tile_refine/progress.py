@@ -1,21 +1,22 @@
 """One progress ledger for a VL node execution: ONE bar, divided into budget segments.
 
-THE PROBLEM. A VL run emits from FOUR independent ProgressBar objects — the upscale model
+THE PROBLEM. A VL run emits from FOUR independent ProgressBar objects: the upscale model
 pass (upscale.py), core's per-token bar inside `clip.generate` (llama.py, sized to
-max_length and abandoned at the stop token), the caption pre-pass (captions.py) and the
-sampling bar (sync.py) — and each new object RESETS the frontend display. The ledger
-replaces them with one bar whose value only ever grows.
+max_length and abandoned at the stop token), the tile text pre-pass
+(captions.generate_caption_set or tags.generate_tag_trace) and the sampling bar (sync.py).
+Each new object RESETS the frontend display. The ledger replaces them with one bar whose
+value only ever grows.
 
 THE UNIT is ONE DiT EVAL OF ONE TILE, because that is the one cost the run knows exactly
 before it starts (`stepper.plan_evals` x the tile count). Every other phase is budgeted in
-that unit by a named constant below; the constants are calibration knobs, not magic numbers
+that unit by a named constant below. The constants are calibration knobs, not magic numbers
 scattered through the engine.
 
 THE STRUCTURE, in one picture:
 
     plan      [ upscale ][ clip load ][ captions ][ vision encode ][ canvas encode ]
               [ sampling ][ decode ]              <- per PICTURE, repeated when B > 1
-    cursor     ^ first entry not yet CLOSED; the entry AT the cursor may be OPEN
+    cursor     ^ first entry not yet CLOSED, and the entry AT the cursor may be OPEN
     value      sum of every closed entry's real size + the open entry's fill
     total      value's base + every entry from the cursor onward, at its planned size
 
@@ -40,7 +41,7 @@ The ledger's OWN bar is built in `__init__`, before the patch, so it is genuine.
 SCOPE: the shim captures bars constructed through the `comfy.utils.ProgressBar` ATTRIBUTE
 (llama.py's token bar, sd.py's VAE tiled fallbacks, upscale.py's tiled_scale bar). The
 KNOWN ESCAPE is sd.py:360, whose `ProgressBar` comes from a module-level `from comfy.utils
-import ProgressBar` binding — reachable from every CLIP encode this package makes when CLIP
+import ProgressBar` binding, reachable from every CLIP encode this package makes when CLIP
 hook scheduling is active. Nothing here claims totality.
 
 Module scope is STDLIB ONLY: no torch, no comfy and no logit_classifier. Each is imported
@@ -53,10 +54,10 @@ from contextlib import ExitStack
 # --- the budget, in DiT-eval units (see the module docstring for what the unit is) -------
 #
 # Only the sampling segment is EXACT (stepper.plan_evals x tile count, re-fit at stepper
-# intake). Every constant here is an ASSUMED wall-time ratio against one tile eval — a
-# tuning knob that sets that phase's SHARE of the total and nothing else; changing one
+# intake). Every constant here is an ASSUMED wall-time ratio against one tile eval, a
+# tuning knob that sets that phase's SHARE of the total and nothing else. Changing one
 # changes only the pacing, never the correctness of the value/total invariants. A segment
-# buys a phase an honest share of the total and a named status line — NOT movement:
+# buys a phase an honest share of the total and a named status line, NOT movement:
 # CLIP_LOAD / VISION_ENCODE / CAPTION_ENCODE have no fill source (core builds no inner
 # bar there), so they sit at zero fill and are credited whole when the next phase opens.
 W_UPSCALE_STEP = 0.1          # one comfy tiled_scale step of the upscale model
@@ -78,7 +79,7 @@ W_DECODE_TILE = 1.0           # one tile's VAE window decode
 # therefore mapped to fill at this fraction of max_length and HOLD at its boundary.
 CAPTION_FILL_RATIO = 0.65
 
-# comfy's ProgressBar carries integers, while the budget above is fractional; the emitted
+# comfy's ProgressBar carries integers, while the budget above is fractional. The emitted
 # value is the unit count scaled by this. Purely a resolution choice.
 EMIT_SCALE = 100
 
@@ -103,7 +104,7 @@ def caption_segment(preset, n_tiles, rows):
 
     tile_chunks = int(n_tiles) * int(rows)
     style_chunks = captions.style_row_count(preset, int(rows))
-    tile_units = K_TAG_TILE if preset.kind == captions.TILE_TEXT_TAGS else K_CAPTION
+    tile_units = K_TAG_TILE if preset.tile_text == captions.TILE_TEXT_TAGS else K_CAPTION
     return tile_chunks * tile_units + style_chunks * K_CAPTION, tile_chunks + style_chunks
 
 
@@ -112,7 +113,7 @@ def caption_status_word(preset):
     # pass the preset runs.
     from . import captions
 
-    return "tagging" if preset.kind == captions.TILE_TEXT_TAGS else "captioning"
+    return "tagging" if preset.tile_text == captions.TILE_TEXT_TAGS else "captioning"
 
 # --- segment names ------------------------------------------------------------------------
 # One string per phase, defined once so the engine, the ledger's plan and any status-text
@@ -142,7 +143,7 @@ STATUS_TEXT = {
 
 
 def linear_fill(value, total):
-    # A routed bar's own progress as a fraction of its own total — the default mapping.
+    # A routed bar's own progress as a fraction of its own total, the default mapping.
     if total <= 0:
         return 1.0
     return min(1.0, max(0.0, value / total))
@@ -151,7 +152,7 @@ def linear_fill(value, total):
 def caption_fill(index, max_length):
     # Core's token bar is sized to max_length but greedy decode stops early, so a linear
     # mapping would leave every caption's chunk visibly short. Token `index` fills the chunk
-    # at CAPTION_FILL_RATIO of max_length and the chunk HOLDS there; the exact boundary is
+    # at CAPTION_FILL_RATIO of max_length and the chunk HOLDS there. The exact boundary is
     # reached by the completion snap (`caption_done`), never by a token.
     from . import captions
 
@@ -166,7 +167,7 @@ def build_plan(vlm_method, steps, batch=1, upscale_model=False, clip_load=False)
     """The ordered segment plan for one VL node execution, at PROVISIONAL sizes.
 
     Sizes that depend on the grid (every per-tile budget) and on the sampler (the eval
-    total) are not knowable here — this plan is what gives the bar a total to start from,
+    total) are not knowable here. This plan is what gives the bar a total to start from,
     and each segment is re-fit as its truth arrives. PHASE ORDER FOLLOWS THE CODE, per
     vlm_method: sync.build_tile_positives runs the captions FIRST and the conditioning build
     after, so "vision tokens and captions" reads [captions][vision encode] and never the
@@ -199,10 +200,11 @@ def build_plan(vlm_method, steps, batch=1, upscale_model=False, clip_load=False)
 class Ledger:
     """The run's ONE ProgressBar, plus the segment bookkeeping that keeps it monotone.
 
-    Created ONLY in node.py (that is where the run's whole shape — node kind, upscale
-    model, vlm_method, batch — is in hand, and it removes any two-owner ambiguity); every
-    engine function takes one as an optional `progress=` and creates nothing when it is
-    None, so direct callers and the tests-AB harnesses see no behavior change at all.
+    Created only by nodes: node.py's VL nodes through build_ledger and testing.py's
+    Captions node through build_caption_ledger, because a node is where the run's whole
+    shape is in hand. Every engine function takes one as an optional `progress=` and
+    creates nothing when it is None, so direct callers and the tests-AB harnesses see no
+    behavior change at all.
     No locking: the stepper's scheduler is cooperative-serial (exactly one lane runs at a
     time) and comfy's own progress hook is thread-safe.
     """
@@ -229,8 +231,8 @@ class Ledger:
         self._total = 0
         self.unique_id = unique_id
         self.segments = []        # the plan entries opened, in order (name, units)
-        self.chunks = None        # last (i, n) a caption reported, for the captioning line
-        self._status_text = None  # last EMITTED status line; a repeat is never re-sent
+        self.caption_counters = None  # last (i, n) a caption reported, for the captioning line
+        self._status_text = None  # last EMITTED status line, never re-sent on a repeat
         # The "image b/B" prefix. B is READ OFF THE PLAN rather than passed in a second time:
         # build_plan appends one sampling entry per picture, so the plan is the one place the
         # batch is stated and the prefix cannot contradict the segments it labels.
@@ -257,7 +259,7 @@ class Ledger:
         """Close whatever is open and open the plan's next `name` entry at `units`.
 
         The cursor WALKS to that entry, dropping any planned entry the run skipped (an
-        empty mask returns before the canvas encode; a picture whose grid differs skips
+        empty mask returns before the canvas encode, and a picture whose grid differs skips
         nothing but re-fits). A name the plan does not carry is inserted at the cursor, so
         an unplanned phase costs pacing rather than correctness.
         """
@@ -287,17 +289,8 @@ class Ledger:
             self._emit()
 
     def preset(self, name, units):
-        # A PENDING entry's true size, the moment it becomes known — BEFORE the segment
-        # opens. Without this the displayed fraction inflates against a provisional total
-        # and then collapses when a big segment finally opens at its true size (the
-        # sampling segment is ~n_tiles x its provisional size, so on a 30-tile grid the
-        # bar read ~95% at the end of the captions and dropped to ~45% at sampling).
-        # EVERY pending match is set, not just the first: with B>1 the plan repeats names
-        # per picture, and seeding only picture k's block would re-create the same
-        # collapse at every picture boundary (96% -> 50% on a 2-image batch). Later
-        # pictures are seeded from THIS picture's grid as an estimate; each one still
-        # re-presets its own block at its own grid solve, so a differing grid re-fits by
-        # the grid delta instead of by ~n_tiles-fold.
+        # Every PENDING match is pre-sized, so the total never collapses when a large segment
+        # opens at its true size. Every match, not the first, because with B > 1 names repeat.
         start = self._cursor + 1 if self._is_open else self._cursor
         for entry in self._plan[start:]:
             if entry[0] == name:
@@ -305,14 +298,8 @@ class Ledger:
         self._emit()
 
     def preset_picture(self, preset, n_tiles, rows, eval_total, vision_units):
-        # One picture's whole block at true sizes, called at that picture's grid solve —
-        # the mirror of build_plan's per-picture entries with the real multipliers, and
-        # the same arithmetic the engine's open() calls carry (they re-set the identical
-        # numbers, so open never moves the total again). `preset` is the run's resolved
-        # block, since its kind and its style rows size the caption segment
-        # (caption_segment), and `vision_units` is the pre-pass's vision encode cost
-        # (vision_encode_units), required because a forgotten one would silently size the
-        # segment without the crop encodes.
+        # The same arithmetic the engine's open() calls carry, so open never moves the total.
+        # `vision_units` is required: a forgotten one would size the segment without crop encodes.
         from . import captions
 
         count = max(int(n_tiles), 1)
@@ -330,15 +317,11 @@ class Ledger:
         self.preset(DECODE, count * W_DECODE_TILE)
 
     def close(self):
-        # End the open segment with no successor yet — updates arriving now cannot move the
-        # value at all (there is no segment to map them into).
         self._close()
         self._emit()
 
     def finish(self):
-        # Normal end of run: everything still planned is counted done, so value == total.
-        # Reached on the legitimate denoise <= 0 setting too, where the engine returns
-        # before sampling and most of the plan is never opened.
+        # Also reached on denoise <= 0, where most of the plan never opens.
         self._close()
         self._done += sum(entry[1] for entry in self._plan[self._cursor:])
         self._cursor = len(self._plan)
@@ -348,19 +331,19 @@ class Ledger:
 
     def advance(self, units, preview=None):
         # UNIVERSAL RESUME RULE: the fill only ever grows and never passes the segment's
-        # own boundary, which is what keeps a caption's retry chain and the upscale OOM
-        # retry — both of which restart an inner bar mid-segment — monotone.
+        # own boundary. That keeps a caption's retry chain and the upscale OOM retry (both
+        # restart an inner bar mid-segment) monotone.
         if self._is_open:
             self._fill = min(max(self._fill, float(units)), self._plan[self._cursor][1])
         self._emit(preview)
 
     def caption_done(self, index, count):
-        # One caption finished. (index, count) are generate_tile_captions' own RUN-WIDE
-        # counters — the same pair that feeds its standalone bar — so a status-text reader
-        # gets "captioning i/n" spanning the whole batch, while the chunk arithmetic below
-        # re-bases them onto THIS picture's segment (the first completion in a segment is
-        # its local chunk 1).
-        self.chunks = (int(index), int(count))
+        # One caption finished. (index, count) are the text pass's RUN-WIDE counters
+        # (captions.generate_caption_set or tags.generate_tag_trace), the same pair that
+        # feeds that pass's standalone bar. A status-text reader therefore gets "captioning
+        # i/n" spanning the whole batch, while the chunk arithmetic below re-bases them onto
+        # THIS picture's segment (the first completion in a segment is its local chunk 1).
+        self.caption_counters = (int(index), int(count))
         if not self._is_open:
             return
         if self._chunk_base is None:
@@ -370,7 +353,7 @@ class Ledger:
 
     def route(self, value, total, preview=None):
         # The shim's one entry point: an inner bar's own (value, total) mapped into the
-        # CURRENT segment — or into the current chunk of it, which is what turns core's
+        # CURRENT segment, or into the current chunk of it, which is what turns core's
         # per-token bar into per-caption sub-progress. With nothing open the update is
         # emitted but cannot move the value.
         if not self._is_open or total <= 0:
@@ -411,7 +394,7 @@ class Ledger:
             self._fill = 0.0
             if name == DECODE:
                 # A picture's block ENDS at its decode, so the "image b/B" prefix advances
-                # here — never at a block's first segment, which is a different phase per
+                # here, never at a block's first segment, which is a different phase per
                 # vlm_method and would have to be re-derived to be recognized.
                 self._picture += 1
 
@@ -426,7 +409,7 @@ class Ledger:
         return round(units * EMIT_SCALE)
 
     def _status(self):
-        """The line this state says, or None for "nothing to report — leave the last one".
+        """The line this state says, or None for "nothing to report, leave the last one".
 
         Read off the open segment alone, so a phase that reports nothing (a closed cursor
         between segments, a caption segment before its first completion, a sampling segment
@@ -437,32 +420,19 @@ class Ledger:
             return None
         name, units = self._plan[self._cursor]
         if name == CAPTIONS:
-            # caption_done's RUN-WIDE counters, so the count spans a batch exactly as the
-            # standalone caption bar does. `_chunk_base` is what says those counters belong
-            # to THIS segment: it is cleared at every open and set by the segment's first
-            # completion. BEFORE the first completion the line still reports — the first
-            # caption is the single longest un-narrated stretch of the pre-pass (the VL
-            # encoder cold-loads and runs a full greedy decode inside it), so a blank row
-            # there is exactly the freeze this feature removes. The pre-completion count
-            # is this segment's LOCAL chunk count (the run-wide total is unknowable until
-            # a completion reports it).
+            # Reports before the first completion too, because the first caption (a VL encoder
+            # cold load plus a full greedy decode) is the pre-pass's longest silent stretch.
             if self._chunk_base is None:
-                if self.chunks is not None:
-                    # A previous picture already reported run-wide counters: anticipate the
-                    # next index, so the count never appears to restart at a picture
-                    # boundary ("captioning 3/6", not "captioning 1/3").
+                if self.caption_counters is not None:
+                    # Anticipate the next run-wide index, so the count never appears to
+                    # restart at a picture boundary ("captioning 3/6", not "captioning 1/3").
                     return (f"{self._status_word} "
-                            f"{min(self.chunks[0] + 1, self.chunks[1])}/{self.chunks[1]}")
+                            f"{min(self.caption_counters[0] + 1, self.caption_counters[1])}/{self.caption_counters[1]}")
                 return f"{self._status_word} 1/{self._chunks}"
-            return f"{self._status_word} {self.chunks[0]}/{self.chunks[1]}"
+            return f"{self._status_word} {self.caption_counters[0]}/{self.caption_counters[1]}"
         if name == SAMPLING:
-            # Percent of THIS segment, moved once per completed model eval (the stepper's
-            # on_eval tick — n_tiles ticks per sigma step, so the percent walks in ~1%
-            # increments instead of jumping a whole step at a time). 0% IS a report: the
-            # diffusion model loads onto the GPU inside the first lane's sample() call,
-            # between this segment's open and its first eval — letting the previous
-            # phase's line ("encoding tiles") stand across that load would mislabel the
-            # longest single wait of the run.
+            # 0% IS a report: the diffusion model loads inside the first lane's sample() call,
+            # and the previous phase's line standing across that load would mislabel it.
             percent = 100 if units <= 0 else round(100 * self._fill / units)
             return f"sampling {percent}%"
         return STATUS_TEXT.get(name)

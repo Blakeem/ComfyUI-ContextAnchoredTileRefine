@@ -6,9 +6,8 @@ upscale model first, then at most one lanczos resize onto the exact target — s
 pipeline downstream never resamples a tile (prime directive 1).
 
 The non-obvious rule: a resize that would NOT change the size is skipped, not run.
-comfy.utils.common_upscale's "lanczos" branch round-trips through PIL on uint8
-(comfy/utils.py `lanczos`), so a same-size lanczos is an 8-bit quantization loss rather
-than an identity.
+The lanczos pass (`_lanczos`, a mirror of comfy/utils.py `lanczos`) round-trips through
+PIL on uint8, so a same-size lanczos is an 8-bit quantization loss rather than an identity.
 
 `Noise_RandomNoise` / `build_sigmas` / `build_guider` / `encode_empty` are how
 `ContextAnchoredTileUpscaleVL` builds the NOISE, SIGMAS and GUIDER inputs in-process from
@@ -30,6 +29,10 @@ MODEL_TILE = 512
 MODEL_TILE_OVERLAP = 32
 MODEL_TILE_MIN = 128
 
+# Rows per uint8 conversion slice in `_lanczos`. A slice of a 16384 px wide RGB float32
+# picture is about 50 MB of float scratch.
+LANCZOS_CHUNK_ROWS = 256
+
 
 def scale_target(width, height, upscale_by):
     # Target size as (width, height). Rounding matches core's ImageScaleBy (nodes.py:
@@ -38,12 +41,33 @@ def scale_target(width, height, upscale_by):
     return max(1, round(width * upscale_by)), max(1, round(height * upscale_by))
 
 
-def _lanczos_resize(image, width, height):
-    # ImageScaleBy's body with the method pinned to lanczos: NHWC -> NCHW -> NHWC.
-    import comfy.utils
+def _lanczos(samples, width, height):
+    # comfy/utils.py `lanczos` with every step's arithmetic kept, except the uint8 conversion
+    # runs in row slices. Core's version holds three full-size float copies at once.
+    import numpy as np
+    from PIL import Image
 
+    if samples.ndim == 4:
+        samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
+    resized = []
+
+    for picture in samples:
+        pixels = torch.empty(picture.shape, dtype=torch.uint8)
+        for row in range(0, picture.shape[0], LANCZOS_CHUNK_ROWS):
+            chunk = picture[row:row + LANCZOS_CHUNK_ROWS].cpu()
+            pixels[row:row + LANCZOS_CHUNK_ROWS] = chunk.mul(255.0).clamp_(0, 255).to(torch.uint8)
+        image = Image.fromarray(pixels.numpy()).resize((width, height), resample=Image.Resampling.LANCZOS)
+        values = np.array(image).astype(np.float32) / 255.0
+        resized.append(torch.from_numpy(values).movedim(-1, 0) if values.ndim == 3 else torch.from_numpy(values))
+
+    return torch.stack(resized).to(samples.device, samples.dtype)
+
+
+def _lanczos_resize(image, width, height):
+    # ImageScaleBy's body with the method pinned to lanczos: NHWC -> NCHW -> NHWC. On a 4-D
+    # input with crop disabled, core's common_upscale is exactly its lanczos call.
     samples = image.movedim(-1, 1)
-    resized = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled")
+    resized = _lanczos(samples, width, height)
     return resized.movedim(1, -1)
 
 
@@ -114,7 +138,11 @@ def _upscale_with_model(upscale_model, image, progress=None):
     finally:
         if patcher is None:
             upscale_model.to("cpu")
-    result = torch.clamp(upscaled.movedim(-3, -1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
+    # In place, because a second full-size copy is this stage's RAM peak at a 16K intermediate. Core's tiled_scale
+    # returns an inference tensor, which accepts an in-place update only inside inference mode.
+    with torch.inference_mode():
+        upscaled.clamp_(0, 1.0)
+    result = upscaled.movedim(-3, -1).to(comfy.model_management.intermediate_dtype())
     if alpha is not None:
         alpha = comfy.utils.common_upscale(alpha.movedim(-1, -3).to(result), result.shape[2], result.shape[1], "bilinear", "disabled")
         result = torch.cat((result, alpha.movedim(-3, -1)), dim=-1)
@@ -193,9 +221,9 @@ class SlicedCanvasNoise:
     def noise_fields(self, sampler, sigmas):
         # The stochastic sampler's per-step field, sized by the FULL canvas and read at this
         # block's origin, so every injection is the one the entire canvas run would have made.
-        # A one tile block therefore draws a canvas-sized CPU field per step (about 132 MB at
-        # the owner's 8K config, tens of milliseconds). Accepted: it buys draws identical to
-        # the full run's, and it stays far below one tile's sampling step on the GPU.
+        # A one tile block therefore draws a canvas-sized CPU field per step (about 132 MB and
+        # 2 to 4 s per query at the owner's 8K config). Accepted: it buys draws identical to
+        # the full run's, and the provider prefetches each query behind the lane evals.
         from . import stepper
 
         return stepper.offset_noise_fields(
@@ -224,8 +252,8 @@ def build_sigmas(model, scheduler, steps, denoise):
 
 def build_guider(model, positive, negative, cfg):
     # comfy_extras/nodes_custom_sampler.py CFGGuider.execute. It must be core's CFGGuider
-    # specifically: the VL path in sampling.refine_image swaps each tile's positive inside
-    # `original_conds`, which is that class's convention.
+    # specifically: sync.build_lane_guiders copies it per lane and replaces
+    # original_conds["positive"], which is that class's convention.
     import comfy.samplers
 
     guider = comfy.samplers.CFGGuider(model)
@@ -235,7 +263,7 @@ def build_guider(model, positive, negative, cfg):
 
 
 def encode_empty(clip):
-    # nodes.py CLIPTextEncode.encode with an empty prompt. The VL node has no prompt input:
-    # this is the positive placeholder vl.py overwrites per tile, and the negative whenever
-    # the optional negative input is unconnected.
+    # nodes.py CLIPTextEncode.encode with an empty prompt. It is the placeholder positive
+    # that each lane's own positive replaces, and the negative whenever no negative is
+    # connected. The prompt input reaches only the VL model, never this encode.
     return clip.encode_from_tokens_scheduled(clip.tokenize(""))

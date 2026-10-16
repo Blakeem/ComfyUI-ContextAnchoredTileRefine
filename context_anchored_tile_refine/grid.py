@@ -185,7 +185,7 @@ def tile_class_label(cx, cy):
 
 def build_layout(W, H, sx, sy, ctx, overlap=0):
     # Full 2D layout from two per-axis solves; row-major (raster) tiles, all values in
-    # canvas px. Two distinct geometries per tile:
+    # canvas px. Three geometries per tile:
     #   crop_rect          = core + r on EVERY neighbor side (symmetric sampled extent).
     #   overlap_inner_rect = core + overlap on every neighbor side (the diffused region).
     #   paste_rect         = core + overlap on the TOP/LEFT neighbor sides only

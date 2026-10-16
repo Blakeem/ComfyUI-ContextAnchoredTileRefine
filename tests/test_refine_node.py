@@ -85,7 +85,7 @@ def test_vl_node_forwards_its_widgets(comfy_stubs, monkeypatch, choice, method, 
     assert recorded == {"context_anchor": 64, "vl_clip": clip, "anchor_source": choice,
                         "vlm_method": method, "progress": "Ledger", "preset": expected_preset}
     if method != "vision tokens":
-        assert "a fox in the centre" in expected_preset.tile_instruction
+        assert "a fox in the centre" in expected_preset.tile_caption_instruction
     # ... and it is the run's ONE bar: nothing else in this call constructs another.
     assert len(comfy_stubs["progress_bars"]) == 1
 
@@ -130,14 +130,14 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
 
     _refine_vl(FakeTagClip(), prompt=prompt)
 
-    assert recorded["preset"].kind == captions.TILE_TEXT_TAGS
+    assert recorded["preset"].tile_text == captions.TILE_TEXT_TAGS
     assert recorded["preset"].prompt == ("" if prompt is None else prompt)
 
 
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (object(), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
 ])
 def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
                                                                              clip, missing, error, message):
@@ -164,7 +164,7 @@ def test_vl_node_names_the_missing_library_for_a_caption_preset_before_the_engin
     monkeypatch.setitem(sys.modules, "logit_classifier", None)
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.4\.0"'):
+    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.5\.0"'):
         _refine_vl(object())
 
 
@@ -247,27 +247,45 @@ def test_full_fake_pipeline_returns_image_tuple(comfy_stubs):
 
 
 def test_multi_tile_smoke(comfy_stubs):
-    # refine() sits below VALIDATE_INPUTS, so tiny caps force a 3x3 grid with fakes.
-    # ctx=overlap=0 is the internal escape hatch (a ring at caps 32 would correctly raise
-    # GridConfigError); feather-active coverage lives in test_tiling.
+    # The smallest legal caps on a 576 px image force a 3x3 grid (base 288 > 256, base 192 fits).
+    # ctx=overlap=0 keeps the fakes simple. Feather-active coverage lives in test_tiling.
     guider, vae, noise = FakeGuider(), FakeVAE(), FakeNoise()
 
     result = ContextAnchoredTileRefine().refine(
-        image=torch.rand(1, 80, 80, 3),
+        image=torch.rand(1, 576, 576, 3),
         guider=guider,
         sampler=object(),
         sigmas=torch.linspace(1.0, 0.0, 5),
         vae=vae,
         noise=noise,
-        max_tile_width=32,
-        max_tile_height=32,
+        max_tile_width=256,
+        max_tile_height=256,
         context_anchor=0,
         context_overlap=0,
         mask=None,
     )
 
     assert isinstance(result, tuple) and len(result) == 1
-    assert result[0].shape == (1, 80, 80, 3)
+    assert result[0].shape == (1, 576, 576, 3)
     assert vae.encode_calls == 9 and vae.decode_calls == 9
     assert guider.sample_calls == 9
     assert len(noise.calls) == 1
+
+
+@pytest.mark.parametrize("node", [ContextAnchoredTileRefine, ContextAnchoredTileRefineVL])
+def test_a_linked_context_anchor_off_the_8_grid_is_refused_before_the_engine_runs(comfy_stubs, monkeypatch, node):
+    # A linked INT skips VALIDATE_INPUTS and core's range check, so refine re-checks it.
+    def unreached(*args, **kwargs):
+        raise AssertionError("refine_image must not run with an off-grid context_anchor")
+
+    monkeypatch.setattr(sampling, "refine_image", unreached)
+    widgets = {
+        "image": torch.rand(1, 96, 104, 3), "guider": FakeGuider(), "sampler": object(),
+        "sigmas": torch.linspace(1.0, 0.0, 5), "vae": FakeVAE(), "noise": FakeNoise(),
+        "max_tile_width": 1024, "max_tile_height": 1024, "context_anchor": 12, "context_overlap": 8,
+    }
+    if node is ContextAnchoredTileRefineVL:
+        widgets.update(anchor_source="source image", vlm_method="vision tokens", clip=object())
+
+    with pytest.raises(ValueError, match="context_anchor must be a multiple of 8, got 12"):
+        node().refine(**widgets)

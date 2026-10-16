@@ -104,8 +104,8 @@ def main_tensor(encoded):
 
 def tail_rows(clip, canvas, caption):
     """How many rows this caption's stream carries after vision_end (caption + tail)."""
-    _, tail_len = captions._tokenize_images(clip, vl.VISION_BLOCK + caption, canvas,
-                                            llama_template=vl.KREA2_TEMPLATE)
+    _, tail_len = vl.tokenize_with_image(clip, vl.VISION_BLOCK + caption, canvas,
+                                         llama_template=vl.KREA2_TEMPLATE)
     return tail_len
 
 

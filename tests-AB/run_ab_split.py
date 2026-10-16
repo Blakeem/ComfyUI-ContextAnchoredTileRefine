@@ -188,20 +188,6 @@ _file_sha = krea2_run._file_sha
 
 # ------------------------------------------------------------------ captions (shared)
 
-def _live_instruction():
-    # PINNED to the (standard) preset, whose tile_caption_instruction IS
-    # RICH_GROUPED_INSTRUCTION character for character — what every arm on disk was
-    # captioned with. Resolving the UNLABELED surface would take the settings file's FIRST
-    # preset instead, which is (artwork) and a different question entirely, so a re-run
-    # would silently re-caption this campaign while every label and cache key still named
-    # the old one. Read in one place so the cache key and the PNG stamp can never name a
-    # different question than the captions were generated from.
-    from context_anchored_tile_refine import captions
-
-    preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
-    return preset.tile_instruction, preset.tile_max_tokens
-
-
 def load_or_generate_captions(clip, padded, tiles, force):
     """The production caption pre-pass, run ONCE and cached: the settled instruction,
     thinking=True, strip_thinking + clean_caption — exactly what refine_image would do
@@ -209,7 +195,7 @@ def load_or_generate_captions(clip, padded, tiles, force):
     byte-identical text (and reruns skip ~4 clip.generate calls)."""
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = _live_instruction()
+    instruction, max_length = ab_env.rich_grouped_question()
     key = {"base_sha": _file_sha(BASE_PNG), "rects": _rects(tiles), "instruction": instruction,
            "max_length": max_length, "clip": CLIP_NAME, "surface": "settled-position"}
     digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
@@ -299,10 +285,10 @@ def _caption_tail_len(clip, caption, probe_image):
     """How many rows this caption's stream carries after vision_end (caption + template
     tail) — the layout contract every arm shares. The tokenizer only counts; the image
     just makes the stream well-formed."""
-    from context_anchored_tile_refine import captions, vl
+    from context_anchored_tile_refine import vl
 
-    _, tail_len = captions._tokenize_images(clip, vl.VISION_BLOCK + caption, probe_image,
-                                            llama_template=vl.KREA2_TEMPLATE)
+    _, tail_len = vl.tokenize_with_image(clip, vl.VISION_BLOCK + caption, probe_image,
+                                         llama_template=vl.KREA2_TEMPLATE)
     return tail_len
 
 
@@ -338,10 +324,10 @@ def _encode_caption_with_image(clip, caption, image):
     dropped — the kept vision rows come from the sliced global encode; the image's content
     (tile crop, or flat grey for the position control) reaches the caption rows through
     attention during this encode."""
-    from context_anchored_tile_refine import captions, vl
+    from context_anchored_tile_refine import vl
 
-    tokens, tail_len = captions._tokenize_images(clip, vl.VISION_BLOCK + caption, image,
-                                                 llama_template=vl.KREA2_TEMPLATE)
+    tokens, tail_len = vl.tokenize_with_image(clip, vl.VISION_BLOCK + caption, image,
+                                              llama_template=vl.KREA2_TEMPLATE)
     encoded = clip.encode_from_tokens_scheduled(tokens)
     seq = int(encoded[0][0].shape[1])
     if seq - 2 - tail_len <= 0:
@@ -644,7 +630,7 @@ def ring_override(kind):
 def build_settings(arm, tile_captions, cut_sigma=None):
     from context_anchored_tile_refine import captions
 
-    instruction, max_length = _live_instruction()
+    instruction, max_length = ab_env.rich_grouped_question()
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm,

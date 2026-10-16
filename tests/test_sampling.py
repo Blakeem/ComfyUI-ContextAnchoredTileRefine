@@ -236,7 +236,7 @@ def _record_sync(monkeypatch):
 
 
 def _vl_guider():
-    # The VL preamble refuses anything that does not keep 'positive' in original_conds.
+    # The CFGGuider convention the sync engine's intake holds every VL guider to.
     guider = FakeGuider()
     guider.original_conds = {"positive": [], "negative": []}
     return guider
@@ -682,3 +682,183 @@ def test_fold_decoded_frames_folds_time_into_the_batch_and_leaves_4d_alone():
 
     assert torch.equal(sampling.fold_decoded_frames(video), video.reshape(2, 4, 6, 3))
     assert sampling.fold_decoded_frames(image) is image
+
+
+# --- the shared per-step noise field (raster path) -----------------------------------
+
+# Latent sides that are not multiples of StepNoiseField.BLOCK_CELLS, so edge blocks are cut.
+FIELD_SHAPE = (1, 4, 150, 170)
+# 4 tiles of overlapping crops at 160x96 px, two of them the same 88x96 shape.
+FIELD_TILE_ARGS = {"max_tile_width": 96, "max_tile_height": 96, "context_anchor": 8, "context_overlap": 16}
+
+
+def _draws(noise_sampler, count, sigma=None):
+    sigma = torch.tensor(1.0) if sigma is None else sigma
+    return [noise_sampler(sigma, sigma * 0.5) for _ in range(count)]
+
+
+def _named_ksampler(name, extra_options=None):
+    # A stub KSAMPLER the name resolution reads as sample_<name>. FakeGuider never runs it.
+    import comfy.samplers
+
+    def sampler_function(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs):
+        raise AssertionError("the stub sampler function is never run")
+
+    sampler_function.__name__ = f"sample_{name}"
+    return comfy.samplers.KSAMPLER(sampler_function, {} if extra_options is None else extra_options, {})
+
+
+def test_overlapping_windows_share_every_cell_at_each_draw():
+    field = sampling.StepNoiseField(FIELD_SHAPE, 42)
+
+    upper_left = _draws(field.for_window(10, 90, 20, 100), 3)
+    lower_right = _draws(field.for_window(40, 140, 60, 170), 3)
+
+    for k in range(3):
+        assert torch.equal(upper_left[k][..., 30:80, 40:80], lower_right[k][..., 0:50, 0:40])
+    assert not torch.equal(upper_left[0], upper_left[1])
+    assert not torch.equal(upper_left[1], upper_left[2])
+
+
+@pytest.mark.parametrize("window", [(50, 140, 60, 135), (63, 65, 127, 129), (0, 150, 128, 170), (100, 150, 0, 64)])
+def test_a_window_is_the_full_canvas_draw_at_that_window(window):
+    field = sampling.StepNoiseField(FIELD_SHAPE, 3)
+    y0, y1, x0, x1 = window
+
+    full = _draws(field.for_window(0, FIELD_SHAPE[-2], 0, FIELD_SHAPE[-1]), 2)
+    part = _draws(field.for_window(*window), 2)
+
+    for k in range(2):
+        assert torch.equal(part[k], full[k][..., y0:y1, x0:x1])
+
+
+def test_the_field_replays_and_follows_its_seed_and_picture():
+    window = (5, 70, 5, 70)
+    field = sampling.StepNoiseField(FIELD_SHAPE, 9)
+
+    first = _draws(field.for_window(*window), 3)
+    replay = _draws(field.for_window(*window), 3)
+    other_picture = _draws(sampling.StepNoiseField(FIELD_SHAPE, 9, batch_index=1).for_window(*window), 1)
+    other_seed = _draws(sampling.StepNoiseField(FIELD_SHAPE, 10).for_window(*window), 1)
+
+    assert all(torch.equal(a, b) for a, b in zip(first, replay, strict=True))
+    assert not torch.equal(first[0], other_picture[0])
+    assert not torch.equal(first[0], other_seed[0])
+
+
+def test_the_largest_core_seed_builds_and_draws():
+    draw = _draws(sampling.StepNoiseField(FIELD_SHAPE, 0xffffffffffffffff).for_window(0, 8, 0, 8), 1)[0]
+
+    assert draw.shape == (1, 4, 8, 8)
+    assert bool(torch.isfinite(draw).all())
+
+
+@pytest.mark.parametrize("shape", [(1, 4, 20, 30), (1, 16, 1, 20, 30)])
+def test_the_draw_keeps_the_canvas_layout_and_lands_on_the_sigmas_device(shape):
+    noise_sampler = sampling.StepNoiseField(shape, 1).for_window(2, 12, 3, 23)
+
+    draw = _draws(noise_sampler, 1, sigma=torch.tensor(0.7, device="meta"))[0]
+
+    assert draw.shape == (*shape[:-2], 10, 20)
+    assert draw.device.type == "meta"
+    assert draw.dtype == torch.float32
+
+
+@pytest.mark.parametrize("window", [(0, 151, 0, 8), (0, 8, 160, 171), (-1, 8, 0, 8), (8, 8, 0, 8)])
+def test_a_window_outside_the_canvas_is_rejected(window):
+    with pytest.raises(ValueError, match="latent canvas"):
+        sampling.StepNoiseField(FIELD_SHAPE, 1).for_window(*window)
+
+
+@pytest.mark.parametrize("name", ["euler", "dpmpp_sde", "dpmpp_sde_gpu", "not_a_sampler"])
+def test_build_step_noise_leaves_other_samplers_on_their_own_draw(comfy_stubs, name):
+    assert sampling.build_step_noise(_named_ksampler(name), FIELD_SHAPE, 1) is None
+
+
+def test_build_step_noise_needs_a_stock_ksampler_without_its_own_noise_sampler(comfy_stubs):
+    carried = _named_ksampler("euler_ancestral", {"noise_sampler": lambda sigma, sigma_next: None})
+
+    assert sampling.build_step_noise(object(), FIELD_SHAPE, 1) is None
+    assert sampling.build_step_noise(carried, FIELD_SHAPE, 1) is None
+
+
+def test_build_step_noise_leaves_a_ksampler_subclass_on_its_own_draw(comfy_stubs):
+    import comfy.samplers
+
+    class OwnSample(comfy.samplers.KSAMPLER):
+        def sample(self, *args, **kwargs):
+            raise AssertionError("never run")
+
+    named = _named_ksampler("euler_ancestral")
+    subclassed = OwnSample(named.sampler_function, {}, {})
+
+    assert sampling.build_step_noise(subclassed, FIELD_SHAPE, 1) is None
+
+
+@pytest.mark.parametrize("seed", [None, -1, 0x10000000000000000, 1.5])
+def test_build_step_noise_leaves_a_seed_the_key_cannot_hold_on_its_own_draw(comfy_stubs, seed):
+    assert sampling.build_step_noise(_named_ksampler("euler_ancestral"), FIELD_SHAPE, seed) is None
+
+
+@pytest.mark.parametrize("name", ["euler_ancestral", "dpmpp_2m_sde"])
+def test_build_step_noise_shares_one_field_for_a_table_sampler(comfy_stubs, name):
+    field = sampling.build_step_noise(_named_ksampler(name), FIELD_SHAPE, 5, 2)
+
+    assert isinstance(field, sampling.StepNoiseField)
+    assert (field.shape, field.seed, field.batch_index) == (FIELD_SHAPE, 5, 2)
+
+
+def test_every_raster_tile_samples_its_crop_window_of_the_shared_field(comfy_stubs):
+    from context_anchored_tile_refine import grid
+
+    guider = FakeGuider()
+    sampler = _named_ksampler("euler_ancestral", {"eta": 0.5})
+    layout = grid.solve_layout(160, 96, 96, 96, 8, 16)
+    field = sampling.StepNoiseField((1, 4, 12, 20), 11)
+
+    sampling.refine_image(torch.rand(1, 96, 160, 3), guider, sampler, SIGMAS, FakeVAE(), FakeNoise(seed=11), **FIELD_TILE_ARGS)
+
+    assert len(guider.calls) == len(layout.tiles) == 4
+    for call, tile in zip(guider.calls, layout.tiles, strict=True):
+        crop = tile.crop_rect
+        tile_sampler = call["sampler"]
+        expected = _draws(field.for_window(crop.y0 // 8, crop.y1 // 8, crop.x0 // 8, crop.x1 // 8), 3)
+        assert tile_sampler.sampler_function is sampler.sampler_function
+        assert tile_sampler.extra_options["eta"] == 0.5
+        assert tile_sampler.inpaint_options == sampler.inpaint_options
+        assert all(torch.equal(a, b) for a, b in zip(_draws(tile_sampler.extra_options["noise_sampler"], 3), expected, strict=True))
+    assert sampler.extra_options == {"eta": 0.5}
+
+
+def test_a_deterministic_sampler_reaches_every_raster_tile_unchanged(comfy_stubs):
+    guider = FakeGuider()
+    sampler = _named_ksampler("euler")
+
+    sampling.refine_image(torch.rand(1, 96, 160, 3), guider, sampler, SIGMAS, FakeVAE(), FakeNoise(), **FIELD_TILE_ARGS)
+
+    assert len(guider.calls) == 4
+    assert all(call["sampler"] is sampler for call in guider.calls)
+
+
+def test_the_raster_path_builds_its_field_through_the_module_swap_point(comfy_stubs, monkeypatch):
+    # A harness turns the shared field off by patching sampling.build_step_noise.
+    guider = FakeGuider()
+    sampler = _named_ksampler("euler_ancestral")
+    monkeypatch.setattr(sampling, "build_step_noise", lambda *args, **kwargs: None)
+
+    sampling.refine_image(torch.rand(1, 96, 160, 3), guider, sampler, SIGMAS, FakeVAE(), FakeNoise(), **FIELD_TILE_ARGS)
+
+    assert all(call["sampler"] is sampler for call in guider.calls)
+
+
+@pytest.mark.comfy
+def test_every_shared_noise_sampler_is_a_core_function_taking_a_noise_sampler(comfy_env):
+    import inspect
+
+    import comfy.k_diffusion.sampling
+
+    for name in sorted(sampling.SHARED_NOISE_SAMPLERS):
+        function = getattr(comfy.k_diffusion.sampling, f"sample_{name}", None)
+        assert function is not None, f"core has no sample_{name}"
+        assert "noise_sampler" in inspect.signature(function).parameters, f"sample_{name} takes no noise_sampler"
+    assert {"dpmpp_sde", "dpmpp_sde_gpu"}.isdisjoint(sampling.SHARED_NOISE_SAMPLERS)

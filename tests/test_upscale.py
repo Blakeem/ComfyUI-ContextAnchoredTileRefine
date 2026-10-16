@@ -6,6 +6,7 @@ residency branches (with and without `.patcher`) and the OOM tile-halving retry.
 builder tests pin the BasicScheduler / Noise_RandomNoise arithmetic against the stubbed
 core functions. The upscale model is a duck-typed fake and comfy is the `comfy_stubs`
 fixture: no GPU, no real model."""
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -71,30 +72,45 @@ def test_scale_target_floors_at_one_pixel():
     assert upscale.scale_target(4, 4, 0.01) == (1, 1)
 
 
+@pytest.fixture()
+def lanczos_calls(monkeypatch):
+    # Records every call into the lanczos mirror and runs the real one, so a test pins how
+    # many resizes ran and the size each produced.
+    calls = []
+    real_lanczos = upscale._lanczos
+
+    def recording_lanczos(samples, width, height):
+        calls.append((tuple(samples.shape), width, height))
+        return real_lanczos(samples, width, height)
+
+    monkeypatch.setattr(upscale, "_lanczos", recording_lanczos)
+    return calls
+
+
 # --- prepare_upscaled without a model -----------------------------------------------
 
-def test_no_model_size_change_runs_exactly_one_lanczos_resize(comfy_stubs):
+def test_no_model_size_change_runs_exactly_one_lanczos_resize(comfy_stubs, lanczos_calls):
     image = torch.rand(1, 64, 48, 3)
     out = upscale.prepare_upscaled(image, None, 2.0)
 
-    assert comfy_stubs["common_upscale_calls"] == [((1, 3, 64, 48), 96, 128, "lanczos", "disabled")]
+    assert lanczos_calls == [((1, 3, 64, 48), 96, 128)]
     assert out.shape == (1, 128, 96, 3)
 
 
 @pytest.mark.parametrize("upscale_by", [1.0, 1.004])
-def test_no_model_at_target_size_returns_the_input_untouched(comfy_stubs, upscale_by):
+def test_no_model_at_target_size_returns_the_input_untouched(comfy_stubs, lanczos_calls, upscale_by):
     # 1.004 still rounds 48x64 back onto 48x64: the skip is keyed on the TARGET, not on
     # upscale_by == 1.0. A lanczos here would be a pure uint8 round-trip loss.
     image = torch.rand(1, 64, 48, 3)
     out = upscale.prepare_upscaled(image, None, upscale_by)
 
     assert out is image
-    assert comfy_stubs["common_upscale_calls"] == []
+    assert lanczos_calls == []
 
 
 # --- prepare_upscaled with a model --------------------------------------------------
 
-def test_model_output_already_at_target_skips_the_second_resize(comfy_stubs):
+def test_model_output_already_at_target_skips_the_second_resize(comfy_stubs, lanczos_calls):
     # Out-of-gamut input values double as the check that the decode-side clamp survives.
     image = torch.full((1, 8, 8, 3), 2.0)
     image[0, 0, 0, :] = -1.0
@@ -103,20 +119,69 @@ def test_model_output_already_at_target_skips_the_second_resize(comfy_stubs):
     out = upscale.prepare_upscaled(image, model, 2.0)
 
     assert len(comfy_stubs["tiled_scale_calls"]) == 1
-    assert comfy_stubs["common_upscale_calls"] == []
+    assert lanczos_calls == []
     assert out.shape == (1, 16, 16, 3)
     assert float(out.max()) == 1.0 and float(out.min()) == 0.0
 
 
-def test_model_output_off_target_is_lanczos_trimmed_once(comfy_stubs):
+def test_the_clamp_updates_an_inference_tensor_in_place_outside_inference_mode(comfy_stubs, monkeypatch):
+    # Core's tiled_scale_multidim runs under @torch.inference_mode(), so a direct caller outside it
+    # gets an inference tensor back, and the clamp must still run in place to keep the RAM peak down.
+    returned = []
+
+    @torch.inference_mode()
+    def inference_tiled_scale(samples, function, **kwargs):
+        upscaled = function(samples)
+        returned.append(upscaled)
+        return upscaled
+
+    monkeypatch.setattr(sys.modules["comfy.utils"], "tiled_scale", inference_tiled_scale)
+    image = torch.full((1, 8, 8, 3), 2.0)
+    image[0, 0, 0, :] = -1.0
+    model = FakeUpscaleModel(scale=2, patcher=FakePatcher())
+
+    assert not torch.is_inference_mode_enabled()
+    out = upscale._upscale_with_model(model, image)
+
+    assert returned[0].is_inference()
+    assert float(returned[0].max()) == 1.0 and float(returned[0].min()) == 0.0
+    assert float(out.max()) == 1.0 and float(out.min()) == 0.0
+
+
+def test_model_output_off_target_is_lanczos_trimmed_once(comfy_stubs, lanczos_calls):
     image = torch.rand(1, 64, 48, 3)
     model = FakeUpscaleModel(scale=2, patcher=FakePatcher())
 
     out = upscale.prepare_upscaled(image, model, 1.5)
 
     # The model lands on 96x128; the single lanczos pass takes it to the 72x96 target.
-    assert comfy_stubs["common_upscale_calls"] == [((1, 3, 128, 96), 72, 96, "lanczos", "disabled")]
+    assert lanczos_calls == [((1, 3, 128, 96), 72, 96)]
     assert out.shape == (1, 96, 72, 3)
+
+
+@pytest.mark.comfy
+@pytest.mark.parametrize("channels,dtype", [
+    (3, torch.float32),
+    (4, torch.float32),
+    (1, torch.float32),
+    (3, torch.float16),
+])
+@pytest.mark.parametrize("width,height", [(53, 41), (13, 9)])
+def test_lanczos_mirror_equals_core_lanczos(comfy_env, monkeypatch, channels, dtype, width, height):
+    # Any change to core's lanczos arithmetic fails here. Rows of 7 over a height of 23 give
+    # several slices plus a ragged last one, and values past [0, 1] exercise the clamp.
+    import comfy.utils
+
+    monkeypatch.setattr(upscale, "LANCZOS_CHUNK_ROWS", 7)
+    generator = torch.Generator().manual_seed(channels)
+    samples = (torch.rand(2, channels, 23, 31, generator=generator) * 1.2 - 0.1).to(dtype)
+
+    expected = comfy.utils.lanczos(samples, width, height)
+    actual = upscale._lanczos(samples, width, height)
+
+    assert actual.dtype == expected.dtype
+    assert actual.shape == expected.shape
+    assert torch.equal(actual, expected)
 
 
 def test_model_runs_at_core_tile_geometry(comfy_stubs):
@@ -429,7 +494,7 @@ def test_build_guider_sets_conds_and_cfg(comfy_stubs):
 
     assert guider.model_patcher is model
     assert guider.cfg == 3.5
-    # refine_image's VL check requires exactly this: 'positive' present in original_conds.
+    # The sync engine's intake requires exactly this: 'positive' present in original_conds.
     assert guider.original_conds == {"positive": positive, "negative": negative}
 
 

@@ -147,7 +147,7 @@ def test_output_equals_hand_assembled_paste(comfy_stubs):
 
 
 def test_single_tile_matches_whole_image_sequence(comfy_stubs):
-    # A cap-fitting image delegates to the feature-2 call sequence: one
+    # A cap-fitting image delegates to the whole-image call sequence: one
     # encode/sample/decode, full-canvas noise dict semantics, whole-image ProgressBar.
     image = torch.rand(1, 32, 24, 3)
 
@@ -324,7 +324,7 @@ def test_overlap_masks_forwarded_per_tile(comfy_stubs):
         # At ctx=0 the crop == overlap_inner_rect, so there is no context ring and the mask
         # is all-ones; the ctx>0 freeze is covered by test_ctx_ring_frozen_in_binary_mask.
         assert call["denoise_mask"].shape == (1, 1, 7, 7)
-        assert torch.equal(call["denoise_mask"][0, 0], sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8))
+        assert torch.equal(call["denoise_mask"][0, 0], sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8))
         assert torch.equal(call["denoise_mask"], torch.ones(1, 1, 7, 7))
 
 
@@ -344,7 +344,7 @@ def test_ctx_ring_frozen_in_binary_mask(comfy_stubs):
         crop, oir = tile.crop_rect, tile.overlap_inner_rect
         assert call["denoise_mask"].shape == (1, 1, 9, 9)
         mask = call["denoise_mask"][0, 0]
-        assert torch.equal(mask, sampling.tile_gradient(crop, oir, scale=8))
+        assert torch.equal(mask, sampling.denoise_indicator(crop, oir, scale=8))
         # Strictly binary, with BOTH a frozen ring (0s) and a released core+overlap (1s).
         assert ((mask == 0.0) | (mask == 1.0)).all()
         assert (mask == 0.0).any()

@@ -49,7 +49,7 @@ Sample results from Krea 2 and the Tile Upscale (VL) node. Each image was upscal
 
 ## Installation
 
-Search for "Context-Anchored Tile Refine" in ComfyUI Manager, or clone into your `custom_nodes` folder:
+The pack needs Python 3.12 or newer. Search for "Context-Anchored Tile Refine" in ComfyUI Manager, or clone into your `custom_nodes` folder:
 
 ```
 git clone https://github.com/blakeem/ComfyUI-ContextAnchoredTileRefine
@@ -63,7 +63,7 @@ pip install -r requirements.txt
 
 ## The nodes
 
-The example workflows linked below sit in the `workflows` folder, and ComfyUI lists them in its template browser. Some of them use third-party nodes.
+The example workflows linked below sit in the `workflows` folder, and ComfyUI lists them in its template browser. Some of them use third-party nodes. They load the author's own model, LoRA and upscale model files, so point each loader at your own files.
 
 ### Tile Refine
 
@@ -77,7 +77,7 @@ Example workflow: [Chroma + Z-Image hybrid](workflows/Chroma%20+%20z-image%20Hyb
 
 The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models, including Krea 2 Turbo, are untested.
 
-Both nodes take `clip`, `anchor_source`, `vlm_method` and `prompt`. Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. Connect the positive prompt's text to `prompt` so that each tile can confirm the things the prompt names (see [Tile tags](#tile-tags)).
+Both nodes take `clip`, `anchor_source`, `vlm_method` and `prompt`. `clip` is the Qwen3-VL text encoder Krea 2 uses, such as `qwen3vl_4b_fp8_scaled.safetensors` in `models/text_encoders`. Load it with Load CLIP set to type `krea2`. Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. Connect the positive prompt's text to `prompt` so that each tile can confirm the things the prompt names (see [Tile tags](#tile-tags)).
 
 #### Tile Refine (VL)
 
@@ -110,7 +110,7 @@ The VL nodes step every tile against one schedule, so they must time each sample
 | [`vlm_method`](#conditioning-on-the-vl-nodes) | VL | What the model is told about each tile. Adding captions repairs flawed content during upscale. |
 | [`prompt`](#tile-tags) | VL | The prompt the image was made from. The VL model reads it to name each tile's contents, and the diffusion model never reads it. |
 | [`mask`](#masked-refine) | Refine, Refine (VL) | Refines only the masked region and leaves everything outside it untouched. An inverted mask on a second pass refines the rest with other settings. |
-| `clip` | VL | The vision-language encoder that builds all tile conditioning. Tested only with Qwen3-VL as used by Krea 2. |
+| `clip` | VL | The vision-language encoder that builds all tile conditioning. |
 
 Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-ContextAnchoredTileRefine/tile-simulator.html).
 
@@ -120,6 +120,7 @@ Preview any layout with the [tile simulator](https://blakeem.github.io/ComfyUI-C
 |---|:-:|:-:|:-:|
 | [Dynamic tile layout](#dynamic-tile-layout) | ✓ | ✓ | ✓ |
 | [Context rings](#context-rings) | ✓ | ✓ | ✓ |
+| [Shared noise](#shared-noise) | ✓ | ✓ | ✓ |
 | [Anchor conditioning](#anchor-conditioning) | ✓ | | |
 | [Directional feather](#directional-feather) | ✓ | ✓ | ✓ |
 | [Minimum error boundary cut](#minimum-error-boundary-cut) | ✓ | | |
@@ -144,6 +145,10 @@ The grid is solved from the image size and `max_tile_width` / `max_tile_height`.
 #### Context rings
 
 Each tile is sampled with two extra rings that are cropped away after. `context_overlap` is the band shared with the neighboring tiles. `context_anchor` is pure context beyond that. The tile conditions on the anchor ring, so it continues its neighbors instead of drifting away from them. On the VL nodes, [`anchor_source`](#anchor-source) picks what the ring shows.
+
+#### Shared noise
+
+Each tile starts from its part of one noise pattern over the entire image. Samplers such as `dpmpp_2m_sde` add fresh noise at every step, and each step's noise comes from one pattern in the same way. This way both tiles that diffuse a shared band add the same noise there, so the feather blends two similar textures. On the base node, a sampler draws its step noise per tile when its draws cannot follow the shared pattern. `dpmpp_sde` (both variants) is one, since its draws within a step depend on each other. The `SamplerDPMAdaptative` node with `eta` above 0 is another, since its step count adapts to each tile's content. A sampler that makes its own draws also draws per tile, such as the `SamplerLCMUpscale` node or a sampler implemented in another node pack.
 
 ### Seams on the base node
 
@@ -222,7 +227,7 @@ Each picture in a batch is refined on its own, so peak VRAM does not scale with 
 
 #### Guider and ControlNet
 
-The `guider` input takes any guider, including NAG for models without negative prompt support. ControlNet works on the base node. The control hint is cropped to each tile, so depth, canny, or pose guidance lands on the right pixels. The hint must be the same size as the input image. The VL nodes ignore ControlNet and log a warning, since every tile's positive is replaced by vision conditioning and there is nothing for a hint to attach to. GLIGEN, area masks, and reference latents pass through unchanged.
+The `guider` input takes any guider, including NAG for models without negative prompt support. ControlNet works on the base node. The control hint is cropped to each tile, so depth, canny, or pose guidance lands on the right pixels. The hint must be the same size as the input image. The VL nodes ignore ControlNet and log a warning, since every tile's positive is replaced by its own conditioning and there is nothing for a hint to attach to. GLIGEN, area masks, and reference latents pass through unchanged.
 
 ## Settings file
 

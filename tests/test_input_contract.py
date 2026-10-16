@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from context_anchored_tile_refine import captions, sampling, stepper
+from context_anchored_tile_refine import captions, stepper, sync
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
     ContextAnchoredTileRefineVL,
@@ -493,9 +493,24 @@ DPM_FAST_MESSAGE = (
     "their own schedule or internal history, so no evals-per-step entry can time them.")
 
 
-def test_the_engine_intake_message_is_unchanged():
+def test_the_engine_intake_message_is_unchanged(comfy_stubs):
+    # The name is checked before the model or the sampler object is read, so neither is needed.
     with pytest.raises(ValueError) as excinfo:
-        sampling._check_sync_intake(None, torch.tensor([1.0, 0.0]), sampler_name="dpm_fast")
+        sync.check_preconditions(None, torch.tensor([1.0, 0.0]), sync.ANCHOR_SOURCE_IMAGE,
+                                 sampler=None, sampler_name="dpm_fast")
+
+    assert str(excinfo.value) == DPM_FAST_MESSAGE
+
+
+def test_the_stepper_rejects_an_unsupported_sampler_object_in_the_same_words(comfy_stubs):
+    # A direct caller hands only the object, and its rejection must still read as the name's.
+    import comfy.samplers
+
+    def sample_dpm_fast(model, x, sigmas, extra_args=None, callback=None, disable=None):
+        raise AssertionError("never run")
+
+    with pytest.raises(ValueError) as excinfo:
+        stepper._resolve_sampler_name(comfy.samplers.KSAMPLER(sample_dpm_fast))
 
     assert str(excinfo.value) == DPM_FAST_MESSAGE
 

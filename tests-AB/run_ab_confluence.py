@@ -689,7 +689,7 @@ class LatentCapture:
         records = self.records
 
         def wrapper(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                    denoise_mask=None, callback=None, anchor_ring=True):
+                    denoise_mask=None, callback=None):
             steps = int(sigmas.shape[-1]) - 1
             record = {
                 "x_cut": None,
@@ -705,7 +705,7 @@ class LatentCapture:
                     callback(step, x0, x, total_steps)
 
             out = original(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                           denoise_mask=denoise_mask, callback=capture, anchor_ring=anchor_ring)
+                           denoise_mask=denoise_mask, callback=capture)
             if record["x_cut"] is None:
                 raise RuntimeError("latent capture: the final sampler step never fired its callback")
             records.append(record)
@@ -856,7 +856,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
     state = {"calls": 0}
 
     def wrapper(guider, sampler, sigmas, noise_tensor, seed, latent_samples,
-                denoise_mask=None, callback=None, anchor_ring=True):
+                denoise_mask=None, callback=None):
         index = state["calls"]
         state["calls"] += 1
         if index >= len(expected):
@@ -875,7 +875,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
         region = mask_2d(denoise_mask.detach() > 0.5)
         # Elementwise, not count-only (review finding 7): a same-area mask at the wrong
         # position must fail, so compare against the indicator the pipeline itself builds.
-        expected_region = sampling.tile_gradient(crop, inner, scale=8) > 0.5
+        expected_region = sampling.denoise_indicator(crop, inner, scale=8) > 0.5
         if not torch.equal(region.cpu(), expected_region):
             raise RuntimeError(
                 f"pass-2 tile {index}: denoise mask is not the core+overlap indicator of "
@@ -894,7 +894,7 @@ def inject_latent_handoff(latent_canvas, tiles, cut_sigma, model):
         # test). Outside the gate the arm-13 canvas-noise slice is kept bit-for-bit.
         new_noise = torch.where(gate, torch.zeros_like(noise_tensor), noise_tensor)
         return original(guider, sampler, sigmas, new_noise, seed, new_latent,
-                        denoise_mask=denoise_mask, callback=callback, anchor_ring=anchor_ring)
+                        denoise_mask=denoise_mask, callback=callback)
 
     sampling.sample_latent = wrapper
     try:
@@ -1121,11 +1121,9 @@ def load_or_render_draft(arm, canvas, tiles, clip, model, vae, negative, empty,
 def build_settings(arm, tile_captions, mid, head, tail, stage="final"):
     from context_anchored_tile_refine import captions
 
-    # PINNED to (standard), whose wording IS RICH_GROUPED_INSTRUCTION: the unlabeled
-    # surface would resolve to the settings file's first preset, re-captioning this
-    # campaign under a different question while the stamps still named the old one.
-    preset = captions.resolve_method(f"{captions.VLM_METHOD_VISION_CAPTIONS} (standard)")
-    instruction, max_length = preset.tile_instruction, preset.tile_max_tokens
+    # PINNED to the (standard) preset's question, which the settings file no longer ships, so
+    # the stamps name the question this campaign was captioned with.
+    instruction, max_length = ab_env.rich_grouped_question()
     payload = dataclasses.asdict(REFINE)
     payload.update({
         "run_label": arm if stage == "final" else f"{arm}-{stage}",

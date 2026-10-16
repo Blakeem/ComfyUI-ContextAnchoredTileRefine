@@ -81,12 +81,12 @@ def test_masked_refine_anchor0_corner_mask_on_non_multiple_image(comfy_stubs):
     assert torch.equal(out[:, :, :9, :], image[:, :, :9, :])
 
 
-# ---- latent region gate (tile_gradient ∩ region_latent) -------------------
+# ---- latent region gate (denoise_indicator ∩ region_latent) -------------------
 
 
 def test_region_gate_is_grad_times_region_latent(comfy_stubs):
     # ctx=8 extends the crop to the full /8 image so background cells (region 0) sit inside
-    # the crop; overlap=16 forces a 2x2 grid so tile_gradient is a real ring indicator.
+    # the crop. overlap=16 forces a 2x2 grid so denoise_indicator is a real ring indicator.
     image = torch.rand(1, 80, 80, 3)
     mask = torch.zeros(1, 80, 80)
     mask[:, 16:64, 16:64] = 1.0
@@ -103,7 +103,7 @@ def test_region_gate_is_grad_times_region_latent(comfy_stubs):
     assert len(guider.calls) == 4
     for tile, call in zip(layout.tiles, guider.calls, strict=True):
         crop = tile.crop_rect
-        grad = sampling.tile_gradient(crop, tile.overlap_inner_rect, scale=8)
+        grad = sampling.denoise_indicator(crop, tile.overlap_inner_rect, scale=8)
         reg = region_latent[:, crop.y0 // 8:crop.y1 // 8, crop.x0 // 8:crop.x1 // 8]
         dm = call["denoise_mask"]
         assert dm.shape == (1, 1, crop.y1 // 8 - crop.y0 // 8, crop.x1 // 8 - crop.x0 // 8)
@@ -352,9 +352,9 @@ def test_rgba_mask_input_returns_three_channels(comfy_stubs):
 
 
 class ForeignDeviceGradient:
-    """Stands in for tile_gradient's return when region_latent lives on ANOTHER device.
+    """Stands in for denoise_indicator's return when region_latent lives on ANOTHER device.
 
-    tile_gradient builds its indicator from torch.arange, so it is always CPU, while
+    denoise_indicator builds its indicator from torch.arange, so it is always CPU, while
     region_latent follows the MASK/IMAGE device (CUDA under --gpu-only). This proxy
     reproduces torch's behaviour there — an elementwise multiply raises, and only `.to()`
     yields a multipliable tensor — which a CPU-only suite cannot otherwise observe.
@@ -383,15 +383,15 @@ def test_masked_multi_tile_moves_gradient_onto_region_device(comfy_stubs, monkey
 
     baseline, _guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
 
-    real_tile_gradient = sampling.tile_gradient
+    real_denoise_indicator = sampling.denoise_indicator
     proxies = []
 
-    def foreign_tile_gradient(*args, **kwargs):
-        proxy = ForeignDeviceGradient(real_tile_gradient(*args, **kwargs))
+    def foreign_denoise_indicator(*args, **kwargs):
+        proxy = ForeignDeviceGradient(real_denoise_indicator(*args, **kwargs))
         proxies.append(proxy)
         return proxy
 
-    monkeypatch.setattr(sampling, "tile_gradient", foreign_tile_gradient)
+    monkeypatch.setattr(sampling, "denoise_indicator", foreign_denoise_indicator)
     out, guider, _vae, _noise = _run_mask(image, mask, cap_w=56, cap_h=56, ctx=8, overlap=16)
 
     assert len(guider.calls) == 4

@@ -37,7 +37,7 @@ def a_tags_preset(prompt="", style="", style_tokens=128, **thresholds):
         surface=captions.VLM_METHOD_CAPTIONS, label="tags",
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0,
                                        caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
-        style_instruction=style, style_max_tokens=style_tokens, kind=captions.TILE_TEXT_TAGS,
+        global_style_instruction=style, global_style_max_tokens=style_tokens, tile_text=captions.TILE_TEXT_TAGS,
         tile_tags_instruction=PROPOSE, prompt_tags_instruction=PROMPT_TAGS,
         tile_tags_verification_statement=VERIFY, prompt=prompt, **thresholds)
 
@@ -1016,8 +1016,8 @@ def test_a_ledger_replaces_the_bar_and_counts_run_wide_across_the_picture_loop(c
 
 def test_a_caption_preset_is_refused(classifier):
     preset = captions.Preset(surface=captions.VLM_METHOD_CAPTIONS, label="standard",
-                             vision=a_tags_preset().vision, tile_instruction="describe",
-                             tile_max_tokens=256)
+                             vision=a_tags_preset().vision, tile_caption_instruction="describe",
+                             tile_caption_max_tokens=256)
 
     with pytest.raises(RuntimeError, match=r"'standard'.*tile_text = 'tags'"):
         run(FakeTagClip(), preset)
@@ -1036,7 +1036,7 @@ def test_a_prompt_placeholder_outside_the_prompt_tags_instruction_is_refused_bef
     clip = FakeTagClip()
     preset = dataclasses.replace(a_tags_preset(prompt="a cat"), **{key: "{TAG} from {PROMPT}"})
 
-    with pytest.raises(RuntimeError, match=rf"'tags' carries \{{PROMPT\}} in its {key}, which only "
+    with pytest.raises(RuntimeError, match=rf"preset 'tags': {key} holds \{{PROMPT\}}, which only "
                                            r"prompt_tags_instruction takes"):
         run(clip, preset)
     assert clip.generate_calls == []
@@ -1067,17 +1067,69 @@ def test_the_guard_refuses_a_clip_loaded_without_its_vision_tower_naming_the_nod
 def test_the_guard_names_the_pip_command_when_the_library_is_missing_or_too_old(monkeypatch, module):
     monkeypatch.setitem(sys.modules, module, None)
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
+    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.5.0"')):
         tags.check_tags_ready(FakeTagClip())
 
 
-def test_the_guard_names_the_pip_command_for_a_0_3_library_without_presence_statement(monkeypatch):
-    import logit_classifier.toolkit.tags as library_tags
+# A pre-release or a dev build of the floor sorts below it, as pip orders it.
+@pytest.mark.parametrize("version", ["0.4.0", "0.4.99rc1", "0.5.0rc1", "0.5.0.dev1", "0.5.0a1"])
+def test_the_guard_names_the_pip_command_for_a_library_older_than_the_floor(monkeypatch, version):
+    import logit_classifier
 
-    monkeypatch.delattr(library_tags, "presence_statement")
+    monkeypatch.setattr(logit_classifier, "__version__", version)
 
-    with pytest.raises(RuntimeError, match=re.escape('pip install -U "logit-classifier>=0.4.0"')):
+    with pytest.raises(RuntimeError, match=re.escape(f'version {version} is installed. Install or upgrade it in the '
+                                                     'ComfyUI Python environment with: pip install -U '
+                                                     '"logit-classifier>=0.5.0"')):
         tags.check_tags_ready(FakeTagClip())
+
+
+# "0.10.0" pins an integer compare, since a string compare orders it below "0.5.0". A local or a post
+# suffix counts as the release, and a pre-release of a later release is above the floor.
+@pytest.mark.parametrize("version", ["0.5.0", "0.5", "0.5.1", "0.10.0", "0.5.0+local", "0.5.0.post1",
+                                     "0.5.1rc1", "1.0.0rc1"])
+def test_the_version_gate_passes_the_floor_and_every_newer_library(monkeypatch, version):
+    import logit_classifier
+    import logit_classifier.toolkit.comfyui as toolkit
+
+    monkeypatch.setattr(logit_classifier, "__version__", version)
+
+    assert captions.comfy_toolkit() is toolkit
+
+
+@pytest.mark.parametrize("version", ["dev", "", "0.5.0-garbage"])
+def test_the_version_gate_refuses_a_version_it_cannot_read(monkeypatch, version):
+    import logit_classifier
+
+    monkeypatch.setattr(logit_classifier, "__version__", version)
+
+    with pytest.raises(RuntimeError, match=re.escape(f"reports version {version!r}, which is not a version number. "
+                                                     'Install or upgrade it in the ComfyUI Python environment with: '
+                                                     'pip install -U "logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
+
+
+# packaging raises TypeError, not InvalidVersion, for a version that is not a string.
+def test_the_version_gate_refuses_a_version_that_is_not_a_string(monkeypatch):
+    import logit_classifier
+
+    monkeypatch.setattr(logit_classifier, "__version__", 5)
+
+    with pytest.raises(RuntimeError, match=re.escape("reports version 5, which is not a version number. "
+                                                     'Install or upgrade it in the ComfyUI Python environment with: '
+                                                     'pip install -U "logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
+
+
+def test_the_version_gate_refuses_a_library_that_reports_no_version(monkeypatch):
+    import logit_classifier
+
+    monkeypatch.delattr(logit_classifier, "__version__")
+
+    with pytest.raises(RuntimeError, match=re.escape('the installed library reports no version. Install or upgrade it '
+                                                     'in the ComfyUI Python environment with: pip install -U '
+                                                     '"logit-classifier>=0.5.0"')):
+        captions.comfy_toolkit()
 
 
 def test_the_strip_statements_are_the_librarys_presence_statements():

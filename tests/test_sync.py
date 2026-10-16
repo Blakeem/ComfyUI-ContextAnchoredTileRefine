@@ -29,7 +29,7 @@ from logit_classifier import UnsupportedModelError
 from test_stepper import run_bounded
 from test_tags import FakeTagClip
 from test_tiling import GridNoise, GridVAE, _layout
-from test_vl import FakeVLClip, layout_tiles
+from test_vl import FakeVLClip, RecordingVLClip, layout_tiles
 
 from conftest import BaseModel
 from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, tags, vl
@@ -88,7 +88,7 @@ class LostCondsGuider(SyncGuider):
 
 
 class OverridingModel(BaseModel):
-    """WAN21/WAN22/HunyuanVideo/LTXAV: already holds the frozen region clean, so the ring
+    """WAN22/WAN21_SCAIL2/HunyuanVideo/LTXAV: already holds the frozen region clean, so the ring
     construction the engine is derived for does not apply."""
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
@@ -127,14 +127,15 @@ def vl_clip(monkeypatch):
 def prepare(clip, guider=None, image=None, vae=None, noise=None, sigmas=SIGMAS,
             vlm_method=captions.VLM_METHOD_VISION, anchor_source=sync.ANCHOR_SOURCE_IMAGE,
             batch_size=1, batch_index=0, ctx=CTX, overlap=OVERLAP, region_pixel=None,
-            vl_context=None, progress=None):
+            vl_context=None, progress=None, sampler=None):
     guider = SyncGuider() if guider is None else guider
     return sync._prepare_run(
         image_canvas() if image is None else image, guider, sigmas,
         GridVAE() if vae is None else vae, GridNoise() if noise is None else noise,
         CAP, CAP, ctx, overlap, clip, vlm_method=vlm_method, anchor_source=anchor_source,
         batch_size=batch_size, batch_index=batch_index, region_pixel=region_pixel,
-        vl_context=vl_context, progress=progress)
+        vl_context=vl_context, progress=progress,
+        sampler=euler_sampler() if sampler is None else sampler)
 
 
 def expected_layout(ctx=CTX, overlap=OVERLAP):
@@ -185,7 +186,7 @@ def test_lane_masks_are_binary_and_already_normalized(comfy_stubs, vl_clip):
     layout = expected_layout()
 
     for tile, lane in zip(layout.tiles, run.lanes, strict=True):
-        expected = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        expected = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         assert lane.denoise_mask.shape == (1, 1, *expected.shape)
         assert lane.denoise_mask.dtype == torch.float32
         assert torch.equal(lane.denoise_mask[0, 0], expected)
@@ -221,7 +222,7 @@ def test_the_region_gate_is_the_max_pool_cover_of_the_mask(comfy_stubs, vl_clip)
     expected_region[:, 4:8, 4:8] = 1.0
     for tile, lane in zip(layout.tiles, run.lanes, strict=True):
         rect = sync._latent_rect(tile.crop_rect)
-        gradient = sampling.tile_gradient(tile.crop_rect, tile.overlap_inner_rect, scale=8)
+        gradient = sampling.denoise_indicator(tile.crop_rect, tile.overlap_inner_rect, scale=8)
         expected = gradient * expected_region[:, rect.y0:rect.y1, rect.x0:rect.x1]
         assert torch.equal(lane.denoise_mask[0], expected)
         assert set(lane.denoise_mask.unique().tolist()) <= {0.0, 1.0}
@@ -255,16 +256,17 @@ def test_the_ring_gate_is_the_region_the_lane_leaves_to_a_neighbour(comfy_stubs,
 
 def _check(sigmas=SIGMAS, model=None, anchor_source=sync.ANCHOR_SOURCE_IMAGE):
     guider = SyncGuider(model=model)
-    return sync.check_preconditions(guider.model_patcher, sigmas, anchor_source)
+    return sync.check_preconditions(guider.model_patcher, sigmas, anchor_source,
+                                    sampler=euler_sampler())
 
 
 def test_precondition_rejects_a_non_monotone_schedule(comfy_stubs):
-    with pytest.raises(RuntimeError, match="not strictly decreasing"):
+    with pytest.raises(ValueError, match="not strictly decreasing"):
         _check(sigmas=torch.tensor([0.8, 0.4, 0.4, 0.0]))
 
 
 def test_precondition_rejects_a_schedule_that_does_not_end_at_zero(comfy_stubs):
-    with pytest.raises(RuntimeError, match="does not end at sigma 0"):
+    with pytest.raises(ValueError, match="does not end at sigma 0"):
         _check(sigmas=torch.tensor([0.8, 0.5, 0.2]))
 
 
@@ -274,19 +276,19 @@ def test_precondition_rejects_a_non_const_model_sampling(comfy_stubs):
     class EPS:
         pass
 
-    with pytest.raises(RuntimeError, match="CONST"):
+    with pytest.raises(ValueError, match="CONST"):
         _check(model=BaseModel(model_sampling=EPS()))
 
 
 def test_precondition_rejects_a_model_that_overrides_scale_latent_inpaint(comfy_stubs):
-    with pytest.raises(RuntimeError, match="overrides scale_latent_inpaint"):
+    with pytest.raises(ValueError, match="overrides scale_latent_inpaint"):
         _check(model=OverridingModel())
 
 
 def test_live_canvas_rejects_a_schedule_starting_at_sigma_one(comfy_stubs):
     # x / (1 - sigma) is undefined at sigma 1.0 — the message has to name the algebra, not
     # the harness's per-step resume identity, which this port does not have.
-    with pytest.raises(RuntimeError, match=r"x / \(1 - sigma\)"):
+    with pytest.raises(ValueError, match=r"x / \(1 - sigma\)"):
         _check(sigmas=FULL_SIGMAS, anchor_source=sync.ANCHOR_SOURCE_CANVAS)
 
 
@@ -301,7 +303,7 @@ def test_preconditions_run_before_any_encode_or_conditioning(comfy_stubs, vl_cli
     # Fail fast at ENGINE ENTRY: no VAE work, no VLM work, no GPU time.
     vae, noise = GridVAE(), GridNoise()
 
-    with pytest.raises(RuntimeError, match="not strictly decreasing"):
+    with pytest.raises(ValueError, match="not strictly decreasing"):
         prepare(vl_clip, vae=vae, noise=noise, sigmas=torch.tensor([0.8, 0.9, 0.0]))
 
     assert vae.encode_calls == []
@@ -551,6 +553,20 @@ def test_a_guider_without_positive_conds_is_rejected(comfy_stubs, vl_clip):
 
     with pytest.raises(ValueError, match="CFGGuider convention"):
         prepare(vl_clip, guider=guider)
+
+
+def test_a_direct_engine_caller_with_a_guider_lacking_positive_is_rejected_before_any_encode(comfy_stubs):
+    # refine_sync is a direct caller's entry and no node checked the guider first, so the
+    # engine's own intake must name it before a VL encode or a VAE encode is paid for.
+    guider = RunGuider()
+    guider.original_conds = {"negative": guider.original_conds["negative"]}
+    clip, vae, noise = RecordingVLClip(seq_override=ENC_SEQ), GridVAE(), GridNoise()
+
+    with pytest.raises(ValueError, match="CFGGuider convention"):
+        run_sync(clip, guider=guider, vae=vae, noise=noise)
+
+    assert clip.canvases == []
+    assert vae.encode_calls == [] and noise.calls == []
 
 
 def test_a_guider_copy_that_loses_original_conds_is_rejected(comfy_stubs, vl_clip):
@@ -1082,6 +1098,43 @@ def test_no_preview_at_step_zero_and_one_bar_over_the_whole_run(comfy_stubs, vl_
     assert [update[2] for update in pbar.updates[1:]] == ["preview-1", "preview-2", "preview-3"]
 
 
+def _preview_once(comfy_stubs, previewer, canvas):
+    # One whole-canvas lane through the progress hook at step 1, the first step that previews.
+    comfy_stubs["previewer"] = previewer
+    model_patcher = SimpleNamespace(load_device="cpu", model=SimpleNamespace(latent_format=None))
+    lane = SimpleNamespace(window=(0, canvas.shape[-2], 0, canvas.shape[-1]), denoised=canvas)
+    update = sync.make_sync_progress(model_patcher, 2)
+    update(1, torch.zeros_like(canvas), [lane])
+    return previewer.previews[-1][1]
+
+
+def test_a_taesd_kind_preview_is_cut_to_its_pixel_budget_in_cells(comfy_stubs):
+    # A TAE previewer decodes 8 px per cell, so a 512 px preview needs 64 cells on the long
+    # side. An 8K canvas handed whole would make a TAE previewer's VAE free the DiT per step.
+    import latent_preview
+
+    class TaesdKindPreviewer(RecordingPreviewer, latent_preview.TAESDPreviewerImpl):
+        pass
+
+    preview = _preview_once(comfy_stubs, TaesdKindPreviewer(), torch.rand(1, 16, 1, 576, 1024))
+
+    assert tuple(preview.shape) == (1, 16, 1, 36, 64)
+
+
+def test_a_cell_per_pixel_preview_is_cut_to_the_preview_resolution(comfy_stubs):
+    preview = _preview_once(comfy_stubs, RecordingPreviewer(), torch.rand(1, 16, 1, 576, 1024))
+
+    assert tuple(preview.shape) == (1, 16, 1, 288, 512)
+
+
+def test_a_preview_within_its_budget_arrives_unchanged(comfy_stubs):
+    canvas = torch.rand(1, 16, 1, 36, 64)
+
+    preview = _preview_once(comfy_stubs, RecordingPreviewer(), canvas)
+
+    assert torch.equal(preview, canvas)
+
+
 def test_the_bar_spans_the_whole_picture_batch(comfy_stubs, vl_clip, lane_stamp):
     # refine_image's picture loop: every picture reports on the SAME total and starts where
     # the previous one ended, so a B>1 run reads as ONE bar instead of restarting per picture.
@@ -1137,6 +1190,33 @@ def test_the_callers_guider_is_untouched_after_a_lane_raises(comfy_stubs, vl_cli
 
     assert guider.original_conds is pristine
     assert guider.original_conds["positive"] is positive
+
+
+class ClosingNoiseFields:
+    """A shared-noise provider that counts close() calls, the one thing the engine owes it
+    once sampling ends."""
+
+    def __init__(self):
+        self.closed = 0
+
+    def __call__(self, spec):
+        return lambda sigma, sigma_next: torch.zeros(1)
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_noise_field_worker_is_closed_when_a_lane_raises(comfy_stubs, vl_clip, lane_stamp, monkeypatch):
+    # A stochastic sampler's provider owns a prefetch thread, which a failed run must still stop.
+    from context_anchored_tile_refine import stepper
+
+    fields = ClosingNoiseFields()
+    monkeypatch.setattr(stepper, "build_noise_fields", lambda *args, **kwargs: fields)
+
+    with pytest.raises(RuntimeError, match="sampler exploded"):
+        run_sync(vl_clip, guider=RaisingRunGuider(), sampler=euler_sampler("sample_dpmpp_2m_sde"))
+
+    assert fields.closed == 1
 
 
 # ---- the once-around ring --------------------------------------------------
@@ -1892,14 +1972,14 @@ def a_preset(surface=captions.VLM_METHOD_VISION, canvas=1, crop=0):
         surface=surface, label="unit test",
         vision=captions.VisionSettings(canvas_tokens=canvas, crop_tokens=crop,
                                        caption_megapixels=0.1),
-        tile_instruction="describe this tile", tile_max_tokens=64)
+        tile_caption_instruction="describe this tile", tile_caption_max_tokens=64)
 
 
 def prepare_with(clip, image=None, **overrides):
     # `prepare`'s component-level entry with the override keywords open.
     return sync._prepare_run(
         image_canvas() if image is None else image, SyncGuider(), SIGMAS, GridVAE(), GridNoise(),
-        CAP, CAP, CTX, OVERLAP, clip, **overrides)
+        CAP, CAP, CTX, OVERLAP, clip, sampler=euler_sampler(), **overrides)
 
 
 def run_sync_with(clip, **overrides):
@@ -2106,7 +2186,7 @@ def a_tags_preset(surface=captions.VLM_METHOD_CAPTIONS, prompt="", style="the st
     return captions.Preset(
         surface=surface, label="tags",
         vision=captions.VisionSettings(canvas_tokens=1, crop_tokens=0, caption_megapixels=0.1),
-        style_instruction=style, style_max_tokens=64, kind=captions.TILE_TEXT_TAGS,
+        global_style_instruction=style, global_style_max_tokens=64, tile_text=captions.TILE_TEXT_TAGS,
         tile_tags_instruction="list the things", prompt_tags_instruction="List the things in: {PROMPT}",
         tile_tags_verification_statement="It shows {TAG}", prompt=prompt)
 
@@ -2186,7 +2266,7 @@ def test_the_region_path_tags_the_region_crop_and_styles_the_full_image(comfy_st
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (FakeVLClip(seq_override=ENC_SEQ), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
 ])
 def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs, monkeypatch, clip,
                                                                      missing, error, message):

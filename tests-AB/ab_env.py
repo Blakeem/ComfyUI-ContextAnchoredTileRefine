@@ -161,8 +161,24 @@ def caption_preset(instruction, max_tokens, surface=None):
         surface=captions.VLM_METHOD_VISION_CAPTIONS if surface is None else surface,
         label="pinned",
         vision=dataclasses.replace(vision, caption_megapixels=captions.VL_INPUT_BUDGET_MEGAPIXELS),
-        tile_instruction=instruction, tile_max_tokens=max_tokens,
-        style_instruction="", style_max_tokens=max_tokens)
+        tile_caption_instruction=instruction, tile_caption_max_tokens=max_tokens,
+        global_style_instruction="", global_style_max_tokens=max_tokens)
+
+
+RICH_GROUPED_MAX_TOKENS = 768
+
+
+def rich_grouped_question():
+    """The (standard) preset's question as (instruction, max_tokens), for the harnesses whose judged
+    arms were captioned with it.
+
+    settings.toml no longer ships (standard), so resolving it raises. Its wording is
+    captions.RICH_GROUPED_INSTRUCTION character for character, and every settings file that
+    carried it set 768 tokens, which the arms' cache keys hold.
+    """
+    from context_anchored_tile_refine import captions
+
+    return captions.RICH_GROUPED_INSTRUCTION, RICH_GROUPED_MAX_TOKENS
 
 
 def version(root):

@@ -8,9 +8,11 @@ import sys
 import pytest
 import torch
 from logit_classifier import UnsupportedModelError
+from test_sync import ModelPatcher
 from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
-from context_anchored_tile_refine import sampling, upscale
+from conftest import BaseModel
+from context_anchored_tile_refine import grid, sampling, sync, upscale
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
 
 WIDGETS = {
@@ -46,11 +48,12 @@ class FakeGuider:
         self.cfg = cfg
 
 
-def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, clip=None, **overrides):
+def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=None, sigmas=None, recorded=None, clip=None, model=None, real_preconditions=False, **overrides):
     """Run refine() with every collaborator faked; return (recorded, result).
 
     `recorded` may be passed in, so a test that expects a raise can still read how far the node
-    got before it."""
+    got before it. The engine's precondition check is faked too, since the default MODEL is a
+    bare object, unless `real_preconditions` asks for it with a MODEL it can read."""
     recorded = {} if recorded is None else recorded
     recorded.update({
         "prepare_upscaled": None,
@@ -108,9 +111,12 @@ def _drive(monkeypatch, image=None, upscale_model=None, negative=None, upscaled=
     monkeypatch.setattr(upscale, "build_guider", fake_build_guider)
     monkeypatch.setattr(upscale, "build_sigmas", fake_build_sigmas)
     monkeypatch.setattr(sampling, "refine_image", fake_refine_image)
+    if not real_preconditions:
+        monkeypatch.setattr(sync, "check_preconditions",
+                            lambda model_patcher, sigmas, anchor_source, sampler, sampler_name=None: None)
 
     recorded["image"] = torch.rand(1, 32, 32, 3) if image is None else image
-    recorded["model"] = object()
+    recorded["model"] = object() if model is None else model
     recorded["clip"] = object() if clip is None else clip
     recorded["vae"] = object()
 
@@ -203,7 +209,7 @@ def test_the_prompt_is_written_into_the_preset_handed_to_refine_image(comfy_stub
 
     expected = captions.with_prompt(captions.resolve_method(WIDGETS["vlm_method"]), WIDGETS["prompt"])
     assert recorded["refine_image"]["preset"] == expected
-    assert WIDGETS["prompt"] in expected.tile_instruction
+    assert WIDGETS["prompt"] in expected.tile_caption_instruction
 
 
 def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
@@ -216,6 +222,50 @@ def test_a_blank_prompt_is_refused_before_the_upscale_pass(comfy_stubs, monkeypa
 
     assert recorded["prepare_upscaled"] is None
     assert recorded["encode_empty"] is None
+
+
+class EpsModelSampling:
+    """A model_sampling that is not CONST, as an SD1.5 or SDXL MODEL carries."""
+
+
+@pytest.mark.parametrize(("model_sampling", "anchor_source", "message"), [
+    (EpsModelSampling(), "source image", "CONST"),
+    (None, "live canvas", r"x / \(1 - sigma\)"),
+])
+def test_engine_preconditions_are_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, model_sampling,
+                                                                  anchor_source, message):
+    # Each needs only the MODEL and the schedule, so it lands before the upscale-model pass and
+    # the text-encoder load. The default schedule starts at sigma 1.0.
+    recorded = {}
+    model = ModelPatcher(BaseModel(model_sampling=model_sampling))
+
+    with pytest.raises(ValueError, match=message):
+        _drive(monkeypatch, recorded=recorded, model=model, real_preconditions=True, anchor_source=anchor_source)
+
+    assert recorded["prepare_upscaled"] is None
+    assert recorded["encode_empty"] is None
+
+
+def test_a_grid_the_caps_cannot_hold_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
+    # The 640 px target needs more than one tile, and a 256 px cap cannot hold two 512 px
+    # rings around any core. The grid solve needs only the widgets and the image size.
+    recorded = {}
+
+    with pytest.raises(grid.GridConfigError, match="max_tile_width 256 cannot hold"):
+        _drive(monkeypatch, recorded=recorded, image=torch.rand(1, 320, 320, 3), max_tile_width=256,
+               max_tile_height=256, context_anchor=256, context_overlap=256)
+
+    assert recorded["prepare_upscaled"] is None
+
+
+def test_a_linked_context_anchor_off_the_8_grid_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch):
+    # A linked INT skips VALIDATE_INPUTS and core's range check, so refine re-checks it.
+    recorded = {}
+
+    with pytest.raises(ValueError, match="context_anchor must be a multiple of 8, got 12"):
+        _drive(monkeypatch, recorded=recorded, context_anchor=12)
+
+    assert recorded["prepare_upscaled"] is None
 
 
 def test_builders_receive_the_model_and_their_widgets(comfy_stubs, monkeypatch):
@@ -241,7 +291,7 @@ def test_connected_negative_is_used_verbatim(comfy_stubs, monkeypatch):
     _, positive, negative, _ = recorded["build_guider"]
 
     assert negative is connected
-    # The positive stays the placeholder either way — vl.py overwrites it per tile.
+    # The positive stays the placeholder either way. sync.build_lane_guiders replaces it per lane.
     assert positive is recorded["empty_cond"]
 
 
@@ -337,14 +387,14 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
     recorded, _ = _drive(monkeypatch, clip=FakeTagClip())
 
     preset = recorded["refine_image"]["preset"]
-    assert preset.kind == captions.TILE_TEXT_TAGS
+    assert preset.tile_text == captions.TILE_TEXT_TAGS
     assert preset.prompt == WIDGETS["prompt"]
 
 
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (None, False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.4\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
 ])
 def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
                                                                          clip, missing, error, message):

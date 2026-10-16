@@ -345,7 +345,7 @@ def shipped_preset(prompt):
     from context_anchored_tile_refine import captions
 
     preset = captions.with_prompt(captions.resolve_method(captions.default_vlm_method()), prompt)
-    return replace(preset, style_instruction="")
+    return replace(preset, global_style_instruction="")
 
 
 def time_tiles(ctx, run_fn):
@@ -402,30 +402,60 @@ def arm_baseline(ctx, scene, prompt, canvas, layout):
     return trace_record(run, scene.tiles, per_tile, total)
 
 
+def arm_prior(ctx, scene, prompt, canvas, layout):
+    """The shipped pass with the library's running prior on, learned across one picture's tiles.
+
+    The toolkit builds its classifier with the prior off. This arm asks whether the prior,
+    which the library's HTTP service runs by default, would help the tile pass. What the prior
+    covers depends on the library version, which each result records. On logit-classifier 0.4.0
+    it covers the thing check, verify and locate. From 0.5.0 a noul or a score gets no prior, so
+    it covers only the thing check (a choice), and verify and locate match prior-off.
+    """
+    from logit_classifier.classifier import Classifier
+
+    from context_anchored_tile_refine import tags
+
+    original = tags.build_classifier
+
+    def with_prior(clip):
+        shipped = original(clip)
+        return Classifier(replace(shipped.config, use_prior_debias=True, calibration_path=None), shipped.backend)
+
+    tags.build_classifier = with_prior
+    try:
+        return arm_baseline(ctx, scene, prompt, canvas, layout)
+    finally:
+        tags.build_classifier = original
+
+
 # The shipped pass under the labels of its three recorded runs, which were logged at different
-# commits. A rerun of any label runs today's code into that label's record.
+# commits. A rerun of any label runs today's code into that label's record. `prior-off` and
+# `prior-on` are the running prior A/B, both run on one commit and one library version.
 ARMS = {
     "baseline": arm_baseline,
     "base+graphs": arm_baseline,
     "prod": arm_baseline,
+    "prior-off": arm_baseline,
+    "prior-on": arm_prior,
 }
 
 
-def check_record_encoder(record, clip, path):
-    """Refuse to add results from `clip` to a record holding another encoder's, since the encoders tag
-    differently and the report averages a record's results into one row. An unstamped result predates
-    the stamp, so it counts as another encoder."""
-    stamps = {result.get("clip") for by_prompt in record.values() for result in by_prompt.values()}
+def check_record_stamp(record, key, value, path):
+    """Refuse to add results stamped `key` `value` to a record holding results stamped otherwise, since the
+    encoder and the library version change the tags and the report averages a record's results into one row.
+    An unstamped result predates its stamp, so it counts as another value."""
+    stamps = {result.get(key) for by_prompt in record.values() for result in by_prompt.values()}
 
-    if stamps - {clip}:
+    if stamps - {value}:
         stored = ", ".join(sorted(stamp or "unstamped" for stamp in stamps))
-        raise SystemExit(f"{path} holds results from {stored}, and this run uses {clip}. Pass --fresh to "
-                         "replace the record.")
+        raise SystemExit(f"{path} holds results with {key} {stored}, and this run uses {key} {value}. Pass "
+                         "--fresh to replace the record.")
 
 
 def cmd_run(args):
     ab_env.bootstrap()
     import ab_models
+    import logit_classifier
     import torch
 
     from context_anchored_tile_refine import captions, tags
@@ -435,9 +465,11 @@ def cmd_run(args):
     scenes = [registry[k] for k in args.scenes.split(",")] if args.scenes else list(registry.values())
     prompts = args.prompts.split(",") if args.prompts else list(prompt_keys)
     out = RUNS_DIR / f"{args.arm}.json"
+    library_version = logit_classifier.__version__
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     record = json.loads(out.read_text()) if out.exists() and not args.fresh else {}
-    check_record_encoder(record, args.clip, out)
+    check_record_stamp(record, "clip", args.clip, out)
+    check_record_stamp(record, "logit_classifier", library_version, out)
     ctx = Context(clip=ab_models.load_clip(args.clip, "krea2"), torch=torch)
 
     for scene in scenes:
@@ -453,6 +485,7 @@ def cmd_run(args):
             ab_env.end_node_execution()
             result["grid_tiles"] = len(layout.tiles)
             result["clip"] = args.clip
+            result["logit_classifier"] = library_version
             record.setdefault(scene.key, {})[prompt_key] = result
             out.write_text(json.dumps(record, indent=1))
             ms = [t["ms"] for t in result["tiles"].values()]

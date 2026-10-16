@@ -474,6 +474,148 @@ def test_offset_noise_fields_passes_none_through():
     assert stepper.offset_noise_fields(None, 6, 3) is None
 
 
+# ---- the Brownian prefetch --------------------------------------------------
+
+# A production-length schedule: 8 steps, 7 of them noisy, every sigma in (0, 1).
+PREFETCH_SIGMAS = torch.tensor([0.95, 0.85, 0.72, 0.6, 0.47, 0.35, 0.22, 0.1, 0.0])
+PREFETCH_NOISY_STEPS = int(PREFETCH_SIGMAS.shape[-1]) - 2
+# What CONST's offset_first_sigma_for_snr does to sigmas[0] inside the sampler, at a value the
+# tree still spans.
+REWRITTEN_FIRST_SIGMA = 0.9
+
+
+def brownian_fields(sigmas=PREFETCH_SIGMAS):
+    import comfy.k_diffusion.sampling
+
+    sampler = make_sampler(comfy.k_diffusion.sampling.sample_dpmpp_2m_sde)
+    return stepper.build_noise_fields(sampler, LATENT_SHAPE, 42, sigmas)
+
+
+def stock_brownian_sampler(sigmas=PREFETCH_SIGMAS):
+    # Core's own sampler over the same shape, seed and range as the provider's tree.
+    import comfy.k_diffusion.sampling
+
+    return comfy.k_diffusion.sampling.BrownianTreeNoiseSampler(
+        torch.zeros(LATENT_SHAPE), sigmas[sigmas > 0].min(), sigmas.max(), seed=42, cpu=True)
+
+
+def query_pairs(sigmas):
+    return [(sigmas[step], sigmas[step + 1]) for step in range(int(sigmas.shape[-1]) - 1)
+            if float(sigmas[step + 1]) != 0.0]
+
+
+def tree_pairs(sigmas):
+    # The (t0, t1) a torchsde tree receives for each query of a decreasing schedule: sorted.
+    return [(float(sigma_next), float(sigma)) for sigma, sigma_next in query_pairs(sigmas)]
+
+
+@pytest.fixture
+def raw_tree_queries(monkeypatch):
+    # Every raw torchsde query, as (on the calling thread, (t0, t1)): which thread ran it is
+    # the only evidence that a query was prefetched rather than answered on the lane.
+    import torchsde
+
+    queries = []
+    caller = threading.current_thread()
+    real_call = torchsde.BrownianTree.__call__
+
+    def recording(self, t, tb=None, **kwargs):
+        queries.append((threading.current_thread() is caller, (float(t), float(tb))))
+        return real_call(self, t, tb, **kwargs)
+
+    monkeypatch.setattr(torchsde.BrownianTree, "__call__", recording)
+    return queries
+
+
+def split_by_thread(queries):
+    on_caller = [pair for is_caller, pair in queries if is_caller]
+    on_worker = [pair for is_caller, pair in queries if not is_caller]
+    return on_caller, on_worker
+
+
+def test_a_prefetched_field_is_the_stock_samplers_field_at_every_step(raw_tree_queries):
+    fields = brownian_fields()
+    noise_sampler = fields.for_window(FULL_WINDOW)
+    stock = stock_brownian_sampler()
+
+    for sigma, sigma_next in query_pairs(PREFETCH_SIGMAS):
+        assert torch.equal(noise_sampler(sigma, sigma_next), stock(sigma, sigma_next))
+    fields.close()
+
+    on_caller, on_worker = split_by_thread(raw_tree_queries)
+    # Every noisy step ran ahead on the worker, once and in order, with none for the final
+    # step. The caller's queries are the stock sampler's alone.
+    assert on_worker == tree_pairs(PREFETCH_SIGMAS)
+    assert len(on_worker) == PREFETCH_NOISY_STEPS
+    assert on_caller == tree_pairs(PREFETCH_SIGMAS)
+
+
+def test_a_rewritten_first_sigma_falls_back_to_the_synchronous_query(raw_tree_queries):
+    # The prefetched pair for step 0 misses, so that one step is answered on the caller, and
+    # the extra query cannot move any later field: a BrownianTree is independent of query order.
+    fields = brownian_fields()
+    noise_sampler = fields.for_window(FULL_WINDOW)
+    stock = stock_brownian_sampler()
+    rewritten = PREFETCH_SIGMAS.clone()
+    rewritten[0] = REWRITTEN_FIRST_SIGMA
+
+    for sigma, sigma_next in query_pairs(rewritten):
+        assert torch.equal(noise_sampler(sigma, sigma_next), stock(sigma, sigma_next))
+    fields.close()
+
+    on_caller, on_worker = split_by_thread(raw_tree_queries)
+    missed = tree_pairs(rewritten)[0]
+    # The worker ran the planned schedule, its unused step 0 included. The caller ran the
+    # stock sampler's queries plus the provider's one fallback for the missed step.
+    assert on_worker == tree_pairs(PREFETCH_SIGMAS)
+    assert sorted(on_caller) == sorted([*tree_pairs(rewritten), missed])
+
+
+def test_a_core_without_the_tree_attribute_path_keeps_the_synchronous_query(monkeypatch, raw_tree_queries):
+    # A core that renamed BatchedBrownianTree.trees must cost the prefetch, never an error.
+    import comfy.k_diffusion.sampling
+
+    real_sampler = comfy.k_diffusion.sampling.BrownianTreeNoiseSampler
+
+    class RenamedTreeSampler(real_sampler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.batched_tree = self.__dict__.pop("tree")
+
+        def __call__(self, sigma, sigma_next):
+            t0, t1 = torch.as_tensor(sigma), torch.as_tensor(sigma_next)
+            return self.batched_tree(t0, t1) / (t1 - t0).abs().sqrt()
+
+    stock = stock_brownian_sampler()
+    monkeypatch.setattr(comfy.k_diffusion.sampling, "BrownianTreeNoiseSampler", RenamedTreeSampler)
+    fields = brownian_fields()
+    noise_sampler = fields.for_window(FULL_WINDOW)
+
+    for sigma, sigma_next in query_pairs(PREFETCH_SIGMAS):
+        assert torch.equal(noise_sampler(sigma, sigma_next), stock(sigma, sigma_next))
+    fields.close()
+
+    assert split_by_thread(raw_tree_queries)[1] == []
+
+
+def test_close_is_idempotent_and_a_closed_provider_answers_on_the_caller(raw_tree_queries):
+    # close() goes through the offset wrapper a block run holds, twice. After it every query
+    # but the one already submitted runs on the calling thread, with the same field.
+    fields = brownian_fields()
+    offset = stepper.offset_noise_fields(fields, 0, 0)
+    offset.close()
+    offset.close()
+    noise_sampler = fields.for_window(FULL_WINDOW)
+    stock = stock_brownian_sampler()
+
+    for sigma, sigma_next in query_pairs(PREFETCH_SIGMAS):
+        assert torch.equal(noise_sampler(sigma, sigma_next), stock(sigma, sigma_next))
+
+    _, on_worker = split_by_thread(raw_tree_queries)
+    # The step 0 query submitted at construction may have run. Nothing was submitted after.
+    assert on_worker in ([], tree_pairs(PREFETCH_SIGMAS)[:1])
+
+
 def test_a_stochastic_sampler_without_a_shared_noise_field_is_rejected():
     import comfy.k_diffusion.sampling
 
