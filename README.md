@@ -75,7 +75,7 @@ Example workflow: [Chroma + Z-Image hybrid](workflows/Chroma%20+%20z-image%20Hyb
 
 ### VL nodes
 
-The VL nodes were built for and tested with Krea 2. Other Qwen3-VL based models, including Krea 2 Turbo, are untested.
+The VL nodes were built for Krea 2 and tested with Krea 2 and Krea 2 Turbo. Other Qwen3-VL based models are untested.
 
 Both nodes take `clip`, `anchor_source`, `vlm_method` and `prompt`. `clip` is the Qwen3-VL text encoder Krea 2 uses, such as `qwen3vl_4b_fp8_scaled.safetensors` in `models/text_encoders`. Load it with Load CLIP set to type `krea2`. Encoders without a vision path (SD/SDXL CLIP, T5, plain Qwen3) are rejected with a clear error. Connect the positive prompt's text to `prompt` so that each tile can confirm the things the prompt names (see [Tile tags](#tile-tags)).
 
