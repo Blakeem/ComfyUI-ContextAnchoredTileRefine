@@ -221,7 +221,7 @@ recorded prod run's packs against one tag per request.
 
 The owner uses `qwen3vl_4b_fp8_scaled.safetensors` from 2026-09-27 on, and the bench defaults to it.
 Arm prod-fp8 runs the prod pass on it. Seven arms change one stage each, run by
-`ab_tags_fp8_arms.py` at 5b2ea54, before the pass moved to the library toolkit. Six blind judges
+`retired/ab_tags_fp8_arms.py` at 5b2ea54, before the pass moved to the library toolkit. Six blind judges
 graded the new items with 69 stored verdicts mixed in, and agreed with 64 of them.
 `ab_tags_paired.py` scores each arm against prod-fp8 tile by tile over both sets (69 tile and prompt
 units), with 95% bootstrap intervals.

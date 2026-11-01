@@ -31,16 +31,16 @@ and the bar can never disagree and no engine file has to carry a second notion o
 happening now". It is emitted only when it CHANGES, which is what keeps a per-tile advance
 inside one segment from restating the same words.
 
-THE SHIM. `with ledger:` enters logit_classifier's `routed_progress_bars`, so any bar
+THE SHIM. `with ledger:` enters the toolkit `NodeBar`'s routing, so any bar
 constructed by core INSIDE the run maps its updates into the ledger's current segment
 instead of resetting the display. That is a comfy MODULE-global patch, normally against
 this package's rules. It is accepted here because those bars are constructed inside core
 functions with no instance to patch and no pbar parameter to pass (llama.py's token bar
 takes none). The window is the run only, and the toolkit restores the real class on exit.
-The ledger's OWN bar is built in `__init__`, before the patch, so it is genuine.
+The ledger's OWN `NodeBar` is built in `__init__`, before the patch, so its bar is genuine.
 SCOPE: the shim captures bars constructed through the `comfy.utils.ProgressBar` ATTRIBUTE
 (llama.py's token bar, sd.py's VAE tiled fallbacks, upscale.py's tiled_scale bar). The
-KNOWN ESCAPE is sd.py:360, whose `ProgressBar` comes from a module-level `from comfy.utils
+KNOWN ESCAPE is sd.py:367, whose `ProgressBar` comes from a module-level `from comfy.utils
 import ProgressBar` binding, reachable from every CLIP encode this package makes when CLIP
 hook scheduling is active. Nothing here claims totality.
 
@@ -49,7 +49,6 @@ lazily inside the methods that need it, and a subprocess test pins them.
 """
 
 import time
-from contextlib import ExitStack
 
 # --- the budget, in DiT-eval units (see the module docstring for what the unit is) -------
 #
@@ -73,15 +72,6 @@ W_ENCODE_CAPTION_TEXT = 0.5   # one per-tile caption TEXT encode (scales with ti
                               # captions.py encodes each tile's caption separately)
 W_ENCODE_TILE = 0.5           # one tile's VAE window encode
 W_DECODE_TILE = 1.0           # one tile's VAE window decode
-
-# Greedy generation hits its stop token at roughly 50-75% of max_length (owner-observed),
-# so core's per-token bar fills only partway before it is abandoned. A caption's chunk is
-# therefore mapped to fill at this fraction of max_length and HOLD at its boundary.
-CAPTION_FILL_RATIO = 0.65
-
-# comfy's ProgressBar carries integers, while the budget above is fractional. The emitted
-# value is the unit count scaled by this. Purely a resolution choice.
-EMIT_SCALE = 100
 
 
 def vision_encode_units(n_tiles, vision):
@@ -142,27 +132,6 @@ STATUS_TEXT = {
 }
 
 
-def linear_fill(value, total):
-    # A routed bar's own progress as a fraction of its own total, the default mapping.
-    if total <= 0:
-        return 1.0
-    return min(1.0, max(0.0, value / total))
-
-
-def caption_fill(index, max_length):
-    # Core's token bar is sized to max_length but greedy decode stops early, so a linear
-    # mapping would leave every caption's chunk visibly short. Token `index` fills the chunk
-    # at CAPTION_FILL_RATIO of max_length and the chunk HOLDS there. The exact boundary is
-    # reached by the completion snap (`caption_done`), never by a token.
-    from . import captions
-
-    return captions.comfy_toolkit().token_fill(index, max_length, CAPTION_FILL_RATIO)
-
-
-# Which mapping a routed bar gets, by the name of the segment it lands in. Absent = linear.
-SUB_FILL = {CAPTIONS: caption_fill}
-
-
 def build_plan(vlm_method, steps, batch=1, upscale_model=False, clip_load=False):
     """The ordered segment plan for one VL node execution, at PROVISIONAL sizes.
 
@@ -198,7 +167,7 @@ def build_plan(vlm_method, steps, batch=1, upscale_model=False, clip_load=False)
 
 
 class Ledger:
-    """The run's ONE ProgressBar, plus the segment bookkeeping that keeps it monotone.
+    """The segment bookkeeping over the run's ONE toolkit `NodeBar`, which keeps it monotone.
 
     Created only by nodes: node.py's VL nodes through build_ledger and testing.py's
     Captions node through build_caption_ledger, because a node is where the run's whole
@@ -210,13 +179,10 @@ class Ledger:
     """
 
     def __init__(self, plan, unique_id=None):
-        import comfy.utils
-
         from . import captions
 
         # The nodes build the ledger before any GPU work, so a missing library is named here.
         self._toolkit = captions.comfy_toolkit()
-        self._routing = ExitStack()
         self._started = 0.0
         self._plan = [[str(name), float(units)] for name, units in plan]
         self._cursor = 0          # index of the first plan entry not yet CLOSED
@@ -227,12 +193,9 @@ class Ledger:
         self._chunk_index = 0     # which sub-division is in progress
         self._chunk_base = None   # this segment's offset into a run-wide caption counter
         self._status_word = "captioning"  # the CAPTIONS line's verb, set at every open
-        self._value = 0          # last EMITTED value, in scaled integer units
-        self._total = 0
         self.unique_id = unique_id
         self.segments = []        # the plan entries opened, in order (name, units)
         self.caption_counters = None  # last (i, n) a caption reported, for the captioning line
-        self._status_text = None  # last EMITTED status line, never re-sent on a repeat
         # The "image b/B" prefix. B is READ OFF THE PLAN rather than passed in a second time:
         # build_plan appends one sampling entry per picture, so the plan is the one place the
         # batch is stated and the prefix cannot contradict the segments it labels.
@@ -240,18 +203,17 @@ class Ledger:
         self._picture = 1
         # Built before __enter__ routes comfy.utils.ProgressBar, so the ledger's own bar is
         # core's class and can never route into the ledger itself.
-        self._pbar = comfy.utils.ProgressBar(self._scaled(self._plan_units()))
-        self._emit()
+        self._bar = self._toolkit.NodeBar(self._plan_units(), unique_id)
 
     # ---- reading -------------------------------------------------------------------------
 
     @property
     def value(self):
-        return self._value
+        return self._bar.value
 
     @property
     def total(self):
-        return self._total
+        return self._bar.total
 
     # ---- segments ------------------------------------------------------------------------
 
@@ -278,7 +240,7 @@ class Ledger:
         self._chunk_base = None
         self._status_word = status_word
         self.segments.append(self._plan[self._cursor])
-        self._emit()
+        self._show()
 
     def resize(self, units):
         # The open segment's true size, once it is known (the upscale model's real step
@@ -286,7 +248,7 @@ class Ledger:
         # filled: the total must stay >= the value already emitted.
         if self._is_open:
             self._plan[self._cursor][1] = max(float(units), self._fill)
-            self._emit()
+            self._show()
 
     def preset(self, name, units):
         # Every PENDING match is pre-sized, so the total never collapses when a large segment
@@ -295,7 +257,7 @@ class Ledger:
         for entry in self._plan[start:]:
             if entry[0] == name:
                 entry[1] = float(units)
-        self._emit()
+        self._show()
 
     def preset_picture(self, preset, n_tiles, rows, eval_total, vision_units):
         # The same arithmetic the engine's open() calls carry, so open never moves the total.
@@ -318,14 +280,14 @@ class Ledger:
 
     def close(self):
         self._close()
-        self._emit()
+        self._show()
 
     def finish(self):
         # Also reached on denoise <= 0, where most of the plan never opens.
         self._close()
         self._done += sum(entry[1] for entry in self._plan[self._cursor:])
         self._cursor = len(self._plan)
-        self._emit()
+        self._show()
 
     # ---- filling -------------------------------------------------------------------------
 
@@ -335,7 +297,7 @@ class Ledger:
         # restart an inner bar mid-segment) monotone.
         if self._is_open:
             self._fill = min(max(self._fill, float(units)), self._plan[self._cursor][1])
-        self._emit(preview)
+        self._show(preview)
 
     def caption_done(self, index, count):
         # One caption finished. (index, count) are the text pass's RUN-WIDE counters
@@ -357,30 +319,28 @@ class Ledger:
         # per-token bar into per-caption sub-progress. With nothing open the update is
         # emitted but cannot move the value.
         if not self._is_open or total <= 0:
-            self._emit(preview)
+            self._show(preview)
             return
-        units = self._plan[self._cursor][1]
+        name, units = self._plan[self._cursor]
+        # Core's token bar is sized to max_length and greedy decode stops early, so a caption
+        # chunk fills at the toolkit's greedy ratio and holds until `caption_done` snaps it.
+        ratio = self._toolkit.GREEDY_FILL_RATIO if name == CAPTIONS else 1.0
         low = units * self._chunk_index / self._chunks
         high = units * (self._chunk_index + 1) / self._chunks
-        fraction = SUB_FILL.get(self._plan[self._cursor][0], linear_fill)(value, total)
+        fraction = self._toolkit.token_fill(value, total, ratio)
         self.advance(low + (high - low) * fraction, preview)
 
     # ---- the scoped comfy.utils.ProgressBar patch -----------------------------------------
 
     def __enter__(self):
         self._started = time.perf_counter()
-        self._routing.enter_context(self._toolkit.routed_progress_bars(self.route))
+        self._bar.routing(self.route)
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         seconds = time.perf_counter() - self._started
-        text = ""
 
-        self._routing.close()
-        # The frontend ignores an empty line, so the run's last line must say how it ended
-        # or a phase line such as "sampling 40%" stays under the node.
-        text = self._toolkit.run_outcome(exc_type, f"done in {seconds:.1f} s")
-        self._send_status(text)
+        self._bar.close(exc_type, f"done in {seconds:.1f} s")
         return False
 
     # ---- internals ------------------------------------------------------------------------
@@ -403,10 +363,6 @@ class Ledger:
 
     def _value_units(self):
         return self._done + (self._fill if self._is_open else 0.0)
-
-    @staticmethod
-    def _scaled(units):
-        return round(units * EMIT_SCALE)
 
     def _status(self):
         """The line this state says, or None for "nothing to report, leave the last one".
@@ -437,27 +393,15 @@ class Ledger:
             return f"sampling {percent}%"
         return STATUS_TEXT.get(name)
 
-    def _emit_status(self):
+    def _show(self, preview=None):
         text = self._status()
+
+        self._bar.emit(self._value_units(), total_units=self._plan_units(), preview=preview)
         if text is None:
             return
         if self._pictures > 1:
             text = f"image {self._picture}/{self._pictures}: {text}"
-        self._send_status(text)
-
-    def _send_status(self, text):
-        if text == self._status_text:
-            return
-        self._status_text = text
-        self._toolkit.send_status(self.unique_id, text)
-
-    def _emit(self, preview=None):
-        total = max(self._scaled(self._plan_units()), self._value)
-        value = min(max(self._scaled(self._value_units()), self._value), total)
-        self._value = value
-        self._total = total
-        self._pbar.update_absolute(value, total, preview)
-        self._emit_status()
+        self._bar.status(text)
 
 
 def build_ledger(vlm_method, steps, batch=1, upscale_model=False, clip_load=False, unique_id=None):

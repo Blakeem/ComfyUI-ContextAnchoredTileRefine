@@ -679,12 +679,13 @@ def _listed_block(header, trace, fallback_question):
 
 
 def _listed_debug(preset, headers, traces):
-    fallback_question = tags.tag_settings(preset).echo_fallback_instruction
+    settings = tags.tag_settings(preset)
+    fallback_question = settings.echo_fallback_instruction
     sections = [_section("### Question sent to the VL model for every tile", [_quote(preset.tile_tags_instruction)])]
     sections.extend(_listed_block(header, trace, fallback_question)
                     for header, trace in zip(headers, traces, strict=True))
     return _debug_text(LISTED_TITLE, "The VL model is asked the question below about each tile, "
-                       f"its list is stopped after {tags.MAX_PROPOSED_TAGS} tags, and its reply is "
+                       f"its list is stopped after {settings.propose_cap} tags, and its reply is "
                        "split into tags. A reply with no tag besides category nouns is replaced by "
                        "the reply to a fallback question.", sections)
 
@@ -729,13 +730,14 @@ def _placement(item, term, unplaced):
 
 
 def _axis_cell(strips, threshold):
-    # Bold marks a strip that holds the tag, the same rule tags.axis_word applies.
+    # Bold marks a strip that holds the tag, the same rule the toolkit's locate_tags applies.
     return ", ".join(f"**{_p(p, SCORE_DIGITS)}**" if p >= threshold else _p(p, SCORE_DIGITS) for p in strips)
 
 
 def _positions_table(trace, threshold):
-    header = ("Tag", "Result", f"Rows ({', '.join(tags.ROW_WORDS)})",
-              f"Columns ({', '.join(tags.COLUMN_WORDS)})")
+    toolkit = captions.comfy_toolkit()
+    header = ("Tag", "Result", f"Rows ({', '.join(toolkit.ROW_WORDS)})",
+              f"Columns ({', '.join(toolkit.COLUMN_WORDS)})")
     rows = [(_escaped(item), _placement(item, term, trace.unplaced),
              _axis_cell(strips[:3], threshold), _axis_cell(strips[3:], threshold))
             for item, strips, term in zip(trace.kept, trace.strips, trace.terms, strict=True)]

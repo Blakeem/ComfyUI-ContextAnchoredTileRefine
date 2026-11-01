@@ -362,14 +362,10 @@ without that doc's temporal design.
   24 tile config.
 - `context_anchored_tile_refine/captions.py`: the `vlm_method` surfaces that are not pure
   vision rows. Per-tile VLM captions generated from the tile's own crop by the SAME CLIP that
-  encodes the vision rows: `clip.tokenize(instruction, images=[...], thinking=True)` ->
-  `clip.generate(do_sample=False, repetition_penalty=1.05)` -> `strip_thinking` (mandatory —
-  an unstripped `<think>` block reaches the
-  DiT as hundreds of tokens of the model talking to itself) -> `clean_caption`. `_THINK_BLOCK`'s
-  `(?:</think>|$)` alternation is load-bearing: without the `|$` a
-  tile whose reasoning turn exhausts `max_tokens` returns that REASONING as its caption,
-  non-empty, so `generate_caption`'s fallback chain never fires and the model's deliberation
-  becomes the tile's whole positive. **The instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED
+  encodes the vision rows. `generate_caption` caches the toolkit's `describe_image`, which runs
+  the greedy, sampled and one-sentence fallback chain and cuts any reasoning turn off with the
+  toolkit's `strip_thinking`, and each caption then passes the toolkit's `clean_caption`. The
+  `max_tokens` budget covers any reasoning turn the model writes as well as the answer. **The instructions live in `settings.toml` at the repo root since 2026-08-21, as NAMED
   PRESETS since 2026-08-22, beside a `[vision]` table since 2026-09-02** (`load_settings`
   returns `Settings(vision, presets)`, `resolve_method` / `vlm_methods`), deployed with the
   node. The `[vision]` table (`canvas_tokens`, `crop_tokens`, `caption_megapixels`) is
@@ -449,7 +445,7 @@ without that doc's temporal design.
   its combo from, same once-per-session cadence for the same reason. THE CAPTION CACHE:
   `generate_caption` stores its final text in a bounded `OrderedDict` (`CAPTION_CACHE_ENTRIES`
   512) keyed by the sha256 of a float32 view of the resampled picture (bfloat16 has no numpy
-  dtype), its dtype and shape, the instruction, the budget, the reasoning flag and a `scope`
+  dtype), its dtype and shape, the instruction, the budget and a `scope`
   tuple naming the request's place in the run (tile crop rect, row and picture index, or
   "style"), with a weakref to the CLIP that must still be the same object on a hit. Captions
   are greedy (`do_sample=False`, so core builds no generator), so the stored text is what a
@@ -461,36 +457,43 @@ without that doc's temporal design.
   preset settings.toml ships since 1.8.0 (the caption presets live in
   `settings.user.example.toml`). The shared stages come from the library's toolkit
   (`logit_classifier.toolkit.comfyui`, which the Logit Tagger also runs), driven by
-  `tag_settings(preset)`: the preset's wordings and thresholds plus this module's budgets, caps
-  and thing check. PICTURE PASS: when the prompt is non-blank AND
+  `tag_settings(preset)`: the preset's wordings and thresholds and `order="candidate"`, every
+  other value the toolkit's `TagSettings` default, which `tests/test_tags.py` pins field by
+  field. PICTURE PASS: when the prompt is non-blank AND
   `prompt_tags_instruction` is set, the toolkit's `tag_prompt`: the language gate ("Is this
   text written in English?", a translate generate only below 0.5), one text-only greedy generate
   listing the prompt's physical things, a tag kept only when every content word shares a plural
-  form with a word of the English text, the list stopped after `UNGROUNDED_STREAK` 2 ungrounded
+  form with a word of the English text, the list stopped after `ungrounded_streak` 2 ungrounded
   tags in a row, then the thing check. Then the style caption. PER TILE: the toolkit's `tag_image` over the crop
-  resampled to `VL_MAX_PIXELS` 1 MP: propose (stopped at `MAX_PROPOSED_TAGS` 25 complete tags,
+  resampled to `VL_MAX_PIXELS` 1 MP: propose (stopped at `propose_cap` 25 complete tags,
   never reads the prompt, one echo fallback propose when the reply holds only category nouns),
-  merge model-first (cap `MAX_MERGED_TAGS` 64, origins model / prompt / both), the THING CHECK
+  merge model-first (cap `merge_cap` 64, origins model / prompt / both), the THING CHECK
   (one packed text-only `ChoiceQuestion` per distinct tag, answers shared across the run in
-  `thing_cache`, dropped below p(thing) `THING_THRESHOLD` 0.1), verify (the noul
+  `thing_cache`, dropped below p(thing) `thing_threshold` 0.1), verify (the noul
   `tile_tags_verification_statement`, filled by the library's `presence_statement`, keeping a
   model or both tag at `tile_tags_verification_threshold` (`verify_thresholds.proposed`) and a
   prompt-only tag at `prompt_tags_verification_threshold` (`verify_thresholds.declared`), both
   at the library's `STRICT_THRESHOLDS` 0.99998), `drop_subsets`
-  (words rule), then this module's locate (six strips at `STRIP_MEGAPIXELS` 0.25, a tag no
-  strip holds dropped, a term only on an axis where exactly ONE strip holds it). Every tuning
+  (words rule), then the toolkit's `locate_tags` on the full-resolution crop (its six
+  `strip_boxes` strips at `STRIP_PIXELS` 250000, a tag no strip holds dropped, a term only on an
+  axis where exactly ONE strip holds it) and `render_placed`. Every tuning
   value was measured on the fp8 encoder in `tests-AB/tags-bench-log.md` section 12, and the
   thresholds in section 13. The thing check stays PACKED on purpose:
   `tests-AB/probe_thing_pack.py` measured one tag per request at 6x the time, with every flip a
   correct tag dropped. The toolkit's `skip_resident_loads`, `shared_vision_encode` and
   `clip_generate` (CUDA graph decode stays on, core issue #16441) carry the speed. Results cache
   in `_TAG_CACHE` (a `captions.ClipBoundCache`) keyed by the picture digest, `tag_settings(preset)`
-  (frozen and hashable), the pixel caps, the position words and threshold, the style instruction,
+  (frozen and hashable), `VL_MAX_PIXELS`, the position threshold, the style instruction,
   the prompt and the scope. Bench and log: `tests-AB/ab_tags_bench.py`,
-  `tests-AB/tags-bench-log.md`. torch + stdlib at module scope, comfy and logit_classifier lazy,
-  so a missing library fails with its pip command. `captions.comfy_toolkit` also compares the
-  library's `__version__` against `captions.LIBRARY_VERSION` (0.5.0, the plural grounding fix),
-  never importlib.metadata, since an editable install can keep a stale dist version.
+  `tests-AB/tags-bench-log.md`. `tests-AB/ab_toolkit_parity.py` records this pack's tile tags and
+  captions and the Logit Tagger's tag and style runs, so a library toolkit change is checked byte for
+  byte by a record before, a record after and a compare. `tests-AB/retired/` holds harnesses that
+  patch removed names and run only at the commit their docstring names. torch + stdlib at module scope, comfy and logit_classifier lazy,
+  so a missing library fails with its pip command. `captions.comfy_toolkit` imports the toolkit's
+  `require_version`, which compares the library's `__version__` against `captions.LIBRARY_VERSION`
+  (0.6.0, the first to ship `locate_tags`, `resample_image`, `describe_image`, `require_version`
+  and `NodeBar`), never importlib.metadata, since an editable install can keep a stale dist
+  version.
 - `context_anchored_tile_refine/upscale.py`: the all-in-one nodes' internals. Whole-image
   upscale stage (`prepare_upscaled`: optional model pass mirroring core ImageUpscaleWithModel
   — version-defensive around `.patcher`, OOM tile-halving — then at most ONE lanczos to the
@@ -545,7 +548,7 @@ without that doc's temporal design.
   core's bar hook is the only Cancel check inside a generate. The run ends on one status line
   from the toolkit's `run_outcome`: "done in X s", "cancelled" or "failed", since frontend
   1.53.6 ignores an empty progress text. Its scope is the `comfy.utils.ProgressBar`
-  ATTRIBUTE only; the known escape is sd.py:360's module-level binding under CLIP hook
+  ATTRIBUTE only; the known escape is sd.py:367's module-level binding under CLIP hook
   scheduling. **Stdlib only at module scope, no torch either**. comfy and the library are lazy
   (subprocess test pins them), and every VL run needs the library.
 - `context_anchored_tile_refine/testing.py`: the TILE TESTING CHAIN (2026-09-03), five nodes

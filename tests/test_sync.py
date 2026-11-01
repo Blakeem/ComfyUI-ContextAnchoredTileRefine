@@ -20,7 +20,6 @@ take no fixture at all. Nothing here needs the real `comfy_env` install.
 """
 import copy
 import itertools
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +30,7 @@ from test_tags import FakeTagClip
 from test_tiling import GridNoise, GridVAE, _layout
 from test_vl import FakeVLClip, RecordingVLClip, layout_tiles
 
-from conftest import BaseModel
+from conftest import BaseModel, hide_modules
 from context_anchored_tile_refine import captions, conds, grid, progress, sampling, sync, tags, vl
 
 # Strictly decreasing, ends at 0, starts below 1 — every unconditional precondition satisfied
@@ -1947,7 +1946,7 @@ def test_the_bar_ticks_per_eval_and_the_total_settles_at_the_grid_solve(comfy_st
     assert bar.updates[settled_at][0] == 0  # nothing had filled when the true total landed
 
     def emitted(units):
-        return round(units * progress.EMIT_SCALE)
+        return round(units * 100)
 
     values = [value for value, _total, _preview in bar.updates]
     before_sampling = progress.W_ENCODE + 2 * progress.W_ENCODE_TILE
@@ -2266,7 +2265,7 @@ def test_the_region_path_tags_the_region_crop_and_styles_the_full_image(comfy_st
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (FakeVLClip(seq_override=ENC_SEQ), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.6\.0"'),
 ])
 def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs, monkeypatch, clip,
                                                                      missing, error, message):
@@ -2276,7 +2275,7 @@ def test_a_direct_caller_with_a_tags_preset_fails_before_any_encode(comfy_stubs,
         raise AssertionError("no encode may run before the tags guard")
 
     if missing:
-        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+        hide_modules(monkeypatch, "logit_classifier")
     monkeypatch.setattr(sync, "build_tile_positives", unreached)
     monkeypatch.setattr(sync, "encode_canvas_latent", unreached)
 
@@ -2292,7 +2291,7 @@ def test_captions_handed_in_with_a_tags_preset_never_reach_the_tags_guard(comfy_
     def untagged(*args, **kwargs):
         raise AssertionError("the tags pass must not run when the captions are handed in")
 
-    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    hide_modules(monkeypatch, "logit_classifier")
     monkeypatch.setattr(tags, "generate_tag_set", untagged)
     monkeypatch.setattr(captions, "build_caption_conds", lambda clip, given: lane_positives(given))
     handed = [[f"tile {index}"] for index in range(len(expected_layout().tiles))]

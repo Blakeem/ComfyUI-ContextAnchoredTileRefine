@@ -3,7 +3,6 @@ custom-sampling inputs from widgets and hand them, plus the UPSCALED image, to t
 existing entry point. So every builder and sampling.refine_image itself is replaced by a
 recorder: what is pinned here is which value reaches which parameter, not any pixel math
 (that is covered by test_upscale / test_tiling / test_vl against the real functions)."""
-import sys
 
 import pytest
 import torch
@@ -11,7 +10,7 @@ from logit_classifier import UnsupportedModelError
 from test_sync import ModelPatcher
 from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
-from conftest import BaseModel
+from conftest import BaseModel, hide_modules
 from context_anchored_tile_refine import grid, sampling, sync, upscale
 from context_anchored_tile_refine.node import ContextAnchoredTileUpscaleVL
 
@@ -394,7 +393,7 @@ def test_a_tags_preset_reaches_refine_image_with_the_prompt_on_it(comfy_stubs, m
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (None, False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.6\.0"'),
 ])
 def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_stubs, monkeypatch, tmp_path,
                                                                          clip, missing, error, message):
@@ -404,7 +403,7 @@ def test_a_tags_preset_it_cannot_run_is_refused_before_the_upscale_pass(comfy_st
 
     write_settings(tmp_path, TAGS_SETTINGS, monkeypatch)
     if missing:
-        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+        hide_modules(monkeypatch, "logit_classifier")
     recorded = {}
 
     with pytest.raises(error, match=message):

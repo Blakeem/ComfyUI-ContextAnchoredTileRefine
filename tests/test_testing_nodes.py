@@ -11,7 +11,6 @@ Render node reaches sampling.refine_image with the layout's own rects, captions 
 slice. The Render node's collaborators are all replaced by recorders, so what is pinned there
 is which value reaches which parameter and not any pixel math."""
 import dataclasses
-import sys
 import tomllib
 from types import SimpleNamespace
 
@@ -36,8 +35,8 @@ from test_tags import (
     toolkit_defaults,
 )
 
-from conftest import BaseModel
-from context_anchored_tile_refine import captions, grid, progress, sampling, sync, tags, testing, upscale, vl
+from conftest import BaseModel, hide_modules
+from context_anchored_tile_refine import captions, grid, progress, sampling, sync, testing, upscale, vl
 from context_anchored_tile_refine.node import ContextAnchoredTileRefine, ContextAnchoredTileUpscaleVL
 from context_anchored_tile_refine.testing import (
     ContextAnchoredTileTestCaptions,
@@ -546,13 +545,15 @@ def test_a_placeholder_with_no_prompt_is_refused_before_any_caption(comfy_stubs,
     assert clip.generate_calls == []
 
 
-def test_every_caption_is_asked_with_the_reasoning_turn_on(comfy_stubs):
+def test_every_caption_is_asked_in_the_chat_template(comfy_stubs):
     clip = _asking_clip()
 
     _caption(clip, global_style_instruction="name the medium")
 
     assert len(clip.generate_calls) == 3
-    assert all(call["thinking"] is True for call in clip.tokenize_calls)
+    assert [call["text"] for call in clip.tokenize_calls] == [
+        chat_text(call["text"], image=True) for call in clip.generate_calls]
+    assert all("thinking" not in call for call in clip.tokenize_calls)
 
 
 def test_the_caption_size_widget_sets_every_picture_the_vl_model_reads(comfy_stubs):
@@ -693,7 +694,7 @@ def test_the_run_is_one_progress_bar_that_ends_full(comfy_stubs):
 
     assert len(comfy_stubs["progress_bars"]) == 1
     bar = comfy_stubs["progress_bars"][0]
-    total = round(10 * progress.K_CAPTION * progress.EMIT_SCALE)
+    total = round(10 * progress.K_CAPTION * 100)
     assert bar.total == total
     values = [value for value, _total, _preview in bar.updates]
     assert values == sorted(values)
@@ -795,7 +796,8 @@ def test_the_tags_kind_writes_a_tags_set_from_the_sockets(tag_classifier):
         "### Style caption\n\nPlaced on top of every tile's text.\n\n> Oil painting.\n\n")
     # The style caption is asked with global_style_max_tokens.
     style_calls = calls_of(clip, "style")
-    assert [(call["text"], call["max_length"]) for call in style_calls] == [("name the medium", 64)]
+    assert [(call["text"], call["max_length"]) for call in style_calls] == [
+        (chat_text("name the medium", image=True), 64)]
     (prompt_tags_call,) = calls_of(clip, "prompt tags")
     assert prompt_tags_call["text"] == chat_text(PROMPT_TAGS.replace("{PROMPT}", TAG_PROMPT))
     assert calls_of(clip, "propose")[0]["text"] == PROPOSE_TEXT
@@ -807,16 +809,13 @@ def test_the_tags_kind_ignores_the_caption_budget_a_tags_settings_node_outputs(t
     assert result.written.captions == (("red apple, moon",),) * 2
 
 
-def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_classifier, monkeypatch):
-    seen = []
-    resample = captions.resample_for_vl
-    monkeypatch.setattr(captions, "resample_for_vl",
-                        lambda pixels, budget=None: seen.append(budget) or resample(pixels, budget))
+def test_the_caption_size_widget_reaches_the_style_caption_of_a_tags_run(tag_classifier):
+    clip, _result = _tag_run(prompt=None, caption_megapixels=0.25)
 
-    _tag_run(prompt=None, caption_megapixels=0.25)
-
-    assert 250_000 in seen
-    assert set(seen) <= {250_000, tags.VL_MAX_PIXELS, round(tags.STRIP_MEGAPIXELS * 1_000_000)}
+    # The resample stub returns the size it was asked for, so the style picture's area is its budget.
+    (style_call,) = calls_of(clip, "style")
+    height, width = int(style_call["image"].shape[1]), int(style_call["image"].shape[2])
+    assert abs(height * width - 250_000) / 250_000 < 0.01
 
 
 PROMPT_TAGS_SENTENCE = (
@@ -1129,7 +1128,7 @@ def test_a_tags_run_with_a_prompt_and_no_style_instruction_counts_no_style_row(t
     _tag_run(global_style_instruction=None)
 
     bar = comfy_stubs["progress_bars"][0]
-    total = round(2 * progress.K_TAG_TILE * progress.EMIT_SCALE)
+    total = round(2 * progress.K_TAG_TILE * 100)
     assert len(comfy_stubs["progress_bars"]) == 1
     assert bar.total == total
     assert bar.updates[-1][:2] == (total, total)
@@ -1358,7 +1357,7 @@ def test_given_captions_run_on_the_shipped_tags_preset_without_the_tags_library(
     # The shipped file's one preset is the tags kind, and this node hands its captions in, so
     # nothing on its route tags and a missing library cannot stop it (test_sync pins the
     # engine's half of that).
-    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    hide_modules(monkeypatch, "logit_classifier")
     layout = _render_layout()
     given = _captions_for(layout)
 

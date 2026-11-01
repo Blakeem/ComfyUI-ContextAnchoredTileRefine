@@ -39,8 +39,6 @@ Module scope is torch-only. comfy and logit_classifier are imported lazily insid
 """
 import functools
 import hashlib
-import math
-import re
 import tomllib
 import weakref
 from collections import OrderedDict
@@ -112,8 +110,8 @@ USER_SETTINGS_NAME = "settings.user.toml"
 # longer ship in settings.toml, so a saved option naming one of them has a place to point to.
 EXAMPLE_SETTINGS_NAME = "settings.user.example.toml"
 
-# Every max_tokens budget must cover the reasoning turn as well (captions are always
-# generated with thinking=True), which is why the shipped values are 768 rather than a
+# Every max_tokens budget must cover any reasoning turn the model writes before its answer
+# (describe_image runs the caption chain), which is why the shipped values are 768 rather than a
 # visible-answer length. The ceiling is a typo guard: one caption is the run's slowest
 # per-tile step, so a stray extra digit would multiply the whole run's wall time.
 MAX_CAPTION_TOKENS = 4096
@@ -679,78 +677,9 @@ def caption_budget_pixels(megapixels, source):
     return round(megapixels * 1_000_000)
 
 
-# The `|$` is load-bearing: without it an unclosed <think> makes the sub a no-op, so a
-# reasoning turn cut short by max_tokens comes back as the caption, non-empty, and
-# generate_caption's fallback chain never fires.
-_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
-
-_META_LINE = ("wait,", "wait ", "here's a revised", "here is a revised", "revised version",
-              "let me", "i need to", "actually,")
-
-
 def resample_for_vl(tile_pixels, budget=None):
-    # AB27's caption input prep: area-resample a COPY of the tile's crop to `budget` total
-    # pixels, VL_INPUT_BUDGET by default. Unlike vl.resample_picture there is no
-    # /MERGED_CELL snap, because nothing slices this encode by row — the tokenizer's own
-    # rounding is free to apply.
-    import comfy.utils
-
-    samples = tile_pixels.movedim(-1, 1)
-    pixels = VL_INPUT_BUDGET if budget is None else budget
-    scale_by = math.sqrt(pixels / (samples.shape[3] * samples.shape[2]))
-    width = round(samples.shape[3] * scale_by)
-    height = round(samples.shape[2] * scale_by)
-    resampled = comfy.utils.common_upscale(samples, width, height, "area", "disabled")
-    return resampled.movedim(1, -1)[:, :, :, :3]
-
-
-def strip_thinking(text):
-    """Cut Qwen3's reasoning turn off the front of an answer.
-
-    Here it is mandatory, because the caption is encoded as text, so an unstripped <think>
-    block would reach the DiT as several hundred tokens of the model talking to itself.
-
-    An answer that is nothing BUT an unclosed reasoning turn comes back "", which is what
-    makes generate_caption's fallback chain fire on it."""
-    if "<think>" not in text:
-        return text.strip()
-    body = _THINK_BLOCK.sub("", text)
-    if "</think>" in body:                  # truncated/unclosed: keep what follows the last
-        body = body.rsplit("</think>", 1)[-1]
-    return re.sub(r"</?think>", "", body).strip()
-
-
-def clean_caption(text):
-    """Remove the VLM's own formatting artifacts so the DiT never reads them as content.
-
-    Three observed failures, all of which reach the conditioning verbatim because the
-    caption is encoded as text:
-      heading      "**Answer:**", "**Image as compact list:**" — a label, not a description
-      meta         "Wait, I need to rephrase to fit under 50 words." — the model narrating
-      repetition   a market crop looped six items THREE times inside one 84-word caption,
-                   which is exactly the duplication the instruction exists to avoid
-    Dedup is by normalized line, so 'chicken, left' and 'chicken, right' both survive; only
-    an exact repeat is dropped. Content is never rewritten, only whole artifact lines cut."""
-    kept, seen, dropped = [], set(), False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        low = line.lower().lstrip("*_#-• ")
-        if low.startswith(_META_LINE) or (
-                not kept and line.startswith("**") and line.endswith(":**")):
-            dropped = True                              # heading or meta narration
-            continue
-        key = " ".join(low.rstrip(".").split())
-        if key in seen:
-            dropped = True                              # the repetition loop
-            continue
-        seen.add(key)
-        kept.append(line)
-    # Nothing to remove => hand back the ORIGINAL string, byte for byte. Rejoining would
-    # otherwise drop the markdown line-break spaces and re-tokenize a caption that was
-    # already fine.
-    return text if not dropped else "\n".join(kept).strip()
+    # The pack keeps this name because the tests-AB harnesses patch it.
+    return comfy_toolkit().resample_image(tile_pixels, VL_INPUT_BUDGET if budget is None else budget)
 
 
 # A seed re-roll on the production upscale node re-executes the entire node, captions
@@ -805,9 +734,9 @@ def picture_digest(picture):
     return (hashlib.sha256(pixels).hexdigest(), str(picture.dtype), tuple(picture.shape))
 
 
-# 0.5.0 grounds a prompt tag "sky" in a prompt reading "skies". The tags pass keeps a prompt tag only when every word
-# grounds, so an older library drops correct prompt tags.
-LIBRARY_VERSION = "0.5.0"
+# 0.6.0 is the first library to ship the toolkit's locate_tags, resample_image, describe_image, require_version and
+# NodeBar, which the tags pass, the captions and the progress shell call.
+LIBRARY_VERSION = "0.6.0"
 
 
 def _library_error(reason):
@@ -820,72 +749,33 @@ def _library_error(reason):
 def comfy_toolkit():
     """logit_classifier.toolkit.comfyui, or a RuntimeError naming the pip command that installs
     LIBRARY_VERSION when the library is missing, older, or reports no version this gate can read."""
-    installed = None
-    installed_version = None
-
     try:
-        import logit_classifier
-        import logit_classifier.toolkit.comfyui as toolkit
+        from logit_classifier.toolkit.comfyui import require_version
     except ImportError as error:
+        # A library older than 0.6.0 holds no require_version, so the pack still words that failure itself.
         raise _library_error(f"its toolkit cannot be imported ({error})") from error
-    # Core requires transformers, which requires packaging, so pip's own PEP 440 ordering is present wherever this
-    # node runs.
-    from packaging.version import InvalidVersion, Version
-
-    # The module attribute, never importlib.metadata, since an editable install can keep a stale version in its
-    # dist metadata.
-    installed = getattr(logit_classifier, "__version__", None)
-    if installed is None:
-        raise _library_error("the installed library reports no version")
-    try:
-        installed_version = Version(installed)
-    except (InvalidVersion, TypeError) as error:
-        raise _library_error(
-            f"the installed library reports version {installed!r}, which is not a version number") from error
-    if installed_version < Version(LIBRARY_VERSION):
-        raise _library_error(f"version {installed} is installed")
-    return toolkit
+    return require_version(LIBRARY_VERSION, node="Context-Anchored Tile Refine (VL)", needs="every VL run needs")
 
 
-def generate_caption(clip, vl_input, instruction, max_length, thinking=True, scope=()):
-    """One greedy caption of `vl_input`, then the settled fallback chain for a crop whose
-    stop token fires immediately. `max_length` is per-instruction (the preset's max_tokens on
-    the live surfaces) and has to cover the reasoning turn as well as the answer, which is
-    why the budgets sit far above the visible answer length.
+def generate_caption(clip, vl_input, instruction, max_length, scope=()):
+    """One caption of `vl_input` from the toolkit's describe_image, which runs the greedy,
+    sampled and one-sentence fallback chain. `max_length` is per-instruction (the preset's
+    max_tokens on the live surfaces) and covers any reasoning turn the model writes as well as
+    the answer, which is why the budgets sit far above the visible answer length.
 
-    The answer is cached in process against the picture, the question, the budget, the
-    reasoning flag, `scope` and the CLIP, so a re-run of the node writes it once.
+    The answer is cached in process against the picture, the question, the budget, `scope`
+    and the CLIP, so a re-run of the node writes it once.
     `scope` is a hashable tuple naming this request's place in a run. Two byte-equal crops
     within one run are captioned separately because their scopes differ. A direct caller with
     nothing to name may leave it empty."""
-    if not hasattr(clip, "generate") or not hasattr(clip, "decode"):
-        raise RuntimeError(
-            "Context-Anchored Tile Refine (VL): this CLIP cannot generate text. The caption "
-            "vlm_methods need a vision-language text encoder with a text-generation head "
-            "(Krea 2 family). Use vlm_method 'vision tokens' with any other CLIP.")
-    clip_generate = comfy_toolkit().clip_generate
-
-    key = (picture_digest(vl_input), instruction, max_length, thinking, scope)
+    key = (picture_digest(vl_input), instruction, max_length, scope)
     stored = _CAPTION_CACHE.get(key, clip)
+    text = ""
+
     if stored is not None:
         return stored
-
-    tokens, _tail = vl.tokenize_with_image(clip, instruction, vl_input, thinking=thinking)
-    ids = clip_generate(clip, tokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
-    text = strip_thinking(clip.decode(ids))
-    if not clean_caption(text):
-        ids = clip_generate(clip, tokens, do_sample=True, max_length=max_length, temperature=0.7,
-                            top_k=64, top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=42)
-        text = strip_thinking(clip.decode(ids))
-    if not clean_caption(text):
-        retokens, _tail = vl.tokenize_with_image(clip, "Write one short sentence describing this image.",
-                                                 vl_input, thinking=False)
-        ids = clip_generate(clip, retokens, do_sample=False, max_length=max_length, repetition_penalty=1.05)
-        text = strip_thinking(clip.decode(ids))
-    if not clean_caption(text):
-        raise RuntimeError(
-            "Context-Anchored Tile Refine (VL): caption generation returned an empty answer "
-            "after every fallback.")
+    text = comfy_toolkit().describe_image(clip, vl_input, instruction, max_tokens=max_length,
+                                          node="Context-Anchored Tile Refine (VL)")
     _CAPTION_CACHE.put(key, clip, text)
     return text
 
@@ -893,8 +783,8 @@ def generate_caption(clip, vl_input, instruction, max_length, thinking=True, sco
 def style_caption(clip, row, preset, scope):
     """One picture row's cleaned style caption, read at the [vision] table's caption size."""
     vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
-    return clean_caption(generate_caption(clip, vl_input, preset.global_style_instruction,
-                                          preset.global_style_max_tokens, thinking=True, scope=scope))
+    return comfy_toolkit().clean_caption(generate_caption(clip, vl_input, preset.global_style_instruction,
+                                                          preset.global_style_max_tokens, scope=scope))
 
 
 def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=0,
@@ -946,6 +836,7 @@ def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=
             "through the caption pass. Pick a preset without tile_text, or one set to "
             f"{TILE_TEXT_CAPTION!r}.")
     _check_prompt_filled(preset)
+    clean_caption = comfy_toolkit().clean_caption
     batch = int(source.shape[0])
     style_rows = style_row_count(preset, batch)
     style_on = style_rows > 0
@@ -980,7 +871,7 @@ def generate_caption_set(clip, source, tiles, preset, batch_size=1, batch_index=
             row = source[b:b + 1, crop.y0:crop.y1, crop.x0:crop.x1, :]
             vl_input = resample_for_vl(row, caption_budget_pixels(preset.vision.caption_megapixels, row))
             text = generate_caption(clip, vl_input, preset.tile_caption_instruction,
-                                    preset.tile_caption_max_tokens, thinking=True,
+                                    preset.tile_caption_max_tokens,
                                     scope=("tile", crop.x0, crop.y0, crop.x1, crop.y1, b,
                                            batch_index))
             row_captions.append(clean_caption(text))

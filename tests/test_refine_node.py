@@ -1,5 +1,4 @@
 import inspect
-import sys
 
 import pytest
 import torch
@@ -7,6 +6,7 @@ from logit_classifier import UnsupportedModelError
 from test_sampling import FakeGuider, FakeNoise, FakeVAE
 from test_tags import FakeClassifier, FakeTagClip, open_toolkit
 
+from conftest import hide_modules
 from context_anchored_tile_refine import captions, sampling
 from context_anchored_tile_refine.node import (
     ContextAnchoredTileRefine,
@@ -137,7 +137,7 @@ def test_vl_node_runs_the_shipped_tags_preset_with_the_prompt_on_it(comfy_stubs,
 @pytest.mark.parametrize(("clip", "missing", "error", "message"), [
     (object(), False, UnsupportedModelError,
      r"Context-Anchored Tile Refine \(VL\): this CLIP is not a Qwen3-VL text encoder"),
-    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.5\.0"'),
+    (FakeTagClip(), True, RuntimeError, r'pip install -U "logit-classifier>=0\.6\.0"'),
 ])
 def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comfy_stubs, monkeypatch,
                                                                              clip, missing, error, message):
@@ -147,7 +147,7 @@ def test_vl_node_refuses_a_tags_preset_it_cannot_run_before_the_engine_runs(comf
         raise AssertionError("refine_image must not run when the tags preset cannot")
 
     if missing:
-        monkeypatch.setitem(sys.modules, "logit_classifier", None)
+        hide_modules(monkeypatch, "logit_classifier")
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
     with pytest.raises(error, match=message):
@@ -161,10 +161,10 @@ def test_vl_node_names_the_missing_library_for_a_caption_preset_before_the_engin
     def unreached(*args, **kwargs):
         raise AssertionError("refine_image must not run without the library")
 
-    monkeypatch.setitem(sys.modules, "logit_classifier", None)
+    hide_modules(monkeypatch, "logit_classifier")
     monkeypatch.setattr(sampling, "refine_image", unreached)
 
-    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.5\.0"'):
+    with pytest.raises(RuntimeError, match=r'pip install -U "logit-classifier>=0\.6\.0"'):
         _refine_vl(object())
 
 

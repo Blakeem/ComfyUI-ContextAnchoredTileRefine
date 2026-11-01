@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from context_anchored_tile_refine import captions
+
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
 
@@ -336,3 +338,4 @@ def test_requirements_txt_matches_pyproject_dependencies():
     lines = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     required = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
     assert required == declared
+    assert declared == [f"logit-classifier>={captions.LIBRARY_VERSION}"]

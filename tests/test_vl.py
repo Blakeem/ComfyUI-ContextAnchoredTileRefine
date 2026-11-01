@@ -452,6 +452,14 @@ def test_a_crop_budget_of_one_hundred_tokens_is_about_one_hundred_cells(comfy_en
     assert (enc_h // vl.MERGED_CELL) * (enc_w // vl.MERGED_CELL) == 108
 
 
+# vl.py holds its own copy because module scope imports no comfy, so this pins it to core's.
+@pytest.mark.comfy
+def test_the_krea2_template_is_cores(comfy_env):
+    from comfy.text_encoders import krea2
+
+    assert vl.KREA2_TEMPLATE == krea2.KREA2_TEMPLATE
+
+
 # --- through the pipeline: the VL dispatch into the sync engine -----------------------
 # From 1.6.0 a vl_clip sends refine_image to the sync engine (sync.py), mask or no mask, so
 # what is pinned HERE is the dispatch's own preamble — the last thing that runs before the

@@ -50,6 +50,15 @@ def _resolve_comfyui_root():
     return None, trace
 
 
+def hide_modules(monkeypatch, package):
+    """Make `package` and every module under it unimportable, as on an install without it."""
+    # Python imports a cached submodule without looking at its parent, so hiding the package name alone leaves
+    # logit_classifier.toolkit.comfyui reachable.
+    hidden = {package, *(name for name in sys.modules if name.startswith(package + "."))}
+    for name in hidden:
+        monkeypatch.setitem(sys.modules, name, None)
+
+
 @pytest.fixture(autouse=True)
 def empty_caption_cache():
     """Every test starts with an empty caption cache and tag cache, so no test can serve

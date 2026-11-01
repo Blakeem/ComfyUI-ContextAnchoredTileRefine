@@ -21,7 +21,6 @@ import itertools
 import json
 import math
 import statistics
-import sys
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -39,10 +38,28 @@ CLIP_NAME = "qwen3vl_4b_fp8_scaled.safetensors"
 MAX_TILE_WIDTH, MAX_TILE_HEIGHT, CONTEXT_ANCHOR, CONTEXT_OVERLAP = 2048, 1728, 32, 256
 JUDGE_LONG_SIDE = 1536
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ab_caption_timing as timing  # noqa: E402
-
-CYBER_LONG = timing.PROMPTS["long"]
+CYBER_LONG = (
+    "masterpiece, best quality, ultra detailed, 8k, photorealistic, cinematic, "
+    "A breathtaking panoramic view of a sprawling cyberpunk megacity at night, seen from a "
+    "high rooftop vantage point. Dense clusters of towering skyscrapers stretch to the "
+    "horizon, their facades covered in thousands of glowing windows in warm amber and cold "
+    "white. At the center rises a colossal art deco spire, its crown lit in vivid pink and "
+    "electric blue neon, with a thin antenna piercing the clouds. To the right stands a "
+    "second futuristic tower with a glowing purple spine and holographic billboards. "
+    "Enormous storm clouds churn across the sky, lit from below by the city's violet and "
+    "magenta glow, with faint laser beams and flying vehicles streaking between the towers. "
+    "On the left a wide dark river winds through the city, crossed by a long bridge "
+    "strung with golden lights that reflect on the water. Vertical neon signs in red, cyan "
+    "and purple hang from the buildings, some with japanese and chinese characters, and a "
+    "large sign reading CYY glows on a building at the right edge. In the foreground the "
+    "rooftops of older apartment blocks are packed with water tanks, air conditioning "
+    "units, antennas and satellite dishes, and narrow streets below glow with traffic and "
+    "street lamps. Atmosphere: moody, dystopian, rain-soaked, hazy, volumetric fog, light "
+    "bloom, lens flare, deep shadows, high contrast, teal and magenta color palette, "
+    "wide angle lens, 24mm, long exposure, sharp focus, intricate details, trending on "
+    "artstation, octane render, unreal engine 5, blade runner style, ghost in the shell "
+    "vibes, award winning photography"
+)
 
 HANGAR_LONG = (
     "masterpiece, best quality, ultra detailed 8k concept art, hyperrealistic, cinematic. "

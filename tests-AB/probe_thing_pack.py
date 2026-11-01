@@ -1,4 +1,4 @@
-"""Probe: does packing move the thing check's p(thing) enough to flip at THING_THRESHOLD, and what does
+"""Probe: does packing move the thing check's p(thing) enough to flip at the thing threshold, and what does
 an unpacked check cost? Replays each recorded run's candidate order (prompt tags first, then each
 tile's new tags as one pack) against one tag per request."""
 import argparse
@@ -73,9 +73,9 @@ def main(argv=None):
                 for tag, p in thing_cache.items():
                     q = alone[tag]
                     deltas.append(abs(p - q))
-                    if (p >= tags.THING_THRESHOLD) != (q >= tags.THING_THRESHOLD):
+                    if (p >= settings.thing_threshold) != (q >= settings.thing_threshold):
                         flips.append((scene, prompt, tag, p, q))
-                    if abs(q - tags.THING_THRESHOLD) < 0.01:
+                    if abs(q - settings.thing_threshold) < 0.01:
                         near += 1
                 print(f"{scene}/{prompt}: {len(thing_cache)} tags, max delta so far {max(deltas):.2e}", flush=True)
     deltas.sort()

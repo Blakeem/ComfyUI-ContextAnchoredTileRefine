@@ -8,11 +8,13 @@ fail-fast guard. A duck-typed clip stands in for the VL text encoder; no comfy i
 no model are needed.
 """
 import dataclasses
+import re
 import sys
 import types
 
 import pytest
 import torch
+from logit_classifier import VisionUnsupportedError
 from test_vl import Tile, VLGuider, layout_tiles, strip_tiles, sync_sampler
 
 from context_anchored_tile_refine import captions, grid, sampling, vl
@@ -49,6 +51,16 @@ def a_preset(tile="describe", tile_tokens=256, style="", style_tokens=128,
         global_style_instruction=style, global_style_max_tokens=style_tokens)
 
 
+def chat(instruction):
+    """The chat text the toolkit's describe_image tokenizes for instruction with its image."""
+    return captions.comfy_toolkit().chat(instruction, image=True)
+
+
+def unchat(text):
+    head, tail = chat("{instruction}").split("{instruction}")
+    return text[len(head):-len(tail)] if text.startswith(head) and text.endswith(tail) else text
+
+
 class FakeCaptionClip:
     """Duck-typed VL clip with a text generator.
 
@@ -77,9 +89,11 @@ class FakeCaptionClip:
         self.encoded = []
         self._answers = {}
 
-    def tokenize(self, text, images=None, llama_template=None, thinking=None):
+    def tokenize(self, text, images=None, **kwargs):
         image = None if images is None else images[0]
-        self.tokenize_calls.append({"text": text, "image": image, "llama_template": llama_template, "thinking": thinking})
+        self.tokenize_calls.append({"text": text, "image": image, "llama_template": None, **kwargs})
+        # A caption request arrives chat-wrapped, and the answer and the tail count read the instruction alone.
+        text = unchat(text)
         body = text[len(vl.VISION_BLOCK):] if text.startswith(vl.VISION_BLOCK) else text
         tail_rows = self.tail_len + len(body.split())
         stream = [(10, 1.0)] * 5
@@ -844,7 +858,7 @@ def test_the_settings_file_reaches_the_registry_archive():
     assert captions.EXAMPLE_SETTINGS_NAME not in excluded
 
 
-# --- strip_thinking / clean_caption ---------------------------------------------------
+# --- the toolkit's strip_thinking / clean_caption, which every caption passes ----------
 
 @pytest.mark.parametrize("raw,expected", [
     ("plain answer", "plain answer"),
@@ -854,9 +868,9 @@ def test_the_settings_file_reaches_the_registry_archive():
     # A stray close with no open (the model reopened mid-answer). Everything before the LAST
     # close is reasoning, so only what follows it is the answer.
     ("<think>one</think>middle</think>the answer", "the answer"),
-    # Unbalanced open with no close at all. With thinking=True there is no answer in the
-    # string, only a reasoning turn that ran out of budget, so "" is the honest result and it
-    # is what makes generate_caption's fallback chain fire. Core's own rule, and returning the
+    # Unbalanced open with no close at all. There is no answer in the string, only a reasoning
+    # turn that ran out of budget, so "" is the honest result and it is what makes
+    # describe_image's fallback chain fire. Core's own rule, and returning the
     # reasoning instead would send it to the DiT as the tile's prompt.
     ("<think>never closed", ""),
     ("<think>reasoning that ran out of tok", ""),
@@ -864,12 +878,12 @@ def test_the_settings_file_reaches_the_registry_archive():
 def test_strip_thinking(raw, expected):
     # Mandatory, not cosmetic: the caption is encoded as text, so an unstripped block reaches
     # the DiT as hundreds of tokens of the model talking to itself.
-    assert captions.strip_thinking(raw) == expected
+    assert captions.comfy_toolkit().strip_thinking(raw) == expected
 
 
 def test_clean_caption_returns_the_original_string_when_nothing_is_removed():
     text = "**bold** opener\nsecond line\nthird line"
-    assert captions.clean_caption(text) is text
+    assert captions.comfy_toolkit().clean_caption(text) is text
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -878,7 +892,7 @@ def test_clean_caption_returns_the_original_string_when_nothing_is_removed():
     ("a tree, left\na tree, left.\na cart, right", "a tree, left\na cart, right"),
 ])
 def test_clean_caption_cuts_headings_meta_and_exact_repeats(raw, expected):
-    assert captions.clean_caption(raw) == expected
+    assert captions.comfy_toolkit().clean_caption(raw) == expected
 
 
 # --- resample_for_vl ------------------------------------------------------------------
@@ -900,9 +914,14 @@ def test_resample_for_vl_uses_a_384_budget_copy_not_the_tile(comfy_stubs):
     assert vl_input.shape != tile_pixels.shape
 
 
+def test_resample_for_vl_rejects_a_budget_below_one_pixel(comfy_stubs):
+    with pytest.raises(ValueError, match="pixels=0"):
+        captions.resample_for_vl(torch.rand(1, 16, 16, 3), 0)
+
+
 # --- generate_caption -----------------------------------------------------------------
 
-def test_generate_caption_asks_with_thinking_and_strips_the_reasoning():
+def test_generate_caption_asks_in_the_chat_template_and_strips_the_reasoning():
     clip = FakeCaptionClip(answer=lambda image, instruction: "<think>hmm</think>a fox, centre")
 
     text = captions.generate_caption(clip, torch.zeros(1, 8, 8, 3),
@@ -910,8 +929,8 @@ def test_generate_caption_asks_with_thinking_and_strips_the_reasoning():
 
     assert text == "a fox, centre"
     call = clip.tokenize_calls[0]
-    assert call["text"] == captions.SETTLED_POSITION_INSTRUCTION
-    assert call["thinking"] is True
+    assert call["text"] == chat(captions.SETTLED_POSITION_INSTRUCTION)
+    assert "thinking" not in call
     assert clip.generate_calls == [{
         "text": captions.SETTLED_POSITION_INSTRUCTION,
         "image": call["image"],
@@ -935,8 +954,8 @@ def test_generate_caption_falls_back_through_sampling_then_a_simpler_question():
     assert text == "a wall of tools"
     assert [c["do_sample"] for c in clip.generate_calls] == [False, True, False]
     assert clip.generate_calls[1]["seed"] == 42
-    assert clip.tokenize_calls[-1]["text"] == "Write one short sentence describing this image."
-    assert clip.tokenize_calls[-1]["thinking"] is False
+    assert clip.tokenize_calls[-1]["text"] == chat("Write one short sentence describing this image.")
+    assert all("thinking" not in call for call in clip.tokenize_calls)
 
 
 def test_generate_caption_drops_the_decode_graphs_after_every_generate(comfy_stubs, monkeypatch):
@@ -952,9 +971,12 @@ def test_generate_caption_drops_the_decode_graphs_after_every_generate(comfy_stu
     assert cleanups == [1, 2]
 
 
+EMPTY_AFTER_FALLBACKS = "Context-Anchored Tile Refine (VL): the caption came back empty after every fallback."
+
+
 def test_generate_caption_raises_when_every_fallback_is_empty():
     clip = FakeCaptionClip(answer=lambda image, instruction: "")
-    with pytest.raises(RuntimeError, match="empty answer after every fallback"):
+    with pytest.raises(RuntimeError, match=f"^{re.escape(EMPTY_AFTER_FALLBACKS)}$"):
         captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
 
 
@@ -972,7 +994,7 @@ def test_generate_caption_retries_an_answer_that_cleans_to_empty():
 
 def test_generate_caption_raises_when_every_fallback_cleans_to_empty():
     clip = FakeCaptionClip(answer=lambda image, instruction: "**Answer:**")
-    with pytest.raises(RuntimeError, match="empty answer after every fallback"):
+    with pytest.raises(RuntimeError, match=f"^{re.escape(EMPTY_AFTER_FALLBACKS)}$"):
         captions.generate_caption(clip, torch.zeros(1, 8, 8, 3), "describe", 256)
     assert len(clip.generate_calls) == 3
 
@@ -982,8 +1004,15 @@ def test_generate_caption_rejects_a_clip_that_cannot_generate():
         def tokenize(self, text, images=None, **kwargs):
             return {"l": [[(1, 1.0)]]}
 
-    with pytest.raises(RuntimeError, match="cannot generate text"):
+    cannot_generate = ("Context-Anchored Tile Refine (VL): this CLIP cannot generate text. Load a Qwen3-VL text "
+                       "encoder with a Load CLIP type that keeps its vision tower, such as krea2.")
+    with pytest.raises(RuntimeError, match=f"^{re.escape(cannot_generate)}$"):
         captions.generate_caption(NoGeneratorClip(), torch.zeros(1, 8, 8, 3), "describe", 256)
+
+
+NO_IMAGE_TOKENIZER = (
+    "Context-Anchored Tile Refine (VL): this CLIP's tokenizer does not read images, so it cannot generate from one. "
+    "Load a Qwen3-VL text encoder with a Load CLIP type that keeps its vision tower, such as krea2.")
 
 
 def test_generate_caption_rejects_a_tokenizer_that_refuses_images():
@@ -991,16 +1020,16 @@ def test_generate_caption_rejects_a_tokenizer_that_refuses_images():
         def tokenize(self, text):
             return {"l": [[(1, 1.0)]]}
 
-    with pytest.raises(RuntimeError, match="does not accept images"):
+    with pytest.raises(VisionUnsupportedError, match=f"^{re.escape(NO_IMAGE_TOKENIZER)}$"):
         captions.generate_caption(StrictSignatureClip(), torch.zeros(1, 8, 8, 3), "describe", 256)
 
 
 def test_generate_caption_rejects_a_clip_without_image_tokens():
     class NoImageTokenClip(FakeCaptionClip):
         def tokenize(self, text, images=None, **kwargs):
-            return {"qwen3vl_4b": [[(10, 1.0)] * 8], "_probe": (text, None, 4)}
+            return {"qwen3vl_4b": [[(10, 1.0)] * 8]}
 
-    with pytest.raises(RuntimeError, match="no image tokens"):
+    with pytest.raises(VisionUnsupportedError, match=f"^{re.escape(NO_IMAGE_TOKENIZER)}$"):
         captions.generate_caption(NoImageTokenClip(), torch.zeros(1, 8, 8, 3), "describe", 256)
 
 
@@ -1233,7 +1262,7 @@ def test_a_style_instruction_captions_the_style_source_first_and_prepends_it(com
 
     assert out == [["oil on canvas\na fox"], ["oil on canvas\na fox"]]
     first = clip.tokenize_calls[0]
-    assert first["text"] == "style q"
+    assert first["text"] == chat("style q")
     assert torch.equal(first["image"], style_source)
     assert clip.generate_calls[0]["max_length"] == 128
     assert clip.generate_calls[1]["max_length"] == 256
@@ -1276,6 +1305,30 @@ def test_the_style_caption_is_cleaned_like_any_other(comfy_stubs, monkeypatch):
                                           [Tile(Rect(0, 0, 16, 16))], a_preset(style="style q"))
 
     assert out == [["watercolour\na fox"]]
+
+
+def test_the_style_caption_is_the_toolkits_style_line(comfy_stubs):
+    # The pack composes its style caption from the toolkit's stages, so it must stay byte-equal
+    # to the toolkit's own composition at the preset's wording, budget and caption size.
+    toolkit = captions.comfy_toolkit()
+    preset = a_preset(style="style q", style_tokens=96, caption_mp=0.01)
+    row = torch.rand(1, 40, 60, 3)
+    pack_clip = FakeCaptionClip(answer=lambda image, instruction: "**Answer:**\nwatercolour\nwatercolour.")
+    toolkit_clip = FakeCaptionClip(answer=lambda image, instruction: "**Answer:**\nwatercolour\nwatercolour.")
+    settings = toolkit.StyleSettings(
+        image_instruction=preset.global_style_instruction, image_max_tokens=preset.global_style_max_tokens,
+        image_pixels=captions.caption_budget_pixels(preset.vision.caption_megapixels, row))
+
+    pack = captions.style_caption(pack_clip, row, preset, ("style", 0, 0))
+    expected = toolkit.style_line(toolkit_clip, row, settings=settings, node="Context-Anchored Tile Refine (VL)")
+
+    assert pack == expected == "watercolour"
+    assert [call["text"] for call in pack_clip.tokenize_calls] == [
+        call["text"] for call in toolkit_clip.tokenize_calls]
+    assert [tuple(call["image"].shape) for call in pack_clip.tokenize_calls] == [
+        tuple(call["image"].shape) for call in toolkit_clip.tokenize_calls]
+    assert [{k: v for k, v in call.items() if k != "image"} for call in pack_clip.generate_calls] == [
+        {k: v for k, v in call.items() if k != "image"} for call in toolkit_clip.generate_calls]
 
 
 def test_the_style_caption_counts_as_the_segments_first_chunk(comfy_stubs):
@@ -1614,9 +1667,11 @@ def test_each_caption_method_reaches_the_vlm_with_its_presets_wording(comfy_stub
         assert style_call["max_length"] == preset.global_style_max_tokens
     assert {call["text"] for call in tile_calls} == {preset.tile_caption_instruction}
     assert {call["max_length"] for call in tile_calls} == {preset.tile_caption_max_tokens}
-    # Every caption is generated with the reasoning turn on, which strip_thinking then cuts.
+    # Every caption is asked in the toolkit's chat template, with no thinking keyword.
     asked = len(pipeline_clip.generate_calls)
-    assert all(call["thinking"] is True for call in pipeline_clip.tokenize_calls[:asked])
+    assert [call["text"] for call in pipeline_clip.tokenize_calls[:asked]] == [
+        chat(call["text"]) for call in pipeline_clip.generate_calls]
+    assert all("thinking" not in call for call in pipeline_clip.tokenize_calls)
 
 
 def test_captions_only_gives_each_tile_a_text_only_positive(comfy_stubs, pipeline_clip, style_off):

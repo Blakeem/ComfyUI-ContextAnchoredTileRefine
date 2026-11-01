@@ -1,8 +1,8 @@
 """Per-tile tag text: the tile text a tags preset writes in place of a caption.
 
 Two entry points run one pass. `generate_tag_trace` returns every stage's result as a
-`TagRun`: the style line per picture row, the prompt tags as a `PromptTrace` and a
-`TileTrace` per tile row, so a test node can show what each stage did. `generate_tag_set` is
+`TagRun`: the style line per picture row, the prompt tags as the toolkit's `PromptTagTrace` and
+a `TileTrace` per tile row, so a test node can show what each stage did. `generate_tag_set` is
 the engine's, and reads only the texts from that run, as `(style_texts, tile_texts)` in the
 shape `captions.generate_caption_set` returns, so the encode stage reads either one. The stages:
 
@@ -14,78 +14,30 @@ shape `captions.generate_caption_set` returns, so the encode stage reads either 
                    style line alone. The prompt reaches no tile question, so a long prompt
                    never lengthens a tile's reply.
     per tile row   the toolkit's tag_image on a 1 MP copy of the crop: propose (stopped
-                   after MAX_PROPOSED_TAGS tags, asked once more with the fallback question
-                   when the reply names only category nouns), merge (the model's tags first,
-                   then the prompt tags, category nouns and repeats dropped), thing check,
-                   verify (the model's tags at the verification threshold and a prompt tag the
-                   model did not list at the prompt tags threshold) and clean (drop_subsets).
-                   Then this module's locate (the verification statement on three horizontal
-                   and three vertical strips of the full-resolution crop, a tag present on no
-                   strip dropped) and render ("<item> <term>"). An empty verification
-                   statement skips verify and locate and keeps every candidate.
+                   after the settings' propose_cap tags, asked once more with the fallback
+                   question when the reply names only category nouns), merge (the model's tags
+                   first, then the prompt tags, category nouns and repeats dropped), thing
+                   check, verify (the model's tags at the verification threshold and a prompt
+                   tag the model did not list at the prompt tags threshold) and clean
+                   (drop_subsets). Then the toolkit's locate_tags (the verification statement
+                   on its strip_boxes, three horizontal and three vertical strips of the
+                   full-resolution crop, a tag present on no strip dropped) and render_placed
+                   ("<item> <term>"). An empty verification statement skips verify and locate
+                   and keeps every candidate.
 
-`tag_settings` hands the toolkit this pack's values. Every constant below was measured in the
-Logit Tagger's harnesses or in tests-AB, the later ones in tests-AB/ab_tags_bench.py (log:
-tests-AB/tags-bench-log.md). Module scope is torch and stdlib only. comfy and
-logit_classifier are imported inside functions, so a missing library fails with its pip command
-(a subprocess test pins the comfy half).
+`tag_settings` hands the toolkit this pack's wordings and thresholds, and the toolkit's
+defaults hold every other value, measured in the Logit Tagger's harnesses and in tests-AB
+(tests-AB/ab_tags_bench.py, log: tests-AB/tags-bench-log.md). Module scope is torch and stdlib
+only. comfy and logit_classifier are imported inside functions, so a missing library fails
+with its pip command (a subprocess test pins the comfy half).
 """
 from dataclasses import dataclass
 
 from . import captions
-from .grid import Rect
 
 # Core only resizes a VL image above 12.8 MP. The Logit Tagger's tests-AB/ab_tagger.py fit a
 # 42 candidate verify pass beside a 1 MP picture, and tests-AB/ab_tile_tags.py ran at 1 MP.
 VL_MAX_PIXELS = 1024 * 1024
-
-# In the Logit Tagger's tests-AB/ab_propose_budget.py both images that reached 128 were
-# repeating tags, and 192 added no tag on nine images.
-PROPOSE_MAX_TOKENS = 128
-
-# Caps of 40 proposed and 80 merged tags added 0.87 correct and 0.10 wrong or vague tags per tile (ab_tags_fp8_arms.py
-# fp8-cap40, tags-bench-log.md section 12). 25 stays, since the owner ranks fewer wrong tags above more correct tags.
-MAX_PROPOSED_TAGS = 25
-
-# The model's 25 and a long prompt's tags in one packed verify pass beside a 1 MP picture. Model tags come first, so
-# prompt tags never push a model tag out.
-MAX_MERGED_TAGS = 64
-
-# tests-AB/ab_tile_tags.py on market: the propose instruction's own nouns came back as tags
-# and passed verify.
-CATEGORY_NOUNS = frozenset({"objects", "people", "animals", "clothing", "materials", "setting"})
-
-# Strips at 0.5 MP gave 303 judged position terms against 338, with 3 wrong in each
-# (tests-AB/ab_tags_fp8_arms.py arm fp8-strip05, tests-AB/tags-bench-log.md section 12).
-STRIP_MEGAPIXELS = 0.25
-
-ROW_WORDS = ("top", "center", "bottom")
-COLUMN_WORDS = ("left", "center", "right")
-
-# A long prompt names far more things than a tile shows, so its listing gets twice the propose budget.
-PROMPT_TAGS_MAX_TOKENS = 256
-
-# Past the prompt's own things the model pads the list with words the prompt lacks
-# ("materials", "details"), so two such tags in a row end it.
-UNGROUNDED_STREAK = 2
-
-# The thing check: one text-only choice per tag string. It drops whole-scene and setting words
-# ("cityscape", "urban environment"), lighting, color and quality words, which no threshold on
-# the verify score separates from real things. This wording counts landscape features, groups
-# and light sources as things, which an earlier one dropped ("red moon", "army of soldiers").
-THING_QUESTION = 'What does the image tag "{TAG}" name'
-THING_CRITERIA = {
-    "thing": "something that could be pointed at in a picture: an object, a person, a group of people "
-             "or animals, an animal, a plant, a body part, a garment, a material, a building, a "
-             "landscape feature such as hills, cliffs, sky, the moon or stars, a light source such as "
-             "lamps, signs or lit windows, or a substance such as water, smoke, fire, clouds or rain",
-    "other": "nothing to point at: a kind of place or a whole scene, a time of day, a color alone, a "
-             "shape or form, lighting in general, a camera or render effect, a style, a mood, a "
-             "quality or an idea",
-}
-# Mid scores mix real things with non-things ("chinese characters" 0.55, "huge" 0.57), so only a
-# p("thing") below 0.1 drops a tag.
-THING_THRESHOLD = 0.1
 
 
 def check_tags_ready(clip):
@@ -102,8 +54,9 @@ def build_classifier(clip):
 
 
 def tag_settings(preset):
-    """The toolkit's TagSettings for a tags preset: its wordings and thresholds, this module's
-    budgets, caps and thing check, and the toolkit's language gate and echo fallback."""
+    """The toolkit's TagSettings for a tags preset: its wordings, its thresholds and candidate
+    order. Every other value is the toolkit's default, so a library upgrade that moves one fails
+    tests/test_tags.py rather than changing tile texts unseen."""
     from logit_classifier.toolkit.comfyui import TagSettings
     from logit_classifier.toolkit.tags import PresenceThresholds
 
@@ -115,108 +68,15 @@ def tag_settings(preset):
         verify_statement=preset.tile_tags_verification_statement,
         verify_thresholds=PresenceThresholds(proposed=preset.tile_tags_verification_threshold,
                                              declared=preset.prompt_tags_verification_threshold),
-        propose_cap=MAX_PROPOSED_TAGS,
-        merge_cap=MAX_MERGED_TAGS,
-        category_nouns=CATEGORY_NOUNS,
-        propose_max_tokens=PROPOSE_MAX_TOKENS,
-        prompt_tags_max_tokens=PROMPT_TAGS_MAX_TOKENS,
-        ungrounded_streak=UNGROUNDED_STREAK,
-        thing_question=THING_QUESTION,
-        thing_criteria=tuple(THING_CRITERIA.items()),
-        thing_threshold=THING_THRESHOLD,
-        thing_check="all",
-        # The head-noun rule kept "stone" beside "stone walls" and "castle" beside "stone castle
-        # tower", 0.03 wrong or vague tags per tile (tests-AB/tags-bench-log.md, section 12).
-        subsets_rule="words",
+        # This pack's tags bench judged tile texts in candidate order. The toolkit's score order is the
+        # Logit Tagger's measurement, and the bench has not run it.
         order="candidate",
     )
-
-
-def _statements(items, statement):
-    # The strips must read the statement the toolkit's verify read, so both fill it one way.
-    from logit_classifier.toolkit.tags import presence_statement
-
-    return [presence_statement(item, wording=statement) for item in items]
 
 
 def prompt_tags_question(preset, text):
     """prompt_tags_instruction with `text`, the prompt's English text, in place of its placeholder."""
     return preset.prompt_tags_instruction.replace(captions.PROMPT_PLACEHOLDER, text)
-
-
-def strip_rects(height, width):
-    """The top, center and bottom thirds at full width, then the left, center and right thirds
-    at full height, in crop pixels."""
-    rows = [height * i // 3 for i in range(4)]
-    columns = [width * i // 3 for i in range(4)]
-    return (*(Rect(0, rows[i], width, rows[i + 1]) for i in range(3)),
-            *(Rect(columns[i], 0, columns[i + 1], height) for i in range(3)))
-
-
-def axis_word(probabilities, words, threshold):
-    """The word of the one strip on this axis that holds the item, or None when no strip or
-    more than one does.
-
-    Two adjacent strips named the center or the side by a coin flip, and a term covering part
-    of a spread tag points the diffusion model at the wrong place."""
-    present = [index for index, p in enumerate(probabilities) if p >= threshold]
-    if len(present) != 1:
-        return None
-    return words[present[0]]
-
-
-def position_term(row, column):
-    """"<row>-<column>", or one word when an axis names nothing or the column is the center."""
-    if row is None or column is None:
-        return row or column or ""
-    if column == "center":
-        return row
-    return f"{row}-{column}"
-
-
-def strip_scores(classifier, crop, items, statement):
-    """Per item the verify p on each strip of `crop` in `strip_rects` order, from one packed
-    verify request per strip."""
-    budget = round(STRIP_MEGAPIXELS * 1_000_000)
-    statements = _statements(items, statement)
-    per_strip = []
-    for rect in strip_rects(int(crop.shape[1]), int(crop.shape[2])):
-        strip = captions.resample_for_vl(crop[:, rect.y0:rect.y1, rect.x0:rect.x1, :], budget)
-        per_strip.append(classifier.nouls(statements, image=strip))
-    return tuple(tuple(p[index] for p in per_strip) for index in range(len(items)))
-
-
-def strip_term(strips, threshold):
-    """The position term of one item's six strip probabilities."""
-    return position_term(axis_word(strips[:3], ROW_WORDS, threshold),
-                         axis_word(strips[3:], COLUMN_WORDS, threshold))
-
-
-def on_no_strip(strips, threshold):
-    """Whether no strip holds the item. The entire tile's score can pass a tag that no part of
-    the tile shows, and on the owner's storm sky tile every such tag named something the tile
-    lacks."""
-    return max(strips) < threshold
-
-
-def render_tags(items, terms):
-    """"<item> <term>" per item, or the item alone without a term, joined by ", "."""
-    return ", ".join(f"{item} {term}" if term else item for item, term in zip(items, terms, strict=True))
-
-
-@dataclass(frozen=True)
-class PromptTrace:
-    """The prompt tags of one picture. `text` is the English text the listing read, the prompt
-    or its translation. `reply` is the VL model's list as written, cut back to its last whole tag
-    when it fills the budget, `listed` its tags whose every word is a word of `text`, `p_thing`
-    each listed tag's thing check score, and `tags` the listed tags the thing check keeps, which
-    join every tile's candidates."""
-
-    text: str
-    reply: str
-    listed: tuple
-    p_thing: tuple
-    tags: tuple
 
 
 @dataclass(frozen=True)
@@ -225,9 +85,9 @@ class TileTrace:
     category nouns and the fallback question's reply replaced it, else None. `origins` names
     where each candidate came from and `dropped` what the merge and the thing check left out and
     why. `scores` holds None per candidate when verify is off. `strips` holds per kept item its
-    six strip probabilities in `strip_rects` order, and `unplaced` the kept items no strip holds,
-    which the text leaves out. With locate off every `strips` entry is (), every term "" and
-    `unplaced` empty."""
+    six strip probabilities in the toolkit's `strip_boxes` order, and `unplaced` the kept items no
+    strip holds, which the text leaves out. With locate off every `strips` entry is (), every
+    term "" and `unplaced` empty."""
 
     reply: str
     echo_reply: str | None
@@ -247,40 +107,39 @@ class TileTrace:
 def trace_tile(clip, classifier, crop, image, preset, prompt_tags, thing_cache, locate=True):
     """Every stage of one tile row: the toolkit's tag_image on `image` (propose, merge with
     `prompt_tags`, the thing check with answers shared through `thing_cache`, verify and
-    clean), then locate on the full-resolution `crop` unless `locate` is off. An empty
-    verification statement skips verify and locate, so every candidate is kept."""
-    from logit_classifier.toolkit.comfyui import tag_image
-
+    clean), then the toolkit's locate_tags on the full-resolution `crop` unless `locate` is
+    off. An empty verification statement skips verify and locate, so every candidate is kept."""
+    toolkit = captions.comfy_toolkit()
     statement = preset.tile_tags_verification_statement
-    position_threshold = preset.tile_tags_position_threshold
-    trace = tag_image(clip, classifier, image, prompt_tags=prompt_tags, settings=tag_settings(preset),
-                      thing_cache=thing_cache)
+    trace = toolkit.tag_image(clip, classifier, image, prompt_tags=prompt_tags, settings=tag_settings(preset),
+                              thing_cache=thing_cache)
     kept = trace.kept
     strips = ((),) * len(kept)
     terms = ("",) * len(kept)
     unplaced = ()
+    placed = tuple((item, "") for item in kept)
 
+    # presence_statement raises on an empty statement, so an unverified tile is never located.
     if statement and locate and kept:
-        strips = strip_scores(classifier, crop, kept, statement)
-        terms = tuple(strip_term(p, position_threshold) for p in strips)
-        unplaced = tuple(item for item, p in zip(kept, strips, strict=True)
-                         if on_no_strip(p, position_threshold))
-    placed = [(item, term) for item, term in zip(kept, terms, strict=True) if item not in unplaced]
+        places = toolkit.locate_tags(classifier, crop, kept, statement=statement,
+                                     threshold=preset.tile_tags_position_threshold)
+        strips, terms, unplaced, placed = places.strips, places.terms, places.unplaced, places.placed
     return TileTrace(reply=trace.reply, echo_reply=trace.echo_reply, proposed=trace.proposed,
                      candidates=trace.candidates,
                      origins=trace.origins, dropped=trace.dropped, scores=trace.scores,
                      verified=trace.verified, kept=kept, strips=strips, terms=terms, unplaced=unplaced,
-                     text=render_tags([item for item, _ in placed], [term for _, term in placed]))
+                     text=toolkit.render_placed(placed))
 
 
 @dataclass(frozen=True)
 class TagRun:
     """Every stage of one tags pass. `style_texts` is the style line per batch row, "" for
     none, `prompt` is the prompt tags or None when the prompt is blank or
-    `prompt_tags_instruction` is empty, and `tiles[tile_index][batch_row]` is a TileTrace."""
+    `prompt_tags_instruction` is empty, and `tiles[tile_index][batch_row]` is a TileTrace.
+    `prompt` is the toolkit's PromptTagTrace, which module scope cannot import."""
 
     style_texts: tuple
-    prompt: PromptTrace | None
+    prompt: object
     tiles: tuple
 
 
@@ -300,8 +159,8 @@ def _tag_cache_key(image, preset, scope):
     # The settings object holds every value a toolkit stage reads, so a changed value never
     # serves text written under the old one. An image of None keys a text-only request.
     digest = () if image is None else captions.picture_digest(image)
-    return (digest, tag_settings(preset), VL_MAX_PIXELS, STRIP_MEGAPIXELS, ROW_WORDS, COLUMN_WORDS,
-            preset.tile_tags_position_threshold, preset.global_style_instruction, preset.prompt, scope)
+    return (digest, tag_settings(preset), VL_MAX_PIXELS, preset.tile_tags_position_threshold,
+            preset.global_style_instruction, preset.prompt, scope)
 
 
 def _cached(key, clip, compute):
@@ -314,11 +173,7 @@ def _cached(key, clip, compute):
 
 
 def _prompt_trace(clip, classifier, preset, thing_cache):
-    from logit_classifier.toolkit.comfyui import tag_prompt
-
-    listing = tag_prompt(clip, classifier, preset.prompt, tag_settings(preset), thing_cache)
-    return PromptTrace(text=listing.text, reply=listing.reply, listed=listing.listed,
-                       p_thing=listing.p_thing, tags=listing.tags)
+    return captions.comfy_toolkit().tag_prompt(clip, classifier, preset.prompt, tag_settings(preset), thing_cache)
 
 
 def generate_tag_trace(clip, source, tiles, preset, batch_size=1, batch_index=0, progress=None,

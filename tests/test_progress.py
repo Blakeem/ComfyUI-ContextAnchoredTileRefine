@@ -28,9 +28,9 @@ NODE_ID = "7"
 
 
 def scaled(units):
-    # progress.py carries fractional budgets and comfy's bar carries integers; this is the
-    # one conversion, spelled out here so every expectation below is in budget units.
-    return round(units * progress.EMIT_SCALE)
+    # progress.py carries fractional budgets and comfy's bar carries integers at the toolkit
+    # NodeBar's default scale of 100, spelled out so every expectation below is in budget units.
+    return round(units * 100)
 
 
 def named_sampler(name):
@@ -198,14 +198,34 @@ def test_finish_lands_the_value_exactly_on_the_total(comfy_stubs):
 # ---- the caption mapping ----------------------------------------------------
 
 
-def test_caption_fill_maps_mid_fill_then_holds_at_the_boundary():
+def test_a_caption_token_maps_at_the_greedy_ratio_then_holds_at_the_boundary(comfy_stubs):
     # Greedy decode stops at roughly 50-75% of max_length, so the token bar is mapped against
-    # CAPTION_FILL_RATIO of it, not against the whole cap.
-    assert progress.caption_fill(65, 200) == pytest.approx(0.5)
-    assert progress.caption_fill(130, 200) == pytest.approx(1.0)
-    assert progress.caption_fill(190, 200) == 1.0        # HOLDS, never past the chunk
-    assert progress.caption_fill(0, 200) == 0.0
-    assert progress.caption_fill(5, 0) == 1.0            # a degenerate cap is "done"
+    # the toolkit's GREEDY_FILL_RATIO of it, not against the entire cap.
+    ledger = progress.Ledger(((progress.CAPTIONS, 24.0),))
+    ledger.open(progress.CAPTIONS, 24.0)
+
+    ledger.route(0, 200)
+    assert ledger.value == scaled(0.0)
+    ledger.route(65, 200)
+    assert ledger.value == scaled(12.0)
+    ledger.route(130, 200)
+    assert ledger.value == scaled(24.0)
+    ledger.route(190, 200)
+    assert ledger.value == scaled(24.0)                  # HOLDS, never past the chunk
+
+
+def test_a_routed_caption_token_update_makes_no_toolkit_lookup(comfy_stubs, monkeypatch):
+    # The ledger holds the gated toolkit from __init__, so a per-token update never re-runs the gate.
+    calls = []
+    ledger = progress.Ledger(((progress.CAPTIONS, 24.0),))
+    ledger.open(progress.CAPTIONS, 24.0, chunks=2)
+    monkeypatch.setattr(captions, "comfy_toolkit", lambda: calls.append("comfy_toolkit"))
+
+    with ledger:
+        inner_bar(200).update_absolute(65)
+
+    assert calls == []
+    assert ledger.value == scaled(6.0)
 
 
 def test_a_caption_chunk_snaps_to_its_boundary_on_completion(comfy_stubs):
